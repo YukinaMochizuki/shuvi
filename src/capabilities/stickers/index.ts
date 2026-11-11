@@ -27,9 +27,12 @@ import { renderContactSheet } from "./sheet.ts";
  *   - a server loop that keeps the index in step with home/stickers/*.yaml (library.ts) and fetches what
  *     Telegram knows about each pack (fetch.ts), since only the server has the bot token.
  *
- * The library and preferences.md are written with memory's `edit_home` (owner-only; both are on its
- * allow-list, memory/home.ts), never by this capability: `add_sticker_pack` only returns the contact sheet
- * and a skeleton. The index notices any change to the files by itself, whoever made it.
+ * The library and preferences.md are written with memory's `write_home` (a new file) and `edit_home` (a
+ * change to an existing one; owner-only; both are on its allow-list, memory/home.ts). A file that already
+ * exists is read with `read_home` first: write_home refuses to overwrite a file not read in this turn, and
+ * `add_sticker_pack` says so rather than share that turn state. Never written by this capability:
+ * `add_sticker_pack` only returns the contact sheet and a skeleton. The index notices any change to the
+ * files by itself, whoever made it.
  *
  * `sticker` queues a `bot_sticker` row; the sender delivers it with `sendSticker`. The mechanical rules it
  * enforces are in rules.ts, the ranking in find.ts, the contact sheet in sheet.ts.
@@ -140,7 +143,7 @@ export const stickers = defineCapability<StickersConfig>({
     const add: ToolDef<{ name: string }> = {
       name: "add_sticker_pack",
       description:
-        "Learn a sticker pack, when the owner asks. Give the pack's Telegram set `name` (e.g. from a sticker someone sent): returns a numbered contact sheet of every sticker and a YAML skeleton for stickers/<name>.yaml (what the current file says is carried over). Look at the sheet; fill in each sticker's desc (what it shows: a fact) and use (when to send it); set the pack's role (avatar / common / meme) and any tier (go-to / rare / never); leave stickers you cannot place without desc. Then save the whole file with `edit_home` (path stickers/<name>.yaml). Only the owner can have this done.",
+        "Learn a sticker pack, when the owner asks. Give the pack's Telegram set `name` (e.g. from a sticker someone sent): returns a numbered contact sheet of every sticker and a YAML skeleton for stickers/<name>.yaml (what the current file says is carried over). Look at the sheet; fill in each sticker's desc (what it shows: a fact) and use (when to send it); set the pack's role (avatar / common / meme) and any tier (go-to / rare / never); leave stickers you cannot place without desc. Then save it: a new pack's file with `write_home` (path stickers/<name>.yaml); when the file already exists, read it with `read_home` first, then change it with `edit_home` (or rewrite it whole with `write_home`). Only the owner can have this done.",
       inputSchema: { name: z.string().describe("The sticker set's name") },
       async handler({ name }) {
         if (!PACK_NAME.test(name)) return err(`"${name}" is not a sticker set name (letters, digits and _ only).`);
@@ -154,9 +157,10 @@ export const stickers = defineCapability<StickersConfig>({
         const metas = setStickers(db, name);
         const pages = await renderContactSheet(metas.map((m) => ({ n: m.position, path: m.path })), dataDir);
         const file = join(stickersDir(home), packFileName(name));
+        const exists = existsSync(file);
         let existing: PackFile | undefined;
         try {
-          existing = existsSync(file) ? parsePack(readFileSync(file, "utf8")) : undefined;
+          existing = exists ? parsePack(readFileSync(file, "utf8")) : undefined;
         } catch {}
         const skeleton = packSkeleton(name, existing?.role ?? "common", metas.map((m) => ({ n: m.position, fileUniqueId: m.fileUniqueId, emoji: m.emoji })), existing, got.title);
         const missing = metas.filter((m) => !m.path).map((m) => m.position);
@@ -170,7 +174,7 @@ export const stickers = defineCapability<StickersConfig>({
           content.push({ type: "text", text: `Sheet ${i + 1}/${pages.length}: ${p.numbers[0]}–${p.numbers.at(-1)}` });
           content.push({ type: "image", data: p.image.toString("base64"), mimeType: "image/jpeg" });
         });
-        content.push({ type: "text", text: `The skeleton for stickers/${packFileName(name)}; save it filled in with edit_home:\n\n\`\`\`yaml\n${skeleton}\`\`\`` });
+        content.push({ type: "text", text: `The skeleton for stickers/${packFileName(name)}; ${exists ? "that file already exists, so read it first with read_home, then save your changes with edit_home (or the whole file with write_home)" : "save it filled in with write_home"}:\n\n\`\`\`yaml\n${skeleton}\`\`\`` });
         return { content };
       },
     };
