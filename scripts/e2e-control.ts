@@ -5,6 +5,8 @@
  *
  *   1. /status in the control bot answers the owner (and nobody else) with the deployed commit. /policy
  *      lists home/policy.yaml's chats in words, as HTML (a fake group); /policy 2 shows that one in detail.
+ *      The main bot's menu is registered for the owner's chat and, for him only, in the listed group; when
+ *      policy swaps the group for another, the new one gets the menu and the old one's is cleared.
  *   2. A message whose every turn fails: an alert for the failure, then one saying which message went
  *      unanswered once the retry cap gives up. Nothing of it appears in the assistant's chat.
  *   3. A turn that hangs past the wall-clock limit is stopped, closes as `stopped`, and is alerted.
@@ -139,7 +141,12 @@ check(controlTexts().length === 1, "only the owner gets an answer");
 check(controlTexts()[0]!.startsWith("shuvi, commit e2e1234") && controlTexts()[0]!.includes("Running turns: 0") && controlTexts()[0]!.includes("Outbound pending: 0"), `/status lists turns, outbound and the commit (${JSON.stringify(controlTexts()[0])})`);
 const menu = (bot: FakeTelegram) => bot.sent("setMyCommands").map((b) => `${JSON.stringify(b.scope)} ${(b.commands as { command: string }[]).map((c) => c.command).join(",")}`);
 const ownerScope = JSON.stringify({ type: "chat", chat_id: OWNER });
-check(menu(tg).join("|") === `${ownerScope} new,stop` && menu(control).join("|") === `${ownerScope} status,stop,policy,turn`, `each bot registered its commands for the owner's chat (${menu(tg)} / ${menu(control)})`);
+const groupScope = (g: number) => JSON.stringify({ type: "chat_member", chat_id: g, user_id: OWNER });
+await until("the group menu", () => menu(tg).length >= 2);
+check(
+  [...menu(tg)].sort().join("|") === [`${ownerScope} new,stop`, `${groupScope(-1009999999999)} new,stop`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn`,
+  `each bot registered its commands for the owner's chat, and the main bot for the owner in the listed group (${menu(tg)} / ${menu(control)})`,
+);
 
 // ---- 1b. /policy -------------------------------------------------------------------------------------
 control.updates.push(dmUpdate(3, "/policy"), dmUpdate(4, "/policy 2"));
@@ -150,6 +157,13 @@ check(
   `/policy lists the DM and the group in words, as HTML (${JSON.stringify(overview)})`,
 );
 check(detail!.includes("<b>2. Fake Hiking Club</b>") && detail!.includes("<b>Off:</b>") && detail!.includes("• schedules (owner only)"), `/policy 2 shows the group with what is off (${JSON.stringify(detail)})`);
+
+// ---- 1c. the group menu follows policy ----------------------------------------------------------------
+writeFileSync(join(dataDir, "home", "policy.yaml"), `chats:\n  "-1008888888888":\n    title: Fake Chess Club\n`);
+await until("the group menus to follow the policy change", () => menu(tg).length >= 3 && tg.sent("deleteMyCommands").length >= 1);
+await Bun.sleep(1500); // a few more policy passes: nothing changed, so no more calls
+check(menu(tg).length === 3 && menu(tg)[2] === `${groupScope(-1008888888888)} new,stop`, `a group added to policy gets the owner's menu (${menu(tg)})`);
+check(tg.sent("deleteMyCommands").map((b) => JSON.stringify(b.scope)).join("|") === groupScope(-1009999999999), `a group removed from policy has its menu cleared (${JSON.stringify(tg.sent("deleteMyCommands"))})`);
 
 // ---- 2. a forced failure, retried to the cap ---------------------------------------------------------
 tg.updates.push(dmUpdate(1, "please fail"));

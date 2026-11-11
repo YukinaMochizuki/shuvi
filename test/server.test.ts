@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Api } from "grammy";
 import { CONTROL_COMMANDS } from "../src/control/bot.ts";
-import { commandPass, MAIN_COMMANDS, registerCommands } from "../src/server/commands.ts";
+import { DM_DEFAULT, GROUP_DEFAULTS, type Policy } from "../src/policy/policy.ts";
+import { commandPass, GroupMenus, MAIN_COMMANDS, registerCommands } from "../src/server/commands.ts";
 import { classify } from "../src/telegram/inbound.ts";
 import { currentOffset, pollOnce, recordBatch } from "../src/server/poller.ts";
 import { sendPass } from "../src/server/sender.ts";
@@ -162,6 +163,72 @@ describe("commands", () => {
     const api = fakeApi();
     tg!.fail("setMyCommands", { code: 400, description: "Bad Request: chat not found" });
     expect(await registerCommands(api, OWNER, MAIN_COMMANDS, "main bot")).toBe(false);
+  });
+
+  describe("the owner's menu in groups", () => {
+    // Made-up group ids.
+    const A = -1000000000001;
+    const B = -1000000000002;
+    const C = -1000000000003;
+    const policyOf = (...groups: number[]): Policy => ({ chats: { dm: DM_DEFAULT, ...Object.fromEntries(groups.map((g) => [String(g), GROUP_DEFAULTS])) }, unknownChat: "ignore" });
+    const memberScope = (g: number) => ({ type: "chat_member", chat_id: g, user_id: OWNER });
+    const commands = [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }];
+
+    test("each listed group gets the commands for the owner only; the DM is not a group", async () => {
+      const api = fakeApi();
+      const menus = new GroupMenus(api, OWNER);
+      expect(await menus.sync(policyOf(A, B))).toBe(2);
+      expect(tg!.sent("setMyCommands")).toEqual([
+        { scope: memberScope(B), commands },
+        { scope: memberScope(A), commands },
+      ]);
+      expect(tg!.sent("deleteMyCommands")).toEqual([]);
+    });
+
+    test("no call while the listed groups stay the same, whatever else in policy changes", async () => {
+      const api = fakeApi();
+      const menus = new GroupMenus(api, OWNER);
+      await menus.sync(policyOf(A, B));
+      expect(await menus.sync(policyOf(A, B))).toBe(0);
+      const retitled = policyOf(B, A);
+      retitled.chats[String(A)] = { ...GROUP_DEFAULTS, title: "Fake Book Club" };
+      expect(await menus.sync(retitled)).toBe(0);
+      expect(tg!.sent("setMyCommands").length).toBe(2);
+    });
+
+    test("after a policy change, a group added gets the menu and a group removed has its scope cleared", async () => {
+      const api = fakeApi();
+      const menus = new GroupMenus(api, OWNER);
+      await menus.sync(policyOf(A, B));
+      expect(await menus.sync(policyOf(A, C))).toBe(2);
+      expect(tg!.sent("setMyCommands").map((b) => b.scope)).toEqual([memberScope(B), memberScope(A), memberScope(C)]);
+      expect(tg!.sent("deleteMyCommands")).toEqual([{ scope: memberScope(B) }]);
+      expect(await menus.sync(policyOf())).toBe(2);
+      expect(tg!.sent("deleteMyCommands").map((b) => b.scope)).toEqual([memberScope(B), memberScope(A), memberScope(C)]);
+    });
+
+    test("one group failing is logged; the others still register, and it is tried again at the next change", async () => {
+      const api = fakeApi();
+      const menus = new GroupMenus(api, OWNER);
+      // Sorted by id, C is registered first: it fails.
+      tg!.fail("setMyCommands", { code: 400, description: "Bad Request: chat not found" });
+      expect(await menus.sync(policyOf(A, B, C))).toBe(3);
+      expect(tg!.sent("setMyCommands").map((b) => b.scope)).toEqual([memberScope(C), memberScope(B), memberScope(A)]);
+      // The next change retries C alongside the removal of B; A is left alone.
+      expect(await menus.sync(policyOf(A, C))).toBe(2);
+      expect(tg!.sent("setMyCommands").map((b) => b.scope).slice(3)).toEqual([memberScope(C)]);
+      expect(tg!.sent("deleteMyCommands").map((b) => b.scope)).toEqual([memberScope(B)]);
+    });
+
+    test("a failed clear is tried again at the next change", async () => {
+      const api = fakeApi();
+      const menus = new GroupMenus(api, OWNER);
+      await menus.sync(policyOf(A));
+      tg!.fail("deleteMyCommands", { code: 403, description: "Forbidden: bot was kicked from the supergroup chat" });
+      expect(await menus.sync(policyOf())).toBe(1);
+      expect(await menus.sync(policyOf(B))).toBe(2);
+      expect(tg!.sent("deleteMyCommands").map((b) => b.scope)).toEqual([memberScope(A), memberScope(A)]);
+    });
   });
 
   test("the menu and inbound recognise the same commands", () => {

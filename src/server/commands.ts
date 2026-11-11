@@ -1,5 +1,6 @@
 import type { Api } from "grammy";
-import type { BotCommand } from "grammy/types";
+import type { BotCommand, BotCommandScope } from "grammy/types";
+import type { Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { enqueueOutbound, markCommandDone, pendingCommands, resetConversation, type CommandPayload } from "../store/events.ts";
 import { markStop, runningTurnFor, type Turn } from "../store/turns.ts";
@@ -20,8 +21,9 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  * same thing.
  *
  * `MAIN_COMMANDS` is the one list of them: inbound.ts recognises exactly these, and the server registers
- * them with Telegram at startup (`registerCommands`) so the owner's `/` menu offers them. A new command is
- * added here, and handled in `commandPass`.
+ * them with Telegram at startup (`registerCommands`) so the owner's `/` menu offers them, in his private
+ * chat and, for him alone, in every group policy lists (`GroupMenus`). A new command is added here, and
+ * handled in `commandPass`.
  */
 
 export const MAIN_COMMANDS = [
@@ -35,12 +37,81 @@ export const MAIN_COMMANDS = [
  * stop the server.
  */
 export async function registerCommands(api: Api, ownerId: number, commands: readonly BotCommand[], bot: string): Promise<boolean> {
+  return setMenu(api, { type: "chat", chat_id: ownerId }, commands, bot, "register commands");
+}
+
+/** `setMyCommands` (or, with `commands` null, `deleteMyCommands`) for one scope; an error is logged, not thrown. */
+async function setMenu(api: Api, scope: BotCommandScope, commands: readonly BotCommand[] | null, bot: string, what: string): Promise<boolean> {
   try {
-    await api.setMyCommands([...commands], { scope: { type: "chat", chat_id: ownerId } });
+    if (commands) await api.setMyCommands([...commands], { scope });
+    else await api.deleteMyCommands({ scope });
     return true;
   } catch (e) {
-    console.error(`${bot}: could not register commands: ${e instanceof Error ? e.message : String(e)}`);
+    const where = scope.type === "chat_member" ? ` in group ${scope.chat_id}` : "";
+    console.error(`${bot}: could not ${what}${where}: ${e instanceof Error ? e.message : String(e)}`);
     return false;
+  }
+}
+
+/** The groups policy lists: every `chats` key but `dm` (policy.ts refuses any other private chat). */
+export function listedGroups(policy: Policy): number[] {
+  return Object.keys(policy.chats)
+    .filter((k) => k !== "dm")
+    .map(Number)
+    .sort((a, b) => a - b);
+}
+
+/**
+ * The owner's `/` menu in groups. Telegram offers a bot's commands only where a scope covers, so each group
+ * policy lists gets the commands with scope `chat_member` (that group, the owner only: nobody else in it
+ * sees a menu). `sync` is called with the current policy at startup and on every policy pass; it calls
+ * Telegram only when the set of listed groups changed: a group added gets the menu, a group removed has its
+ * scope deleted. A group whose call failed (the bot was removed, the chat is gone) is logged and retried at
+ * the next change, never thrown: one group never stops the others or the server.
+ */
+export class GroupMenus {
+  /** The listed groups as of the last sync; null before the first. */
+  private listed: string | null = null;
+  /** Groups that have the menu, as far as we know. */
+  private readonly menued = new Set<number>();
+  /** Groups whose setMyCommands / deleteMyCommands failed: tried again at the next change. */
+  private readonly failed = new Set<number>();
+
+  constructor(
+    private readonly api: Api,
+    private readonly ownerId: number,
+    private readonly commands: readonly BotCommand[] = MAIN_COMMANDS,
+    private readonly bot = "main bot",
+  ) {}
+
+  /** Bring the group menus in line with `policy`. Returns how many Telegram calls it made (0: nothing changed). */
+  async sync(policy: Policy): Promise<number> {
+    const groups = listedGroups(policy);
+    const key = groups.join(",");
+    if (key === this.listed) return 0;
+    this.listed = key;
+    const want = new Set(groups);
+    const retry = [...this.failed];
+    this.failed.clear();
+    let calls = 0;
+    for (const g of groups) {
+      if (this.menued.has(g) && !retry.includes(g)) continue;
+      calls++;
+      if (await setMenu(this.api, this.scope(g), this.commands, this.bot, "register commands")) this.menued.add(g);
+      else this.failed.add(g);
+    }
+    // A group whose delete failed is still in `menued`, so it is tried again here.
+    for (const g of [...this.menued]) {
+      if (want.has(g)) continue;
+      calls++;
+      if (await setMenu(this.api, this.scope(g), null, this.bot, "clear commands")) this.menued.delete(g);
+      else this.failed.add(g);
+    }
+    return calls;
+  }
+
+  private scope(groupId: number): BotCommandScope {
+    return { type: "chat_member", chat_id: groupId, user_id: this.ownerId };
   }
 }
 
