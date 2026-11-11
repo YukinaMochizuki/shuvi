@@ -9,7 +9,7 @@
  *   sender    deliver what turns queued (sender.ts)
  *   typing    show "typing…" in chats with a running turn
  *   policy    reload home/policy.yaml when it changes; write the policy changes the owner approved
- *             (src/policy/)
+ *             (src/policy/); give the owner the command menu in each group it lists (commands.ts)
  *   scan      alert on outbound rows that are not getting through; expire approvals (control/)
  *   backup    a daily copy of shuvi.db and home/ (control/backup.ts)
  *   control   when `SHUVI_CONTROL_BOT_TOKEN` is set, the control bot's poller and sender (control/bot.ts)
@@ -41,7 +41,7 @@ import { getChat } from "../store/events.ts";
 import { pruneTranscripts } from "../store/transcripts.ts";
 import { runningTurns } from "../store/turns.ts";
 import { telegramFiles } from "../telegram/files.ts";
-import { commandPass, MAIN_COMMANDS, registerCommands } from "./commands.ts";
+import { commandPass, GroupMenus, MAIN_COMMANDS, registerCommands } from "./commands.ts";
 import { loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
 import { sendPass } from "./sender.ts";
@@ -63,6 +63,8 @@ const policies = new PolicyWatch(db, cfg.home, cfg.ownerId);
 const triggers = new TriggerScan();
 // The owner's `/` menu. Best effort and not awaited: a failure is logged and the server carries on.
 void registerCommands(api, cfg.ownerId, MAIN_COMMANDS, "main bot");
+// The same menu, for the owner only, in each group policy lists; synced by the policy loop below.
+const groupMenus = new GroupMenus(api, cfg.ownerId);
 
 const stop = new AbortController();
 const loop = (name: string, body: () => Promise<number | void>, everyMs: number) => runLoop(name, body, everyMs, stop.signal);
@@ -82,6 +84,8 @@ void loop(
   async () => {
     if (applyPolicyApprovals(db, cfg.home, cfg.ownerId)) console.log("policy: wrote an approved change");
     if (policies.refresh()) console.log(`policy: loaded home/policy.yaml (${Object.keys(policies.current().chats).join(", ") || "no chats listed"})`);
+    // Startup (the first pass) and every change of the listed groups; otherwise no call. Never throws.
+    await groupMenus.sync(policies.current());
   },
   1000,
 );
