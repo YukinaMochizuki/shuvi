@@ -5,6 +5,7 @@ import type { Db } from "../../store/db.ts";
 import { getChat, type Chat } from "../../store/events.ts";
 import { chatLabel } from "../../store/turns.ts";
 import { DISK_MAX, DISK_SIZE, HOME_DIR, PULL_SECRET, sizeLabel, type ComputerConfig, type Size } from "./config.ts";
+import { ensureDeclared, type DeclaredOutcome } from "./declared.ts";
 import { codeOf, describeError, ExecRefused, Hangar } from "./hangar/client.ts";
 import { ContainerRunState, ContainerService, type Container } from "./hangar/gen/hangar/compute/v1alpha1/container_pb.ts";
 import { ConditionStatus } from "./hangar/gen/hangar/meta/v1/meta_pb.ts";
@@ -12,13 +13,15 @@ import { acquireLease, acquireOp, ensureComputerRow, getComputer, releaseLease, 
 
 /**
  * A chat's computer on Hangar (docs/design.md §15): its Disk `home-<chat>` (5Gi, growing to 50Gi), mounted at
- * /home/shuvi in its Container `ct-<chat>` (the shared base image). Both are made on the first exec and never
- * deleted: the disk outlives the container, and the container is only ever stopped (`spec.runState`).
+ * /home/shuvi in its Container `shuvi-<chat>` (the shared base image; Hangar's machine for it is
+ * `ct-shuvi-<chat>`, see `computerNames`). Both are made on the first exec and never deleted: the disk
+ * outlives the container, and the container is only ever stopped (`spec.runState`).
  *
  *   ensureRunning   make the objects if they are not there, start the container if it is not running at the
  *                   size it should have (normal, or its boost), and wait for its Ready condition
  *   stop            apply STOPPED (at a size) and wait for its Stopped condition
- *   withLease       run an exec under a lease (state.ts), waiting a little for an op (a resize) to finish
+ *   withLease       run an exec under a lease (state.ts), waiting a little for an op (a resize) to finish,
+ *                   once ~/.computer.yaml is applied on the running computer (declared.ts)
  *
  * The container's spec is shuvi's alone and always applied whole (Apply replaces it), built from the
  * configuration and the row: nothing else writes it, so there is nothing to merge. It never holds a secret.
@@ -167,13 +170,16 @@ export class Computers {
   }
 
   /**
-   * Run `f` under a lease lasting `ms`, with the container running. While an op holds the computer (a resize,
-   * a stop) it waits up to `waitMs`, then refuses. Returns how long it waited.
+   * Run `f` under a lease lasting `ms`, with the container running and its ~/.computer.yaml applied (or its
+   * failure in `declared`). While an op holds the computer (a resize, a stop) it waits up to `waitMs`, then
+   * refuses. Returns how long it waited. `force` retries a file that failed earlier in this boot.
    */
-  async withLease<T>(chat: Chat, ms: number, f: () => Promise<T>, waitMs = 90_000): Promise<{ value: T; waitedMs: number }> {
+  async withLease<T>(chat: Chat, ms: number, f: () => Promise<T>, waitMs = 90_000, opts: { force?: boolean } = {}): Promise<{ value: T; waitedMs: number; declared: DeclaredOutcome }> {
     this.row(chat);
     const t0 = Date.now();
     let lease: string | undefined;
+    // The lease an apply of ~/.computer.yaml takes, lasting through `f` too.
+    const extra: string[] = [];
     for (;;) {
       const r = acquireLease(this.db, chat.id, Date.now() + ms + this.cfg.readyMs);
       if ("lease" in r) {
@@ -187,7 +193,8 @@ export class Computers {
     }
     try {
       await this.ensureRunning(chat.id);
-      return { value: await f(), waitedMs: Date.now() - t0 };
+      const declared = await ensureDeclared(this, chat, { ...opts, holdMs: ms + this.cfg.readyMs, leases: extra });
+      return { value: await f(), waitedMs: Date.now() - t0, declared };
     } catch (e) {
       // An exec refused on a running computer (cause unknown) or for want of quota is alerted.
       if (e instanceof ExecRefused) throw this.refused(chat.id, e);
@@ -195,6 +202,7 @@ export class Computers {
       throw e;
     } finally {
       releaseLease(this.db, chat.id, lease);
+      for (const l of extra) releaseLease(this.db, chat.id, l);
     }
   }
 

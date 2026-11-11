@@ -79,8 +79,8 @@ const SCRIPT: Array<[RegExp, () => Response]> = [
   [/⚙ inbound: grafana\]\\n  disk 91% on vm-3/, () => stream([{ type: "text", text: "Grafana: the disk on vm-3 is at 91%." }, { type: "tool_use", name: "mcp__shuvi__schedule", input: { at: "+1h", note: "reboot vm-3" } }])],
   [/remind me to stretch/, () => stream([{ type: "tool_use", name: "mcp__shuvi__schedule", input: { at: "+3s", note: "stretch reminder" } }])],
   [/· ⚙ schedule \d+\] stretch reminder/, () => say("Time to stretch!")],
-  [/· ⚙ job \d+ · transcribe · done\] asked: \\"transcribe voice\\"\\n  hello from the transcriber/, () => say("Transcript: hello from the transcriber")],
-  [/· ⚙ job \d+ · transcribe · expired\]/, () => say("The slow transcription never came back.")],
+  [/· ⚙ job \d+ · convert · done\] asked: \\"convert report\\"\\n  hello from the converter/, () => say("Converted: hello from the converter")],
+  [/· ⚙ job \d+ · convert · expired\]/, () => say("The slow conversion never came back.")],
   [/ask the desk about the PR/, () => stream([{ type: "tool_use", name: "mcp__shuvi__ask_workstream", input: { product: "widgetry", message: "is the login PR merged?" } }])],
   [/· ⚙ job \d+ · workstream · done\] asked: \\"widgetry: is the login PR merged\?\\"\\n  Yes, merged as #212\./, () => say("The desk says: merged as #212.")],
 ];
@@ -191,23 +191,23 @@ await until("the turn to close", turnsIdle);
 // ---- 3. a job reported by callback -------------------------------------------------------------------
 const chatId = (db.$client.query("select id from chats where tg_chat_id = ?").get(OWNER) as { id: number }).id;
 const lastSeq = () => (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
-const cb = createJob(db, { chatId, originSeq: lastSeq(), kind: "transcribe", title: "transcribe voice", report: "callback", deadline: new Date(Date.now() + 60_000) });
+const cb = createJob(db, { chatId, originSeq: lastSeq(), kind: "convert", title: "convert report", report: "callback", deadline: new Date(Date.now() + 60_000) });
 check((await postHook(`/jobs/${cb.job.id}/report`, "x", { authorization: "Bearer wrong" })).status === 401, "callback: a wrong token is 401");
 check((await postHook(`/jobs/99999/report`, "x", { authorization: `Bearer ${cb.token}` })).status === 404, "callback: an unknown job is 404");
 check(events("job_done") === 0, "callback: and neither wrote anything");
 const rep = { authorization: `Bearer ${cb.token}`, "content-type": "application/json" };
-check((await postHook(`/jobs/${cb.job.id}/report`, JSON.stringify({ status: "done", result: "hello from the transcriber" }), rep)).status === 200, "callback: the report is accepted");
+check((await postHook(`/jobs/${cb.job.id}/report`, JSON.stringify({ status: "done", result: "hello from the converter" }), rep)).status === 200, "callback: the report is accepted");
 check((await postHook(`/jobs/${cb.job.id}/report`, JSON.stringify({ status: "done", result: "again" }), rep)).status === 200, "callback: a repeat report is accepted");
-await replied("Transcript: hello from the transcriber", "a job reported by callback starts a turn in its origin chat");
+await replied("Converted: hello from the converter", "a job reported by callback starts a turn in its origin chat");
 check(events("job_done") === 1, "callback: one job_done, the repeat wrote nothing");
 await until("the turn to close", turnsIdle);
 
 // ---- 4. an expired job -------------------------------------------------------------------------------
-const slow = createJob(db, { chatId, originSeq: lastSeq(), kind: "transcribe", title: "slow transcribe", report: "callback", deadline: new Date(Date.now() + 1_500) });
-await replied("The slow transcription never came back.", "an expired job is written back to its origin chat and starts a turn");
+const slow = createJob(db, { chatId, originSeq: lastSeq(), kind: "convert", title: "slow convert", report: "callback", deadline: new Date(Date.now() + 1_500) });
+await replied("The slow conversion never came back.", "an expired job is written back to its origin chat and starts a turn");
 check((db.$client.query("select state from jobs where id = ?").get(slow.job.id) as { state: string }).state === "expired", "the job is expired");
 check(
-  (db.$client.query("select text from control_messages where kind = 'alert'").all() as { text: string }[]).some((a) => a.text.startsWith(`Job ${slow.job.id} (transcribe) expired`)),
+  (db.$client.query("select text from control_messages where kind = 'alert'").all() as { text: string }[]).some((a) => a.text.startsWith(`Job ${slow.job.id} (convert) expired`)),
   "the owner was alerted (an alert queued for the control bot)",
 );
 await until("the turn to close", turnsIdle);

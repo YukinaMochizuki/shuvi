@@ -17,8 +17,8 @@ const jobDones = (db: Db) => db.$client.query("select seq, chat_id as chatId, pa
 const eventCount = (db: Db) => (db.$client.query("select count(*) as n from chat_events").get() as { n: number }).n;
 
 function callbackJob(db: Db, deadline = new Date(Date.now() + 60_000)) {
-  const origin = ownerSays(db, "transcribe that voice note");
-  return { origin, ...createJob(db, { chatId: ownerChatId(db), originSeq: origin, kind: "transcribe", title: "transcribe voice #12", report: "callback", deadline }) };
+  const origin = ownerSays(db, "convert that report to PDF");
+  return { origin, ...createJob(db, { chatId: ownerChatId(db), originSeq: origin, kind: "convert", title: "convert report #12", report: "callback", deadline }) };
 }
 
 const hookDeps = (db: Db, home = mkdtempSync(join(tmpdir(), "shuvi-home-")), tokens: Record<string, string> = {}): HookDeps => ({ db, home, ownerId: OWNER, inboundTokens: tokens });
@@ -36,7 +36,7 @@ describe("a job ends once, and its result goes back to the origin chat", () => {
     const done = jobDones(db);
     expect(done).toHaveLength(1);
     expect(done[0]!.chatId).toBe(ownerChatId(db));
-    expect(JSON.parse(done[0]!.payload)).toMatchObject({ jobId: job.id, state: "done", result: "hello world", title: "transcribe voice #12" });
+    expect(JSON.parse(done[0]!.payload)).toMatchObject({ jobId: job.id, state: "done", result: "hello world", title: "convert report #12" });
     expect(getJob(db, job.id)!.state).toBe("done");
   });
 
@@ -46,11 +46,11 @@ describe("a job ends once, and its result goes back to the origin chat", () => {
     // The message that started the job was answered: move the cursor past it.
     db.$client.run("update chats set cursor_seq = (select max(seq) from chat_events)");
     expect(claimTurn(db, ownerChatId(db))).toBeNull();
-    const seq = finishJob(db, job.id, { state: "done", result: "the transcript" })!;
+    const seq = finishJob(db, job.id, { state: "done", result: "the converted file" })!;
     const turn = claimTurn(db, ownerChatId(db))!;
     expect(turn.toSeq).toBe(seq);
     const line = renderMessage(getEvent(db, seq)!, "UTC");
-    expect(line).toMatch(new RegExp(`^\\[#${seq} · \\d\\d/\\d\\d \\d\\d:\\d\\d · ⚙ job ${job.id} · transcribe · done\\] asked: "transcribe voice #12"\\n  the transcript$`));
+    expect(line).toMatch(new RegExp(`^\\[#${seq} · \\d\\d/\\d\\d \\d\\d:\\d\\d · ⚙ job ${job.id} · convert · done\\] asked: "convert report #12"\\n  the converted file$`));
   });
 });
 

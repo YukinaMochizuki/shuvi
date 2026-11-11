@@ -8,6 +8,7 @@ import { HOME_DIR, sizeLabel, type ComputerConfig, type Size } from "./config.ts
 import { ComputerError, type Computers } from "./computer.ts";
 import { codeOf, describeError, ExecRefused, SIGKILL, SIGTERM } from "./hangar/client.ts";
 import { ConditionStatus } from "./hangar/gen/hangar/meta/v1/meta_pb.ts";
+import { declaredNote } from "./declared.ts";
 import { awaitInbox } from "./files.ts";
 import { secretsForChat, type Redaction } from "./secrets.ts";
 import { acquireLease, COMPUTER_JOB_KIND, getComputer, releaseLease, runningComputerJobs } from "./state.ts";
@@ -40,6 +41,8 @@ import { acquireLease, COMPUTER_JOB_KIND, getComputer, releaseLease, runningComp
  *   cancel_job  TERM then KILL to the job's process group (cancel_job), exit 130.
  *
  * Every byte of output is passed through the chat's secret redactor before anyone sees it (secrets.ts).
+ * When the command's lease applied ~/.computer.yaml first (declared.ts), its result ends with a line saying
+ * so, or why it failed.
  */
 
 /** How much of a stream is kept in memory: its first and last bytes. */
@@ -180,7 +183,7 @@ export async function runSync(
   const t0 = Date.now();
   let ranMs = 0;
   let row = getComputer(x.db, x.chat.id);
-  const { value } = await x.computers.withLease(x.chat, opts.timeoutSec * 1000 + KILL_AFTER_MS + CLOSE_AFTER_MS, async () => {
+  const { value, declared } = await x.computers.withLease(x.chat, opts.timeoutSec * 1000 + KILL_AFTER_MS + CLOSE_AFTER_MS, async () => {
     // Files sent to the chat that wait for the computer to run are copied by the server now that it does.
     await awaitInbox(x.db, x.chat.id, x.cfg.inboxWaitMs);
     row = getComputer(x.db, x.chat.id);
@@ -229,7 +232,8 @@ export async function runSync(
     warning ?? "",
   ].filter(Boolean);
   const meta = notes.length ? ` · ${notes.join(" · ")}` : "";
-  const body = outputView(out.text(red), err.text(red));
+  const dn = declaredNote(declared);
+  const body = outputView(out.text(red), err.text(red)) + (dn ? `\n${dn}` : "");
   if (stopped) {
     const how = stopped === "term" ? "it was sent SIGTERM and ended" : "it ignored SIGTERM and was killed (SIGKILL)";
     return {
@@ -251,7 +255,7 @@ export async function runSync(
 
 // ---- background jobs --------------------------------------------------------------------------------
 
-export type JobTool = "exec" | "video_frames" | "transcribe";
+export type JobTool = "exec" | "video_frames";
 
 export interface JobSpec {
   tool: JobTool;
@@ -260,8 +264,7 @@ export interface JobSpec {
   expectSeconds?: number;
   /** The boost it runs on, if any. */
   boost?: Size;
-  /** transcribe: the transcript's path; video_frames: how many frames. */
-  output?: string;
+  /** video_frames: how many frames. */
   frames?: number;
   /** When it was started (ISO). */
   startedAt?: string;
@@ -325,10 +328,11 @@ export async function startJob(x: ExecContext, a: { spec: JobSpec; title: string
     });
     if (r.value.code !== 0) throw new ComputerError(`the job could not be started (exit ${r.value.code}): ${r.value.stderr.trim().slice(0, 500)}`);
     const notes = [boosted ? `boosted to ${sizeLabel(a.spec.boost!)}. ${BOOST_TERMS}` : "", profiles.length ? `secrets: ${profiles.join(", ")}` : "", warning ?? ""].filter(Boolean);
+    const dn = declaredNote(r.declared);
     const when = expect ? `expected ${durationLabel(expect * 1000)}, overdue past that; stopped if still running at ${durationLabel(deadline * 1000)}` : `no estimate given; stopped if still running at ${durationLabel(deadline * 1000)}`;
     return {
       job,
-      text: `Started job ${job.id} in the background (${when}; log ~/.jobs/${job.id}.log).${notes.length ? ` ${notes.join(" ")}` : ""} Its result, with its exit code, how long it took and what it used, comes back to this chat as a job event when it ends. read_job(${job.id}) shows its output so far; cancel_job(${job.id}) stops it. Do not wait or check on it: end your turn when you have nothing else to do.`,
+      text: `Started job ${job.id} in the background (${when}; log ~/.jobs/${job.id}.log).${notes.length ? ` ${notes.join(" ")}` : ""} Its result, with its exit code, how long it took and what it used, comes back to this chat as a job event when it ends. read_job(${job.id}) shows its output so far; cancel_job(${job.id}) stops it. Do not wait or check on it: end your turn when you have nothing else to do.${dn ? `\n${dn}` : ""}`,
     };
   } catch (e) {
     discardJob(x.db, job.id);
@@ -466,7 +470,6 @@ export function computerJobKind(cfg: ComputerConfig, computersOf: (db: Db) => Co
             for (const fr of frames) writeFileSync(join(dir, fr.name), Buffer.from(fr.data, "base64"));
             extra = `${frames.length} frame(s), shown after this line.`;
           }
-          if (spec.tool === "transcribe" && exit === 0 && spec.output) extra = `Transcript written to ${spec.output} (its text is below).`;
           return jobResult(job, Number.isFinite(exit) ? exit : 1, log, red, extra, parseUsage(usageStr ?? ""));
         }
         // Never launched: shuvi stopped between making the job (and maybe its boost) and starting it. Ended

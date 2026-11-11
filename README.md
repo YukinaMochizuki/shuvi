@@ -81,10 +81,12 @@ place (removing any `shuvi.db-wal` / `-shm` beside it), and `git clone home.bund
 
 With `SHUVI_HANGAR_API`, `SHUVI_HANGAR_PROJECT`, `SHUVI_HANGAR_TOKEN` (a Hangar service token, `hgr_…`,
 with `project.editor` on that project) and `SHUVI_COMPUTER_IMAGE` set, every chat gets a computer on
-Hangar (docs/design.md §15, `src/capabilities/computer/`): a Disk `home-<chat>` (5Gi, growing to 50Gi)
-mounted at `/home/shuvi` in a Container `ct-<chat>`, created on the first `exec`, stopped after
-`SHUVI_COMPUTER_IDLE_MINUTES` (default 15) without one, never deleted. The other variables it reads are
-listed in `src/capabilities/computer/index.ts`.
+Hangar (docs/design.md §15, `src/capabilities/computer/`): a Disk `home-<chat>` (5Gi, growing by itself
+to 50Gi) mounted at `/home/shuvi` in a Container `shuvi-<chat>` (which Hangar runs as the Machine
+`ct-shuvi-<chat>`), created on the first `exec`, stopped after `SHUVI_COMPUTER_IDLE_MINUTES` (default 15)
+without one, never deleted. Computers created before this naming keep their name, `ct-<chat>`: shuvi
+reads the name it recorded for each. The other variables it reads are listed in
+`src/capabilities/computer/index.ts`.
 
 **Each computer holds a Hangar machine for good.** A stopped container still counts as a machine against
 the plan, so a plan of 10 machines allows at most 10 chats with a computer (fewer if the project holds
@@ -97,8 +99,10 @@ asks (`save_photo`).
 ### The computer's image
 
 All computers run one shared base image, `computer/Dockerfile` (Debian with python3, pip, node, ffmpeg,
-yt-dlp, git, curl, jq, sqlite3, faster-whisper, and a `shuvi` user whose home is `/home/shuvi`). It is a
-PRIVATE package on ghcr.io, `ghcr.io/<repository owner>/shuvi-computer`, built by GitHub Actions
+git, curl, jq, sqlite3, GNU time, and a `shuvi` user whose home is `/home/shuvi`). It holds only generic
+tools: anything a chat needs beyond them goes in that chat's `~/.computer.yaml` (below) or under its
+home, never in this public repository. It is a PRIVATE package on ghcr.io,
+`ghcr.io/<repository owner>/shuvi-computer`, built by GitHub Actions
 (`.github/workflows/computer-image.yml`) on every push that changes `computer/`, or by hand from the
 Actions tab ("computer image", Run workflow). Each build is tagged with its commit sha, and the run prints
 its digest, in the log and in the run's summary:
@@ -124,6 +128,35 @@ shuvi keeps the login in a Hangar Secret of type `registry-auth`, `shuvi-compute
 container starts (Hangar never answers with its values), and names it in each container's
 `imagePullSecrets`. When the token is renewed, restart the server: the next start applies the new one.
 Without the two variables the image is pulled anonymously, which only works for a public image.
+
+### What a computer has beyond the image: `~/.computer.yaml`
+
+What the assistant installs under her home (`pip install --user`, npm packages in home, programs in
+`~/.local/bin`) stays by itself. System packages are declared in the chat's own `~/.computer.yaml`, on its
+home disk, so they are runtime data, private to the owner, and need no change to this repository:
+
+```yaml
+# ~/.computer.yaml on a chat's computer
+apt: [ripgrep, imagemagick]
+setup: |
+  echo "anything else to do as root after the packages"
+```
+
+Only `apt` (Debian package names) and `setup` (a shell script, run with `bash -e`) are allowed; any other
+key is an error she sees. shuvi applies the file as root before her next command whenever it is not
+applied on the container's root disk: on the first start, after she edits it, and after a new
+`SHUVI_COMPUTER_IMAGE` (a new image is a fresh root disk). Otherwise nothing runs but one short read of
+the file and its recorded hash before each command. apt keeps its downloads in `~/.cache/computer/apt`,
+so applying it again after a new image does not download them again. Each step is limited to
+`SHUVI_COMPUTER_APPLY_STEP_SEC` (default 900). A failure is shown to her in that command's result (the step and its output) and raised as
+an alert in the control bot; the file is tried again at the computer's next start, or at once with
+`apply_computer_config`.
+
+Changing the file is owner-only. Every computer tool (`exec` included, and `apply_computer_config`)
+follows the rule every owner-only tool shares (`ownerAuthority` in `src/agent/turn.ts`): a turn with a
+message from the owner may use it, other people's messages beside his neither grant nor block it, and a
+turn with nothing from the owner is refused. To review it, ask her to send it
+(`send_file ~/.computer.yaml`), or to show it (`cat ~/.computer.yaml` in an exec).
 
 ### Secrets
 

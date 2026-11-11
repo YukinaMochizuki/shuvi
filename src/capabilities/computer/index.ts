@@ -11,11 +11,12 @@ import { chatLabel } from "../../store/turns.ts";
 import { updateAttachment } from "../../store/media.ts";
 import { attachmentOfEvent } from "../../store/media.ts";
 import { defineCapability } from "../types.ts";
-import { computerConfig, sizeLabel, type ComputerConfig, type Size } from "./config.ts";
+import { computerConfig, DISK_MAX, DISK_SIZE, sizeLabel, type ComputerConfig, type Size } from "./config.ts";
 import { ComputerError, Computers } from "./computer.ts";
 import { BOOST_TERMS, cancelJob, computerJobKind, framesDir, framesScript, parseFrames, readJob, runSync, startJob, syncCommand, type ExecContext } from "./exec.ts";
 import { awaitInbox, inboxNote, inboxPass, sendFromComputer } from "./files.ts";
-import { framesCommand, MAX_FRAMES, transcribeCommand } from "./media.ts";
+import { applyResultText, DECLARED_PATH } from "./declared.ts";
+import { framesCommand, MAX_FRAMES } from "./media.ts";
 import { liveGrants, requestSecret, syncGrants, TTLS, type Ttl } from "./secrets.ts";
 import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, releaseOp, runningComputerJobs } from "./state.ts";
 
@@ -24,10 +25,15 @@ import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, relea
  * started when needed and stopped when idle. What it brings:
  *
  *   tools     exec, read_job, cancel_job (exec.ts, after workstream's box tools); request_secret
- *             (secrets.ts); send_file, send_photo (files.ts); video_frames, transcribe (media.ts). All act
- *             for the owner (`ownerOnly`), under the one rule every owner-only tool shares
- *             (`ownerAuthority` in src/agent/turn.ts): the turn's boundary refuses them unless the owner
- *             is in the turn; other people's messages beside his neither grant nor block.
+ *             (secrets.ts); send_file, send_photo (files.ts); video_frames (media.ts);
+ *             apply_computer_config (declared.ts). All act for the owner (`ownerOnly`), under the one rule
+ *             every owner-only tool shares (`ownerAuthority` in src/agent/turn.ts): the turn's boundary
+ *             refuses them unless the owner is in the turn; other people's messages beside his neither
+ *             grant nor block. So changing ~/.computer.yaml, which only a computer tool can, is the
+ *             owner's alone.
+ *   declared  ~/.computer.yaml (apt packages, a setup script) is applied as root before the next command
+ *             whenever it is not applied on the container's root disk: after a new image, after an edit
+ *             (declared.ts).
  *   jobs      the `computer` job kind: background execs, polled by the jobs watcher (exec.ts).
  *   loops     `computer-maintain`: stop a computer idle for SHUVI_COMPUTER_IDLE_MINUTES (no exec, no job
  *             running), put a boosted one back at its size once its job (or exec) is over, and turn
@@ -50,20 +56,20 @@ import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, relea
  *   SHUVI_COMPUTER_EXEC_MAX_SEC   the most a synchronous exec may run (default 600; the default is 120)
  *   SHUVI_COMPUTER_READY_SEC      how long to wait for a start or a stop (default 180)
  *   SHUVI_COMPUTER_POLL_SEC       how often a background job is polled (default 5)
- *   SHUVI_COMPUTER_TRANSCRIBE_CPU / _MEMORY   transcribe's boost (default 4 / 8Gi)
- *   SHUVI_COMPUTER_WHISPER_MODEL  faster-whisper's model (default small)
+ *   SHUVI_COMPUTER_APPLY_STEP_SEC the most each step of applying ~/.computer.yaml may run (default 900)
  *   SHUVI_COMPUTER_INBOX_WAIT_SEC how long a turn waits for a sent file to land in ~/inbox (default 30)
  *   SHUVI_SECRETS_FILE            the secret profiles (default /etc/shuvi.secrets.yaml, mode 600)
  */
 
 export const COMPUTER = `## Your computer
 
-This chat has a computer of its own: a Linux machine (Debian, with python3, pip, node, ffmpeg, yt-dlp, git, curl, jq, sqlite3, faster-whisper) whose home directory, ~, is kept between uses; anything you install or save under ~ stays. It starts when you use it and stops when idle; the first command after a while takes a little longer.
+This chat has a computer of its own: a Linux machine (Debian, with python3, pip, node, ffmpeg, git, curl, jq, sqlite3) whose home directory, ~, is kept between uses; anything you install or save under ~ stays. The home disk starts at ${DISK_SIZE} and grows by itself as it fills, up to ${DISK_MAX}: when \`df\` shows it nearly full, that is its current size, not a limit. It starts when you use it and stops when idle; the first command after a while takes a little longer.
 
 - \`exec\` runs a shell command there. A synchronous exec has a timeout (120 s by default); anything longer goes in the background (\`background: true\` with an honest \`expect_seconds\`): you get a job id at once, the result comes back to this chat as a job event when it ends, and you end your turn meanwhile. Never wait or poll for a job; \`read_job\` is for looking at its output when you need to, \`cancel_job\` stops it.
 - \`boost\` runs one command or job on the same computer made larger, for heavy work (it restarts the computer around it).
 - Files the owner sends here are copied into ~/inbox/ when the computer next runs (the message says where; your next command waits for them). Photos are not copied unless you ask: \`save_photo\` with the photo's #number. \`send_file\` and \`send_photo\` send a file from the computer to this chat.
-- \`video_frames\` and \`transcribe\` do the common media work for you; use them rather than writing ffmpeg or whisper commands yourself.
+- Installing for yourself needs nothing more: \`pip install --user\`, npm packages installed into ~, programs in ~/.local/bin all stay. Your commands run as a user without root; system packages (apt) go into ${DECLARED_PATH}: \`apt:\` a list of Debian packages, and optionally \`setup:\`, a shell script run after them (both as root; no other keys). It is applied by itself before your next command once it changes, and again whenever the computer's image changes (anything else outside ~ is gone then); \`apply_computer_config\` applies it at once and shows what failed. Keep it to what you need.
+- \`video_frames\` does the common video work for you; use it rather than writing ffmpeg commands yourself.
 - Credentials are never on the computer. If a task needs one (an API key), \`request_secret\` asks the owner for a named profile; once granted, its variables are in the environment of your commands here, and their values are hidden from you as [REDACTED:<profile>].`;
 
 const oneLine = (s: string, n = 120) => {
@@ -136,7 +142,7 @@ export async function maintainPass(db: Db, computers: Computers, cfg: ComputerCo
 export const computer = defineCapability<ComputerConfig>({
   id: "computer",
   enable: computerConfig,
-  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "video_frames", "transcribe"],
+  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "video_frames", "apply_computer_config"],
   tools({ db, chat, state: s }, cfg) {
     const computers = computersFor(db, cfg);
     const x: ExecContext = { db, chat, computers, cfg };
@@ -319,38 +325,24 @@ export const computer = defineCapability<ComputerConfig>({
       },
     };
 
-    const transcribe: ToolDef<{ path: string; background?: boolean; boost?: Size }> = {
-      name: "transcribe",
-      description: `Transcribe the speech in an audio or video file on the computer with faster-whisper (model ${cfg.whisperModel}), writing it to <path>.txt. Runs boosted (${sizeLabel(cfg.transcribeBoost)} unless \`boost\` says otherwise) and in the background by default: the transcript comes back to this chat with the job's result.`,
-      inputSchema: {
-        path: z.string().min(1).describe("The file's path on the computer, e.g. ~/inbox/123-voice.ogg"),
-        background: z.boolean().optional().describe("false: wait for it (short clips only)"),
-        boost: sizeSchema.optional(),
-      },
-      async handler(a) {
-        const boost = a.boost ?? cfg.transcribeBoost;
-        const command = transcribeCommand(a.path, cfg.whisperModel);
+    const applyConfig: ToolDef<Record<string, never>> = {
+      name: "apply_computer_config",
+      description:
+        `Apply ${DECLARED_PATH} on this chat's computer now, rather than before your next command: its \`apt\` packages (installed through a cache in ~, so a new image does not download them again), then its \`setup\` script, both as root. ` +
+        "Nothing runs when the file as it is was already applied. A file that failed is tried again. Returns what ran, or the step that failed and its output. Only the owner can have this done, as only the owner can have the file changed.",
+      inputSchema: {},
+      async handler() {
         try {
-          if (a.background !== false) {
-            const { text } = await startJob(x, { spec: { tool: "transcribe", command, boost, output: `${a.path}.txt` }, title: `transcribe ${oneLine(a.path)}`, originSeq: s.toSeq });
-            return ok(text);
-          }
-          await computers.boost(chat, boost, null);
-          let r;
-          try {
-            r = await runSync(x, ["bash", "-c", command], { timeoutSec: cfg.execMaxSec, secrets: false });
-          } finally {
-            await computers.restore(chat.id).catch(() => false);
-          }
-          const text = `${r.text}\n(Transcript written to ${a.path}.txt. ${BOOST_TERMS})`;
-          return r.isError ? err(text) : ok(text);
+          const { declared } = await computers.withLease(chat, 60_000, async () => undefined, 90_000, { force: true });
+          const r = applyResultText(declared);
+          return r.isError ? err(r.text) : ok(r.text);
         } catch (e) {
           return failure(e);
         }
       },
     };
 
-    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, sendFile, sendPhoto, savePhoto, videoFrames, transcribe] as ToolDef[] }];
+    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, sendFile, sendPhoto, savePhoto, videoFrames, applyConfig] as ToolDef[] }];
   },
   section: () => COMPUTER,
   jobKinds: (cfg) => [computerJobKind(cfg, (db) => computersFor(db, cfg))],

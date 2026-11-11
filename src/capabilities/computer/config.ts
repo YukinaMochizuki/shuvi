@@ -39,9 +39,8 @@ export interface ComputerConfig {
   pollEveryMs: number;
   /** The host-side file of secret profiles (outside home/ and git, mode 600). */
   secretsFile: string;
-  /** What `transcribe` boosts to, and the faster-whisper model it runs. */
-  transcribeBoost: Size;
-  whisperModel: string;
+  /** The most each step of applying ~/.computer.yaml (apt, setup) may run (declared.ts). */
+  applyStepSec: number;
   /** How long a turn waits for a file someone sent to land in ~/inbox before showing it anyway. */
   inboxWaitMs: number;
 }
@@ -82,19 +81,24 @@ export function computerConfig(env: Env): ComputerConfig | null {
     readyMs: positive(env.SHUVI_COMPUTER_READY_SEC, 180) * 1000,
     pollEveryMs: positive(env.SHUVI_COMPUTER_POLL_SEC, 5) * 1000,
     secretsFile: env.SHUVI_SECRETS_FILE || "/etc/shuvi.secrets.yaml",
-    transcribeBoost: { cpu: env.SHUVI_COMPUTER_TRANSCRIBE_CPU || "4", memory: env.SHUVI_COMPUTER_TRANSCRIBE_MEMORY || "8Gi" },
-    whisperModel: env.SHUVI_COMPUTER_WHISPER_MODEL || "small",
+    applyStepSec: positive(env.SHUVI_COMPUTER_APPLY_STEP_SEC, 900),
     inboxWaitMs: positive(env.SHUVI_COMPUTER_INBOX_WAIT_SEC, 30) * 1000,
   };
 }
 
 /**
  * The Hangar names of a chat's disk and container, from its Telegram chat id so they survive a new store:
- * `home-<id>` / `ct-<id>`, a group's negative id written `g<digits>` (a name is a DNS label).
+ * `home-<id>` / `shuvi-<id>`, a group's negative id written `g<digits>` (a name is a DNS label).
+ *
+ * Hangar names the Machine a container runs as `ct-<container>` itself (hangar internal/apiserver/
+ * controllers.go, `machineName`), so the container carries no `ct-` of its own: its machine reads
+ * `ct-shuvi-<id>`, which also says whose it is in a shared project. Computers made before this were named
+ * `ct-<id>` (machine `ct-ct-<id>`); they keep that name, since every use reads the name recorded in the
+ * store's `computers` row (state.ts), which is written once, when the row is made, and never recomputed.
  */
 export function computerNames(tgChatId: number): { disk: string; container: string } {
   const id = tgChatId < 0 ? `g${-tgChatId}` : String(tgChatId);
-  return { disk: `home-${id}`, container: `ct-${id}` };
+  return { disk: `home-${id}`, container: `shuvi-${id}` };
 }
 
 /** The registry host of an image reference, as Docker reads it: `ghcr.io/o/i@sha256:…` is ghcr.io; `debian` is Docker Hub. */

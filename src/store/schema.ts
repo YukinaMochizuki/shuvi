@@ -265,7 +265,10 @@ export const computers = sqliteTable("computers", {
   chatId: integer("chat_id")
     .primaryKey()
     .references(() => chats.id),
-  /** The Hangar Disk (`home-<chat>`) and Container (`ct-<chat>`). */
+  /**
+   * The Hangar Disk (`home-<chat>`) and Container (`shuvi-<chat>` for a new computer; an older one keeps
+   * the name recorded here).
+   */
   disk: text("disk").notNull(),
   container: text("container").notNull(),
   /** Both objects have been applied at least once. */

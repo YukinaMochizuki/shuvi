@@ -12,7 +12,8 @@ import { Computers } from "../src/capabilities/computer/computer.ts";
 import { computerJobKind, parseUsage, trimView } from "../src/capabilities/computer/exec.ts";
 import { inboxPass } from "../src/capabilities/computer/files.ts";
 import { computerNames } from "../src/capabilities/computer/config.ts";
-import { maintainPass } from "../src/capabilities/computer/index.ts";
+import { COMPUTER, maintainPass } from "../src/capabilities/computer/index.ts";
+import { sha256 } from "../src/capabilities/computer/declared.ts";
 import { knownFile, liveGrants, redaction, redactor, syncGrants } from "../src/capabilities/computer/secrets.ts";
 import { getComputer } from "../src/capabilities/computer/state.ts";
 import { jobWatchPass } from "../src/capabilities/jobs/watch.ts";
@@ -82,7 +83,23 @@ describe("configuration", () => {
   test("every computer tool acts for the owner", () => {
     const t = setup();
     const owner = capabilityOwnerOnly(enabledCapabilities(t.env));
-    for (const name of ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "video_frames", "transcribe"]) expect(owner.has(name)).toBe(true);
+    for (const name of ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "video_frames", "apply_computer_config"]) expect(owner.has(name)).toBe(true);
+    expect(owner.has("transcribe")).toBe(false);
+    expect(COMPUTER).not.toMatch(/transcri|whisper/i);
+  });
+
+  test("names: disk home-<chat>, container shuvi-<chat> (Hangar's machine is then ct-shuvi-<chat>); a recorded name is kept", async () => {
+    expect(computerNames(1001)).toEqual({ disk: "home-1001", container: "shuvi-1001" });
+    expect(computerNames(-100123)).toEqual({ disk: "home-g100123", container: "shuvi-g100123" });
+    // A computer made under the old name (`ct-<chat>`) keeps it: the store's name is used, never recomputed.
+    const t = setup();
+    const chat = ensureChat(t.db, { id: OWNER, kind: "private" });
+    t.db.$client.query("insert into computers (chat_id, disk, container, created) values (?, ?, ?, 1)").run(chat.id, "home-1001", "ct-1001");
+    ownerSays(t.db, "go");
+    const a = await turn(t, [{ tool: "exec", args: { command: "echo old-name" } }]);
+    expect(text(a, 0)).toContain("old-name");
+    expect([...t.fake.containers.keys()]).toEqual(["ct-1001"]);
+    expect(getComputer(t.db, chat.id)!.container).toBe("ct-1001");
   });
 });
 
@@ -96,16 +113,16 @@ describe("lifecycle", () => {
     expect(text(a, 0)).toContain("hello");
     const disk = t.fake.disks.get("home-1001")!;
     expect(disk.spec).toEqual({ size: "5Gi", grow: { max: "50Gi" } });
-    const ct = t.fake.containers.get("ct-1001")!;
+    const ct = t.fake.containers.get("shuvi-1001")!;
     expect(ct.spec).toMatchObject({ image: "registry.example/shuvi-computer@sha256:fake", runState: "CONTAINER_RUN_STATE_RUNNING", volumes: [{ source: "home-1001", sourceKind: "Disk", target: "/home/shuvi" }] });
-    expect(t.fake.applies()).toEqual(["ct-1001 RUNNING 2/2Gi"]);
+    expect(t.fake.applies()).toEqual(["shuvi-1001 RUNNING 2/2Gi"]);
 
     // Not idle yet: nothing happens.
     expect((await maintainPass(t.db, t.computers, t.cfg)).stopped).toEqual([]);
     // Idle: stopped (an apply of STOPPED; nothing is ever deleted).
     const later = Date.now() + 16 * 60_000;
     expect((await maintainPass(t.db, t.computers, t.cfg, later)).stopped).toEqual([ownerChatId(t.db)]);
-    expect(t.fake.applies().at(-1)).toBe("ct-1001 STOPPED 2/2Gi");
+    expect(t.fake.applies().at(-1)).toBe("shuvi-1001 STOPPED 2/2Gi");
     expect(t.fake.calls.some((c) => c.method.startsWith("Delete"))).toBe(false);
     expect(getComputer(t.db, ownerChatId(t.db))!.runState).toBe("stopped");
 
@@ -113,8 +130,8 @@ describe("lifecycle", () => {
     ownerSays(t.db, "again");
     const b = await turn(t, [{ tool: "exec", args: { command: "cat ~/hello.txt 2>/dev/null || echo none; echo kept > ~/hello.txt" } }]);
     expect(text(b, 0)).toContain("none");
-    expect(t.fake.applies().at(-1)).toBe("ct-1001 RUNNING 2/2Gi");
-    expect(readFileSync(join(t.fake.home("ct-1001"), "hello.txt"), "utf8")).toBe("kept\n");
+    expect(t.fake.applies().at(-1)).toBe("shuvi-1001 RUNNING 2/2Gi");
+    expect(readFileSync(join(t.fake.home("shuvi-1001"), "hello.txt"), "utf8")).toBe("kept\n");
   });
 
   test("an idle computer with a background job running is not stopped", async () => {
@@ -205,7 +222,7 @@ describe("exec", () => {
     expect(ev.result).toContain("marker-42");
     expect(ev.result).toContain(`read_job(${j1!.id})`);
     expect(jobDones(t.db).filter((d) => d.jobId === j1!.id)).toHaveLength(1);
-    expect(existsSync(join(t.fake.home("ct-1001"), ".jobs", `${j1!.id}.log`))).toBe(true);
+    expect(existsSync(join(t.fake.home("shuvi-1001"), ".jobs", `${j1!.id}.log`))).toBe(true);
   });
 
   test("a job still running at its deadline is stopped and reported", async () => {
@@ -248,7 +265,7 @@ describe("boost", () => {
     expect(text(a, 1)).toContain("boosted (8 vCPU / 16Gi) for job");
     expect(text(a, 2)).toContain("quick");
     expect(text(a, 2)).toContain("on the boosted computer (8 vCPU / 16Gi, boosted for job");
-    expect(t.fake.applies()).toEqual(["ct-1001 RUNNING 2/2Gi", "ct-1001 STOPPED 8/16Gi", "ct-1001 RUNNING 8/16Gi"]);
+    expect(t.fake.applies()).toEqual(["shuvi-1001 RUNNING 2/2Gi", "shuvi-1001 STOPPED 8/16Gi", "shuvi-1001 RUNNING 8/16Gi"]);
 
     const [job] = runningJobs(t.db);
     // While its job runs, the boost stays.
@@ -256,7 +273,7 @@ describe("boost", () => {
     await untilDone(t, job!.id);
     expect(getJob(t.db, job!.id)!.result).toContain("boosted (8 vCPU / 16Gi)");
     expect((await maintainPass(t.db, t.computers, t.cfg)).restored).toEqual([ownerChatId(t.db)]);
-    expect(t.fake.applies().at(-1)).toBe("ct-1001 STOPPED 2/2Gi");
+    expect(t.fake.applies().at(-1)).toBe("shuvi-1001 STOPPED 2/2Gi");
     expect(getComputer(t.db, ownerChatId(t.db))!.boost).toBeNull();
   });
 
@@ -278,7 +295,7 @@ describe("boost", () => {
     expect(text(b, 1)).toContain("big");
     expect(text(b, 1)).toContain("on the boosted computer (4 vCPU / 8Gi)");
     expect(text(b, 1)).toContain("back at its normal size");
-    expect(t.fake.applies().slice(-3)).toEqual(["ct-1001 STOPPED 4/8Gi", "ct-1001 RUNNING 4/8Gi", "ct-1001 STOPPED 2/2Gi"]);
+    expect(t.fake.applies().slice(-3)).toEqual(["shuvi-1001 STOPPED 4/8Gi", "shuvi-1001 RUNNING 4/8Gi", "shuvi-1001 STOPPED 2/2Gi"]);
   });
 });
 
@@ -315,7 +332,7 @@ describe("secrets", () => {
     const withEnv = t.fake.execs.filter((e) => e.env.MODAL_TOKEN === SECRET);
     expect(withEnv.length).toBe(2);
     // Never in the spec, never in the store.
-    expect(JSON.stringify(t.fake.containers.get("ct-1001"))).not.toContain(SECRET);
+    expect(JSON.stringify(t.fake.containers.get("shuvi-1001"))).not.toContain(SECRET);
 
     const [job] = runningJobs(t.db);
     await untilDone(t, job!.id);
@@ -396,7 +413,7 @@ describe("files", () => {
     on = false;
     await loop;
     expect(text(b, 0)).toBe(`Saved on your computer as ~/inbox/${photo.c.tgMessageId}-photo.jpg`);
-    expect(readFileSync(join(t.fake.home("ct-1001"), "inbox", `${photo.c.tgMessageId}-photo.jpg`))).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]));
+    expect(readFileSync(join(t.fake.home("shuvi-1001"), "inbox", `${photo.c.tgMessageId}-photo.jpg`))).toEqual(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]));
     expect(isErr(b, 1)).toBe(true);
   });
 
@@ -449,8 +466,8 @@ describe("files", () => {
 describe("media tools", () => {
   test("video_frames: synchronous frames come back as images; in the background they follow the job's result", async () => {
     const t = setup();
-    mkdirSync(join(t.fake.home("ct-1001"), "inbox"), { recursive: true });
-    writeFileSync(join(t.fake.home("ct-1001"), "inbox", "clip.mp4"), "not really a video");
+    mkdirSync(join(t.fake.home("shuvi-1001"), "inbox"), { recursive: true });
+    writeFileSync(join(t.fake.home("shuvi-1001"), "inbox", "clip.mp4"), "not really a video");
     ownerSays(t.db, "what happens in the clip?");
     const a = await turn(t, [
       { tool: "video_frames", args: { path: "~/inbox/clip.mp4", n: 3, background: false } },
@@ -466,23 +483,6 @@ describe("media tools", () => {
     const parts = b.calls[0]!.prompt as { type: string }[];
     expect(Array.isArray(parts)).toBe(true);
     expect(parts.filter((p) => p.type === "image")).toHaveLength(2);
-  });
-
-  test("transcribe runs boosted in the background and writes <path>.txt", async () => {
-    const t = setup();
-    mkdirSync(join(t.fake.home("ct-1001"), "inbox"), { recursive: true });
-    writeFileSync(join(t.fake.home("ct-1001"), "inbox", "voice.ogg"), "audio");
-    ownerSays(t.db, "what does it say?");
-    const a = await turn(t, [{ tool: "transcribe", args: { path: "~/inbox/voice.ogg" } }]);
-    expect(text(a, 0)).toContain("boosted to 4 vCPU / 8Gi");
-    const [job] = runningJobs(t.db);
-    await untilDone(t, job!.id);
-    const r = getJob(t.db, job!.id)!.result!;
-    expect(r).toContain("Transcript written to ~/inbox/voice.ogg.txt");
-    expect(r).toContain("hello from the fake whisper");
-    expect(readFileSync(join(t.fake.home("ct-1001"), "inbox", "voice.ogg.txt"), "utf8")).toBe("hello from the fake whisper\nsecond line\n");
-    await maintainPass(t.db, t.computers, t.cfg);
-    expect(t.fake.applies().at(-1)).toBe("ct-1001 STOPPED 2/2Gi");
   });
 });
 
@@ -575,8 +575,8 @@ describe("secrets, continued", () => {
   test("media jobs never get secrets", async () => {
     const t = setup();
     await grant(t);
-    mkdirSync(join(t.fake.home("ct-1001"), "inbox"), { recursive: true });
-    writeFileSync(join(t.fake.home("ct-1001"), "inbox", "clip.mp4"), "x");
+    mkdirSync(join(t.fake.home("shuvi-1001"), "inbox"), { recursive: true });
+    writeFileSync(join(t.fake.home("shuvi-1001"), "inbox", "clip.mp4"), "x");
     await turn(t, [{ tool: "video_frames", args: { path: "~/inbox/clip.mp4", n: 1 } }]);
     const launches = t.fake.execs.filter((e) => e.command.join(" ").includes("setsid"));
     expect(launches).toHaveLength(1);
@@ -601,7 +601,7 @@ describe("robustness", () => {
     expect(done.result).toContain("never started");
     expect((await maintainPass(t.db, t.computers, t.cfg)).restored).toEqual([chatId]);
     expect(getComputer(t.db, chatId)!.boost).toBeNull();
-    expect(t.fake.applies().at(-1)).toBe("ct-1001 STOPPED 2/2Gi");
+    expect(t.fake.applies().at(-1)).toBe("shuvi-1001 STOPPED 2/2Gi");
   });
 
   test("one chat failing maintenance does not stop the others, and is alerted", async () => {
@@ -638,17 +638,17 @@ describe("robustness", () => {
     t.env.SHUVI_COMPUTER_IMAGE = "registry.example/shuvi-computer@sha256:new";
     ownerSays(t.db, "again");
     await turn(t, [{ tool: "exec", args: { command: "true" } }]);
-    expect(t.fake.containers.get("ct-1001")!.spec.image).toBe("registry.example/shuvi-computer@sha256:fake");
+    expect(t.fake.containers.get("shuvi-1001")!.spec.image).toBe("registry.example/shuvi-computer@sha256:fake");
     // Its pgid file predates this boot: cancel does not signal that group.
     const { utimesSync } = await import("node:fs");
-    utimesSync(join(t.fake.home("ct-1001"), ".jobs", `${job!.id}.pgid`), 0, 0);
+    utimesSync(join(t.fake.home("shuvi-1001"), ".jobs", `${job!.id}.pgid`), 0, 0);
     ownerSays(t.db, "cancel");
     await turn(t, [{ tool: "cancel_job", args: { id: job!.id } }]);
     expect(Bun.spawnSync(["pgrep", "-f", "sleep 300"]).stdout.toString().trim()).not.toBe("");
-    t.fake.killAll("ct-1001");
+    t.fake.killAll("shuvi-1001");
     ownerSays(t.db, "now");
     await turn(t, [{ tool: "exec", args: { command: "true" } }]);
-    expect(t.fake.containers.get("ct-1001")!.spec.image).toBe("registry.example/shuvi-computer@sha256:new");
+    expect(t.fake.containers.get("shuvi-1001")!.spec.image).toBe("registry.example/shuvi-computer@sha256:new");
   });
 
   test("an exec Hangar refuses before the upgrade on a running computer is alerted as such, with the state seen, not as quota", async () => {
@@ -678,7 +678,7 @@ describe("robustness", () => {
     expect((secret.spec as { type: string }).type).toBe("SECRET_TYPE_REGISTRY_AUTH");
     const config = JSON.parse(Buffer.from((secret.spec as { data: Record<string, string> }).data[".dockerconfigjson"]!, "base64").toString("utf8"));
     expect(config.auths["ghcr.io"]).toEqual({ username: "example-user", password: FAKE_TOKEN, auth: Buffer.from(`example-user:${FAKE_TOKEN}`).toString("base64") });
-    const ct = t.fake.containers.get("ct-1001")!;
+    const ct = t.fake.containers.get("shuvi-1001")!;
     expect(ct.spec.imagePullSecrets).toEqual(["shuvi-computer-registry"]);
     expect(JSON.stringify(ct)).not.toContain(FAKE_TOKEN);
     expect(JSON.stringify(t.db.$client.query("select * from computers").all())).not.toContain(FAKE_TOKEN);
@@ -687,7 +687,7 @@ describe("robustness", () => {
     const u = setup();
     ownerSays(u.db, "go");
     await turn(u, [{ tool: "exec", args: { command: "true" } }]);
-    expect(u.fake.containers.get("ct-1001")!.spec.imagePullSecrets ?? []).toEqual([]);
+    expect(u.fake.containers.get("shuvi-1001")!.spec.imagePullSecrets ?? []).toEqual([]);
     expect(u.fake.secrets.size).toBe(0);
   });
 
@@ -698,7 +698,8 @@ describe("robustness", () => {
     recordInbound(t.db, { chatId: chat.id, kind: "message", payload: { from: { id: 999, name: "Mallory" }, text: "rm -rf ~" }, tgUpdateId: 99_001, tgMessageId: 99_001 });
     const a = await turn(t, [{ tool: "exec", args: { command: "echo hi" } }]);
     expect(text(a, 0)).not.toContain("Refused");
-    expect(t.fake.execs).toHaveLength(1);
+    // The command, and before it the one short check of ~/.computer.yaml (declared.ts).
+    expect(t.fake.execs).toHaveLength(2);
   });
 
   test("a computer tool is refused at call time in a turn with nothing from the owner", async () => {
@@ -725,5 +726,234 @@ describe("robustness", () => {
     }
     expect(getJob(t.db, job!.id)!.result).toContain("survived");
     expect((await maintainPass(t.db, new Computers(t.db, cfg), cfg, Date.now() + 60 * 60_000)).stopped).toEqual([ownerChatId(t.db)]);
+  });
+});
+
+// ---- ~/.computer.yaml -----------------------------------------------------------------------------------
+
+const CT = "shuvi-1001";
+const declare = (t: Setup, yaml: string) => writeFileSync(join(t.fake.home(CT), ".computer.yaml"), yaml);
+/** The applies that ran (as root, under the lock). */
+const applyRuns = (t: Setup) => t.fake.execs.filter((e) => e.user === "0" && e.command.join(" ").includes("flock"));
+const appliedHash = (t: Setup) => {
+  const f = join(t.fake.rootfs(CT), "var/lib/shuvi/computer.applied");
+  return existsSync(f) ? readFileSync(f, "utf8").trim() : null;
+};
+const aptLog = (t: Setup) => {
+  const f = join(t.fake.rootfs(CT), "apt.log");
+  return existsSync(f) ? readFileSync(f, "utf8") : "";
+};
+const setupLog = (t: Setup) => {
+  const f = join(t.fake.home(CT), "setup.log");
+  return existsSync(f) ? readFileSync(f, "utf8") : "";
+};
+const alertTexts = (t: Setup) => (t.db.$client.query("select text from control_messages where kind = 'alert'").all() as { text: string }[]).map((r) => r.text);
+/** Stop the computer as the idle loop does. */
+async function idleStop(t: Setup) {
+  expect((await maintainPass(t.db, t.computers, t.cfg, Date.now() + 16 * 60_000)).stopped).toEqual([ownerChatId(t.db)]);
+}
+
+describe("~/.computer.yaml", () => {
+  test("applied as root on the first start, apt through the cache in home, then setup; skipped while its hash matches, a stop and start included", async () => {
+    const t = setup();
+    const yaml = "apt: [example-tool, other-tool]\nsetup: |\n  echo setup-ran >> setup.log\n";
+    declare(t, yaml);
+    ownerSays(t.db, "go");
+    const a = await turn(t, [{ tool: "exec", args: { command: "echo hi" } }, { tool: "exec", args: { command: "echo again" } }]);
+    expect(text(a, 0)).toMatch(/^exit 0 · /);
+    expect(text(a, 0)).toContain("hi");
+    expect(text(a, 0)).toContain("(~/.computer.yaml was applied first, in ");
+    expect(text(a, 0)).toContain("apt: example-tool, other-tool; the setup script");
+    expect(applyRuns(t)).toHaveLength(1);
+    expect(aptLog(t)).toContain("apt-get install example-tool other-tool");
+    expect(existsSync(join(t.fake.rootfs(CT), "installed", "example-tool"))).toBe(true);
+    expect(existsSync(join(t.fake.home(CT), ".cache/computer/apt/example-tool.deb"))).toBe(true);
+    expect(setupLog(t)).toBe("setup-ran\n");
+    expect(appliedHash(t)).toBe(sha256(Buffer.from(yaml)));
+    // The check reads the file as the user; only the apply runs as root.
+    expect(t.fake.execs.filter((e) => e.user === "0").every((e) => e.command.join(" ").includes("flock"))).toBe(true);
+
+    // Matching hash: nothing runs, and nothing is said.
+    expect(text(a, 1)).not.toContain(".computer.yaml");
+    await idleStop(t);
+    ownerSays(t.db, "again");
+    const b = await turn(t, [{ tool: "exec", args: { command: "echo back" } }]);
+    expect(text(b, 0)).toContain("back");
+    expect(text(b, 0)).not.toContain(".computer.yaml");
+    expect(applyRuns(t)).toHaveLength(1);
+    expect(setupLog(t)).toBe("setup-ran\n");
+  });
+
+  test("no file: nothing runs as root", async () => {
+    const t = setup();
+    ownerSays(t.db, "go");
+    const a = await turn(t, [{ tool: "exec", args: { command: "echo plain" } }]);
+    expect(text(a, 0)).not.toContain(".computer.yaml");
+    expect(t.fake.execs.some((e) => e.user === "0")).toBe(false);
+  });
+
+  test("applied again after a new image (a fresh root disk) from the cache, and after an edit", async () => {
+    const t = setup();
+    declare(t, "apt: [example-tool]\nsetup: echo ran >> setup.log\n");
+    ownerSays(t.db, "go");
+    await turn(t, [{ tool: "exec", args: { command: "true" } }]);
+    expect(aptLog(t)).toContain("download example-tool");
+    expect(applyRuns(t)).toHaveLength(1);
+
+    t.env.SHUVI_COMPUTER_IMAGE = "registry.example/shuvi-computer@sha256:new";
+    ownerSays(t.db, "new image");
+    const a = await turn(t, [{ tool: "exec", args: { command: "true" } }]);
+    expect(t.fake.containers.get(CT)!.spec.image).toBe("registry.example/shuvi-computer@sha256:new");
+    expect(text(a, 0)).toContain("~/.computer.yaml was applied first");
+    expect(applyRuns(t)).toHaveLength(2);
+    // Installed again on the new root disk, without downloading again.
+    expect(existsSync(join(t.fake.rootfs(CT), "installed", "example-tool"))).toBe(true);
+    expect(aptLog(t)).toContain("apt-get install example-tool");
+    expect(aptLog(t)).not.toContain("download");
+    expect(setupLog(t)).toBe("ran\nran\n");
+
+    // An edit: applied before the next command; only the new package is downloaded.
+    const edited = "apt: [example-tool, third-tool]\nsetup: echo ran >> setup.log\n";
+    declare(t, edited);
+    ownerSays(t.db, "edited");
+    const b = await turn(t, [{ tool: "exec", args: { command: "true" } }]);
+    expect(text(b, 0)).toContain("apt: example-tool, third-tool");
+    expect(applyRuns(t)).toHaveLength(3);
+    expect(aptLog(t).match(/download \S+/g)).toEqual(["download third-tool"]);
+    expect(appliedHash(t)).toBe(sha256(Buffer.from(edited)));
+  });
+
+  test("a failure: the step and its output (redacted) in the command's result, which runs anyway; an alert; the hash not recorded; retried at the next start or by apply_computer_config", async () => {
+    const t = setup();
+    declare(t, "apt: [fake-missing-tool]\n");
+    ownerSays(t.db, "go");
+    const a = await turn(t, [{ tool: "exec", args: { command: "echo still-ran" } }, { tool: "exec", args: { command: "echo second" } }]);
+    expect(isErr(a, 0)).toBe(false);
+    expect(text(a, 0)).toContain("still-ran");
+    expect(text(a, 0)).toContain("~/.computer.yaml was NOT applied: its apt step failed (exit 100). The command ran anyway, without it.");
+    expect(text(a, 0)).toContain("E: Unable to locate package fake-missing-tool");
+    expect(appliedHash(t)).toBeNull();
+    expect(alertTexts(t).filter((x) => x.startsWith("Applying ~/.computer.yaml on the computer of") && x.includes("apt step (exit 100)"))).toHaveLength(1);
+    // Not retried within the same boot...
+    expect(text(a, 1)).not.toContain(".computer.yaml");
+    expect(applyRuns(t)).toHaveLength(1);
+    // ...except by apply_computer_config...
+    ownerSays(t.db, "try it");
+    const b = await turn(t, [{ tool: "apply_computer_config" }]);
+    expect(isErr(b, 0)).toBe(true);
+    expect(text(b, 0)).toContain("its apt step failed (exit 100)");
+    expect(applyRuns(t)).toHaveLength(2);
+    // ...and at the next start.
+    await idleStop(t);
+    ownerSays(t.db, "later");
+    await turn(t, [{ tool: "exec", args: { command: "true" } }]);
+    expect(applyRuns(t)).toHaveLength(3);
+    expect(appliedHash(t)).toBeNull();
+
+    // A failing setup step; its output is redacted like any other.
+    declare(t, `setup: |\n  echo leaking ${SECRET}\n  exit 3\n`);
+    ownerSays(t.db, "setup");
+    const c = await turn(t, [{ tool: "exec", args: { command: "true" } }]);
+    expect(text(c, 0)).toContain("its setup step failed (exit 3)");
+    expect(text(c, 0)).toContain("leaking [REDACTED:modal]");
+    expect(JSON.stringify(c.toolResults)).not.toContain(SECRET);
+    expect(alertTexts(t).join("\n")).not.toContain(SECRET);
+
+    // Fixed: applied.
+    declare(t, "apt: [example-tool]\n");
+    ownerSays(t.db, "fixed");
+    const d = await turn(t, [{ tool: "exec", args: { command: "true" } }]);
+    expect(text(d, 0)).toContain("~/.computer.yaml was applied first");
+    expect(appliedHash(t)).toBe(sha256(Buffer.from("apt: [example-tool]\n")));
+  });
+
+  test("a step past its time limit is stopped and reported as timed out", async () => {
+    const t = setup({ SHUVI_COMPUTER_APPLY_STEP_SEC: "1" });
+    declare(t, "setup: sleep 30\n");
+    ownerSays(t.db, "go");
+    const a = await turn(t, [{ tool: "exec", args: { command: "echo ok" } }]);
+    expect(text(a, 0)).toContain("its setup step failed (timed out after 1s)");
+    expect(text(a, 0)).toContain("ok");
+    expect(appliedHash(t)).toBeNull();
+  });
+
+  test("an unknown key, a bad package name, bad YAML: an error she sees, nothing run as root", async () => {
+    const t = setup();
+    declare(t, "apt: [example-tool]\npip: [example-lib]\n");
+    ownerSays(t.db, "go");
+    const a = await turn(t, [{ tool: "exec", args: { command: "echo ran" } }]);
+    expect(text(a, 0)).toContain("ran");
+    expect(text(a, 0)).toContain("its parse step failed");
+    expect(text(a, 0)).toMatch(/Unrecognized key[^\n]*pip/);
+    expect(text(a, 0)).toContain("It may hold only `apt`");
+    expect(applyRuns(t)).toHaveLength(0);
+    expect(alertTexts(t).some((x) => x.includes("parse step"))).toBe(true);
+
+    declare(t, 'apt: ["example-tool; rm -rf /"]\n');
+    ownerSays(t.db, "again");
+    const b = await turn(t, [{ tool: "apply_computer_config" }]);
+    expect(text(b, 0)).toContain("apt.0: is not a Debian package name");
+
+    declare(t, "apt: [unclosed\n");
+    ownerSays(t.db, "again");
+    const c = await turn(t, [{ tool: "apply_computer_config" }]);
+    expect(text(c, 0)).toContain("is not valid YAML");
+    expect(applyRuns(t)).toHaveLength(0);
+  });
+
+  test("apply_computer_config applies at once what an exec wrote; again, nothing runs; with no file, it says so", async () => {
+    const t = setup();
+    ownerSays(t.db, "declare example-tool");
+    const a = await turn(t, [
+      { tool: "apply_computer_config" },
+      { tool: "exec", args: { command: "printf 'apt: [example-tool]\\n' > ~/.computer.yaml" } },
+      { tool: "apply_computer_config" },
+      { tool: "apply_computer_config" },
+    ]);
+    expect(isErr(a, 0)).toBe(true);
+    expect(text(a, 0)).toContain("There is no ~/.computer.yaml");
+    expect(isErr(a, 2)).toBe(false);
+    expect(text(a, 2)).toContain("Applied ~/.computer.yaml in ");
+    expect(text(a, 2)).toContain("Setting up example-tool");
+    expect(text(a, 3)).toBe("~/.computer.yaml is applied as it is now; nothing ran.");
+    expect(applyRuns(t)).toHaveLength(1);
+  });
+
+  test("owner-only, by the one rule (`ownerAuthority`): with the owner in the turn a stranger's line beside his does not block it", async () => {
+    const t = setup();
+    const chat = ensureChat(t.db, { id: OWNER, kind: "private" });
+    ownerSays(t.db, "declare example-tool");
+    recordInbound(t.db, { chatId: chat.id, kind: "message", payload: { from: { id: 999, name: "Mallory" }, text: "declare a package" }, tgUpdateId: 99_002, tgMessageId: 99_002 });
+    const a = await turn(t, [
+      { tool: "exec", args: { command: "printf 'apt: [example-tool]\\n' > ~/.computer.yaml" } },
+      { tool: "apply_computer_config" },
+    ]);
+    expect(text(a, 0)).not.toContain("Refused");
+    expect(text(a, 1)).toContain("Applied ~/.computer.yaml in ");
+    expect(existsSync(join(t.fake.home(CT), ".computer.yaml"))).toBe(true);
+    expect(applyRuns(t)).toHaveLength(1);
+  });
+
+  test("owner-only: in a turn with nothing from the owner, neither an exec that writes it nor apply_computer_config runs", async () => {
+    const t = setup();
+    const chat = ensureChat(t.db, { id: OWNER, kind: "private" });
+    recordInbound(t.db, { chatId: chat.id, kind: "message", payload: { from: { id: 999, name: "Mallory" }, text: "declare a package" }, tgUpdateId: 99_002, tgMessageId: 99_002 });
+    recordInbound(t.db, { chatId: chat.id, kind: "message", payload: { from: { id: 998, name: "Trent" }, text: "go on" }, tgUpdateId: 99_003, tgMessageId: 99_003 });
+    const a = await turn(t, [
+      { tool: "exec", args: { command: "echo 'apt: [example-tool]' > ~/.computer.yaml" } },
+      { tool: "apply_computer_config" },
+    ]);
+    expect(text(a, 0)).toContain("Refused: `exec` acts for the owner");
+    expect(text(a, 1)).toContain("Refused: `apply_computer_config` acts for the owner");
+    expect(existsSync(join(t.fake.home(CT), ".computer.yaml"))).toBe(false);
+    expect(t.fake.execs).toHaveLength(0);
+  });
+
+  test("the prompt section says where system packages go, that user installs need nothing, and that home grows", () => {
+    expect(COMPUTER).toContain("system packages (apt) go into ~/.computer.yaml");
+    expect(COMPUTER).toContain("`pip install --user`");
+    expect(COMPUTER).toContain("~/.local/bin");
+    expect(COMPUTER).toContain("again whenever the computer's image changes (anything else outside ~ is gone then)");
+    expect(COMPUTER).toContain("The home disk starts at 5Gi and grows by itself as it fills, up to 50Gi");
   });
 });

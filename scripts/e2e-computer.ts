@@ -11,11 +11,14 @@
  *   3. a secret-gated exec: without a grant the variable is empty; request_secret puts a card in the
  *      control bot; the owner's press wakes the chat, whose exec gets the value in its environment and sees
  *      it only as [REDACTED:modal]; the value never reaches the store or anything the model was sent
- *   4. the idle computer is stopped (an apply of STOPPED, never a delete)
+ *   4. ~/.computer.yaml: an exec writes it, apply_computer_config applies it as root (apt through the cache
+ *      in home, then setup) and records its hash on the root disk
+ *   5. the idle computer is stopped (an apply of STOPPED, never a delete)
+ *   6. the next command starts it again, and the file, its hash matching, is not applied again
  *
  *   bun scripts/e2e-computer.ts
  */
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Update } from "grammy/types";
@@ -70,7 +73,7 @@ const bodies: string[] = [];
 let toolsOffered: string[] = [];
 
 /** [what the newest user message contains, what the model does]: the first match wins (matched as JSON). */
-const SCRIPT: Array<[RegExp, () => Response]> = [
+const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
   [/run something on your computer/, () => use("exec", { command: "echo computer-says-$((6*7)); whoami >/dev/null" })],
   [/exit 0 · [^"]*computer-says-42/, () => say("The computer says 42.")],
   [/start the long job/, () => use("exec", { command: "sleep 2; echo bg-finished", background: true, expect_seconds: 10 })],
@@ -81,6 +84,11 @@ const SCRIPT: Array<[RegExp, () => Response]> = [
   [/token=\[\]/, () => use("request_secret", { profile: "modal", ttl: "1d", reason: "to deploy the app" })],
   [/Asked the owner for \\"modal\\"/, () => say("I asked the owner for the modal secret.")],
   [/· ⚙ approval\] Approval #\d+ \(secret\)[^\n]*Grant for 1 day/, () => use("exec", { command: 'echo "token=[$MODAL_TOKEN]"' })],
+  [/declare a package/, () => use("exec", { command: "printf 'apt: [example-tool]\\nsetup: echo configured > configured.txt\\n' > ~/.computer.yaml && echo declared-ok" })],
+  [/exit 0 · [^"]*declared-ok/, () => use("apply_computer_config", {})],
+  [/Applied ~\/\.computer\.yaml in \d+s: apt: example-tool; the setup script/, () => say("The computer config is applied.")],
+  [/run something after the restart/, () => use("exec", { command: "echo after-restart" })],
+  [/exit 0 · [^"]*after-restart/, (t) => say(t.includes(".computer.yaml") ? "It applied the config again." : "Back after the restart.")],
 ];
 
 const anthropic = Bun.serve({
@@ -98,7 +106,7 @@ const anthropic = Bun.serve({
     const last = [...(body.messages ?? [])].reverse().find((m) => m.role === "user");
     const text = JSON.stringify(last?.content ?? "");
     seen.push(text);
-    for (const [re, act] of SCRIPT) if (re.test(text)) return act();
+    for (const [re, act] of SCRIPT) if (re.test(text)) return act(text);
     return say(`(no script for: ${text.slice(0, 160)})`);
   },
 });
@@ -169,8 +177,8 @@ await until("the server to start", () => serverOut.includes("shuvi server:"), 20
 tg.updates.push(dmUpdate(1, "run something on your computer"));
 await replied("The computer says 42.", "a turn ran a synchronous exec and answered from its output");
 check(toolsOffered.includes("mcp__shuvi__exec") && toolsOffered.includes("mcp__shuvi__read_job") && toolsOffered.includes("mcp__shuvi__request_secret"), "the computer's tools are offered");
-check(hangar.disks.has("home-1001") && hangar.containers.has("ct-1001"), "the chat's disk and container were created on the first exec");
-check(hangar.applies()[0] === "ct-1001 RUNNING 2/2Gi", `the container was started (${hangar.applies().join(", ")})`);
+check(hangar.disks.has("home-1001") && hangar.containers.has("shuvi-1001"), "the chat's disk and container were created on the first exec");
+check(hangar.applies()[0] === "shuvi-1001 RUNNING 2/2Gi", `the container was started (${hangar.applies().join(", ")})`);
 await until("the turn to close", turnsIdle);
 
 // ---- 2. a background exec ----------------------------------------------------------------------------
@@ -201,9 +209,28 @@ check(bodies.length > 0 && !bodies.some((b) => b.includes(SECRET)), "the value i
 check(!JSON.stringify([...hangar.containers.values()]).includes(SECRET), "nor in the container's spec");
 await until("the turn to close", turnsIdle);
 
-// ---- 4. idle stop ------------------------------------------------------------------------------------
-await until("the idle computer to be stopped", () => hangar.applies().at(-1) === "ct-1001 STOPPED 2/2Gi", 30_000);
+// ---- 4. ~/.computer.yaml -----------------------------------------------------------------------------
+const rootRuns = () => hangar.execs.filter((e) => e.user === "0" && e.command.join(" ").includes("flock")).length;
+tg.updates.push(dmUpdate(4, "declare a package"));
+await replied("The computer config is applied.", "an exec wrote ~/.computer.yaml and apply_computer_config applied it at once");
+check(toolsOffered.includes("mcp__shuvi__apply_computer_config") && !toolsOffered.includes("mcp__shuvi__transcribe"), "apply_computer_config is offered, transcribe is not");
+check(rootRuns() === 1, `it was applied once, as root (${rootRuns()})`);
+check(existsSync(join(hangar.rootfs("shuvi-1001"), "installed", "example-tool")), "its apt package was installed on the root disk");
+check(existsSync(join(hangar.home("shuvi-1001"), ".cache/computer/apt/example-tool.deb")), "through the apt cache in home");
+check(readFileSync(join(hangar.home("shuvi-1001"), "configured.txt"), "utf8") === "configured\n", "its setup script ran");
+check(existsSync(join(hangar.rootfs("shuvi-1001"), "var/lib/shuvi/computer.applied")), "its hash was recorded on the root disk");
+await until("the turn to close", turnsIdle);
+
+// ---- 5. idle stop ------------------------------------------------------------------------------------
+await until("the idle computer to be stopped", () => hangar.applies().at(-1) === "shuvi-1001 STOPPED 2/2Gi", 30_000);
 check(!hangar.calls.some((c) => c.method.startsWith("Delete")), "the idle computer was stopped, never deleted");
+
+// ---- 6. the next start: the file's hash matches, nothing is applied -----------------------------------
+tg.updates.push(dmUpdate(5, "run something after the restart"));
+await replied("Back after the restart.", "the next command started the computer again");
+check(hangar.applies().at(-1) === "shuvi-1001 RUNNING 2/2Gi", "it was started again");
+check(rootRuns() === 1, "~/.computer.yaml, unchanged on the same root disk, was not applied again");
+await until("the turn to close", turnsIdle);
 
 log("PASS");
 cleanup();
