@@ -18,14 +18,15 @@ import { defineCapability } from "../types.ts";
 /** How the assistant's output becomes Telegram messages. Framework knowledge, not persona. */
 export const SPEAKING = `## How you speak here
 
-You are on Telegram. The other person sees only the messages you send:
+You're on Telegram, and the other person sees only the messages you send. Your thinking never reaches them.
 
-- **Your ordinary text is the message.** Each stretch of text is sent as one message when you call your next tool or when your turn ends. Your thinking is never sent; they cannot see it.
-- **To tell them something partway through work** ("halfway there, here is the gist so far"), use \`say\`. Do not use \`say\` for your final answer; just write it.
-- **When no reply is needed**, call \`pass\`, optionally with a reaction. Nothing you write after it is sent. A reaction alone is a reply too.
-- **To react** to a message, use \`react\` with the #number shown before it.
-- Format with markdown (bold, lists, code blocks, links); the framework converts it for Telegram. Do not write HTML.
-- Messages they send while you work are appended after a tool result; take them in as they come.`;
+Whatever text you write is the message: each stretch of it goes out as one message when you call your next tool or when your turn ends. To tell them something partway through some work, like where things stand so far, use \`say\`. Your final answer you just write.
+
+When nothing needs saying, call \`pass\`, with a reaction if you like; anything you write after it is not sent. A reaction alone is a reply too. To react to a particular message, use \`react\` with the #number shown before it.
+
+Write the way a person chats on Telegram, not like a document. No headings or tables, a list only when the thing really is a list, and no blank lines for spacing. A line break is a real line break, never a literal \`\\n\`. Light markdown (bold, inline code, links) is fine and gets converted for Telegram; don't write HTML.
+
+If they send more while you're working, it shows up after a tool result; take it in as it comes.`;
 
 const emojiList = REACTION_EMOJI.join(" ");
 
@@ -39,7 +40,7 @@ export const speech = defineCapability<true>({
     const say: ToolDef<{ text: string }> = {
       name: "say",
       description: "Send a message partway through your work (progress, an early conclusion). Not for your final answer: write that as text.",
-      inputSchema: { text: z.string().min(1).describe("The message to send, in markdown") },
+      inputSchema: { text: z.string().min(1).describe("The message to send, written the way you'd chat") },
       async handler({ text }) {
         queueMessage(db, s, text);
         return ok("Sent.");
@@ -47,7 +48,7 @@ export const speech = defineCapability<true>({
     };
     const react: ToolDef<{ seq: number; emoji: string }> = {
       name: "react",
-      description: `React to a message. seq is the #number shown before it. Allowed emoji: ${emojiList}`,
+      description: `React to someone's message (not one of yours). seq is the #number shown before it. Allowed emoji: ${emojiList}`,
       inputSchema: { seq: z.number().int().describe("The message's #number"), emoji: z.string().describe("One emoji") },
       async handler({ seq, emoji }) {
         const e = normalizeReaction(emoji);
@@ -56,6 +57,7 @@ export const speech = defineCapability<true>({
         if (!target || target.chatId !== s.chat.id || (target.kind !== "message" && target.kind !== "bot_message")) {
           return err(`#${seq} is not a message in this chat.`);
         }
+        if (target.kind === "bot_message") return err(`#${seq} is your own message; you can react only to other people's.`);
         queueReaction(db, s, seq, e);
         return ok("Reacted.");
       },

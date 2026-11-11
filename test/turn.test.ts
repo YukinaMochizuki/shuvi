@@ -8,9 +8,9 @@ import { isLostSession, runTurn } from "../src/agent/turn.ts";
 import { controlMessagesOf } from "../src/store/control.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
-import { getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
+import { enqueueOutbound, getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
 import { claimTurn, getTurn } from "../src/store/turns.ts";
-import { memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./helpers.ts";
+import { lastSeq, memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./helpers.ts";
 
 const emptyHome = mkdtempSync(join(tmpdir(), "shuvi-home-"));
 
@@ -97,6 +97,19 @@ describe("runTurn: how output becomes messages", () => {
     const { adapter } = await turnWith(db, [{ tool: "react", args: { seq, emoji: "🦖" } }, { tool: "react", args: { seq: 9999, emoji: "👍" } }]);
     expect(adapter.toolResults.map((r) => r.result.isError)).toEqual([true, true]);
     expect(pendingOutbound(db)).toEqual([]);
+  });
+
+  test("react refuses her own message, and still reacts to theirs", async () => {
+    const db = memDb();
+    ownerSays(db, "before");
+    enqueueOutbound(db, { chatId: ownerChatId(db), kind: "bot_message", payload: { text: "an earlier answer" }, idemKey: "earlier" });
+    const mine = lastSeq(db);
+    db.$client.exec("update chat_events set status = 'sent' where kind = 'bot_message'");
+    const theirs = ownerSays(db, "nice");
+    const { adapter } = await turnWith(db, [{ tool: "react", args: { seq: mine, emoji: "👍" } }, { tool: "react", args: { seq: theirs, emoji: "👍" } }]);
+    expect(adapter.toolResults.map((r) => !!r.result.isError)).toEqual([true, false]);
+    expect(JSON.stringify(adapter.toolResults[0]!.result)).toContain("your own message");
+    expect(pendingOutbound(db).map((e) => [e.kind, (e.payload as unknown as BotReactionPayload).targetSeq])).toEqual([["bot_reaction", theirs]]);
   });
 });
 
