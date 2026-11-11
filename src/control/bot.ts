@@ -1,6 +1,6 @@
 import { and, asc, count, desc, eq, gte, inArray, lt, max } from "drizzle-orm";
 import { GrammyError, HttpError, type Api } from "grammy";
-import type { Update } from "grammy/types";
+import type { BotCommand, Update } from "grammy/types";
 import { formatTime } from "../agent/render.ts";
 import { stopTurn } from "../server/commands.ts";
 import type { SignalTurn } from "../server/spawn.ts";
@@ -20,6 +20,10 @@ import { answerApproval, cardKeyboard, getApproval, parseCallback } from "./appr
  *   /stop <chat>     stop that chat's turn, exactly as `/stop` in the chat does (server/commands.ts
  *                    `stopTurn`); <chat> is the chat number /status shows, or its Telegram id
  *   approval buttons recorded through approvals.ts
+ *
+ * `CONTROL_COMMANDS` is the one list of the commands: /help is built from it, and the server registers it
+ * with Telegram at startup (server/commands.ts `registerCommands`) for the owner's `/` menu. A new command
+ * is added there and handled in `handleUpdate`.
  *
  * Inbound works like the main poller (server/poller.ts): its own offset in `kv`
  * (`control_telegram_offset`), advanced in the SAME transaction that handles the batch, so a command is
@@ -51,7 +55,12 @@ export interface ControlDeps {
   now?: () => number;
 }
 
-const HELP = "Commands:\n/status: running turns, recent failures, pending outbound, the deployed commit\n/stop <chat>: stop the turn running in that chat (the chat number from /status)";
+export const CONTROL_COMMANDS = [
+  { command: "status", description: "Running turns, recent failures, pending outbound, commit" },
+  { command: "stop", description: "Stop a chat's turn: /stop <chat> (the number from /status)" },
+] as const satisfies readonly BotCommand[];
+
+const HELP = ["Commands:", ...CONTROL_COMMANDS.map((c) => `/${c.command}: ${c.description}`)].join("\n");
 
 function ago(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));

@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { Api } from "grammy";
 import { expireApprovals } from "../control/approvals.ts";
 import { backupPass } from "../control/backup.ts";
-import { controlPollOnce, controlSendPass, deployedCommit, outboundAlertPass } from "../control/bot.ts";
+import { CONTROL_COMMANDS, controlPollOnce, controlSendPass, deployedCommit, outboundAlertPass } from "../control/bot.ts";
 import { enabledCapabilities } from "../capabilities/index.ts";
 import { capabilityLoops } from "../capabilities/types.ts";
 import { loadConfig } from "../env.ts";
@@ -31,7 +31,7 @@ import { openDb } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
 import { runningTurns } from "../store/turns.ts";
 import { telegramFiles } from "../telegram/files.ts";
-import { commandPass } from "./commands.ts";
+import { commandPass, MAIN_COMMANDS, registerCommands } from "./commands.ts";
 import { loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
 import { sendPass } from "./sender.ts";
@@ -44,6 +44,8 @@ const api = new Api(cfg.botToken, cfg.telegramApiRoot ? { apiRoot: cfg.telegramA
 const capabilities = enabledCapabilities();
 const me = await api.getMe();
 console.log(`shuvi server: @${me.username}, data in ${cfg.dataDir}`);
+// The owner's `/` menu. Best effort and not awaited: a failure is logged and the server carries on.
+void registerCommands(api, cfg.ownerId, MAIN_COMMANDS, "main bot");
 
 const stop = new AbortController();
 const loop = (name: string, body: () => Promise<number | void>, everyMs: number) => runLoop(name, body, everyMs, stop.signal);
@@ -82,6 +84,7 @@ void loop("backup", async () => void backupPass({ db, dataDir: cfg.dataDir, home
 if (cfg.controlBotToken) {
   const control = new Api(cfg.controlBotToken, cfg.controlApiRoot ? { apiRoot: cfg.controlApiRoot } : undefined);
   const deps = { ownerId: cfg.ownerId, commit: deployedCommit(join(dirname(fileURLToPath(import.meta.url)), "../..")), timeZone: cfg.timeZone, signal: signalTurn };
+  void registerCommands(control, cfg.ownerId, CONTROL_COMMANDS, "control bot");
   void loop("control-poller", async () => void (await controlPollOnce(db, control, deps, 25, stop.signal)), 0);
   void loop("control-sender", async () => (await controlSendPass(db, control, cfg.ownerId)).backoffMs, 500);
   console.log(`control bot on, ${deps.commit}`);

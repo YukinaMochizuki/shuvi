@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Api } from "grammy";
-import { commandPass } from "../src/server/commands.ts";
+import { CONTROL_COMMANDS } from "../src/control/bot.ts";
+import { commandPass, MAIN_COMMANDS, registerCommands } from "../src/server/commands.ts";
+import { classify } from "../src/telegram/inbound.ts";
 import { currentOffset, pollOnce, recordBatch } from "../src/server/poller.ts";
 import { sendPass } from "../src/server/sender.ts";
 import { SPAWN_GRACE_MS, wakerPass } from "../src/server/waker.ts";
@@ -143,6 +145,29 @@ describe("commands", () => {
     expect(getChat(db, chatId)!.backendSessionId).toBeNull();
     expect(runningTurns(db)).toEqual([]);
     expect(db.$client.query("select count(*) as n from chat_events where kind = 'message'").get()).toEqual({ n: 1 });
+  });
+
+  test("each bot's command menu is registered for the owner's chat only, idempotently", async () => {
+    const api = fakeApi();
+    expect(await registerCommands(api, OWNER, MAIN_COMMANDS, "main bot")).toBe(true);
+    expect(await registerCommands(api, OWNER, MAIN_COMMANDS, "main bot")).toBe(true);
+    expect(await registerCommands(api, OWNER, CONTROL_COMMANDS, "control bot")).toBe(true);
+    const scope = { type: "chat", chat_id: OWNER };
+    const main = { scope, commands: [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }] };
+    const control = { scope, commands: [{ command: "status", description: expect.any(String) }, { command: "stop", description: expect.stringContaining("<chat>") }] };
+    expect(tg!.sent("setMyCommands")).toEqual([main, main, control]);
+  });
+
+  test("a Telegram error while registering commands is logged, not thrown", async () => {
+    const api = fakeApi();
+    tg!.fail("setMyCommands", { code: 400, description: "Bad Request: chat not found" });
+    expect(await registerCommands(api, OWNER, MAIN_COMMANDS, "main bot")).toBe(false);
+  });
+
+  test("the menu and inbound recognise the same commands", () => {
+    for (const [i, c] of MAIN_COMMANDS.entries()) {
+      expect(classify(dmUpdate(950 + i, `/${c.command}`), OWNER)).toMatchObject({ kind: "command", payload: { command: c.command } });
+    }
   });
 });
 

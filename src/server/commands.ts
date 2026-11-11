@@ -1,3 +1,5 @@
+import type { Api } from "grammy";
+import type { BotCommand } from "grammy/types";
 import type { Db } from "../store/db.ts";
 import { enqueueOutbound, markCommandDone, pendingCommands, resetConversation, type CommandPayload } from "../store/events.ts";
 import { markStop, runningTurnFor, type Turn } from "../store/turns.ts";
@@ -16,7 +18,31 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  *
  * The control bot's `/stop <chat>` (src/control/bot.ts) goes through `stopTurn` too, so the two mean the
  * same thing.
+ *
+ * `MAIN_COMMANDS` is the one list of them: inbound.ts recognises exactly these, and the server registers
+ * them with Telegram at startup (`registerCommands`) so the owner's `/` menu offers them. A new command is
+ * added here, and handled in `commandPass`.
  */
+
+export const MAIN_COMMANDS = [
+  { command: "new", description: "Start a fresh conversation" },
+  { command: "stop", description: "Stop the running turn" },
+] as const satisfies readonly (BotCommand & { command: CommandPayload["command"] })[];
+
+/**
+ * Register a bot's command menu, scoped to the owner's private chat so nobody else sees one. Idempotent
+ * (`setMyCommands` replaces the list). A Telegram error is logged and swallowed: a missing menu must never
+ * stop the server.
+ */
+export async function registerCommands(api: Api, ownerId: number, commands: readonly BotCommand[], bot: string): Promise<boolean> {
+  try {
+    await api.setMyCommands([...commands], { scope: { type: "chat", chat_id: ownerId } });
+    return true;
+  } catch (e) {
+    console.error(`${bot}: could not register commands: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
 
 /**
  * Stop the turn running in a chat, if any. `stopSeq` is where the stop happened in the chat's log: the
