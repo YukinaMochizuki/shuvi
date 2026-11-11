@@ -13,6 +13,7 @@ bun test                    # fresh in-memory DB per test
 bun scripts/e2e-fake.ts     # server + runner child + real Claude Code CLI, fake Telegram and Anthropic
 bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
 bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
+bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
 bun run db:generate         # after any change to src/store/schema.ts
 ```
 
@@ -39,6 +40,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | turn liveness, the wall-clock limit | `src/server/spawn.ts`, `src/server/waker.ts` |
 | telling the owner anything (alerts, /status, approvals) | `src/control/bot.ts`, `src/store/control.ts`, `src/control/approvals.ts` |
 | the sticker library: its format and index, ranking, the rules `sticker` enforces | `src/capabilities/stickers/` (`library.ts`, `find.ts`, `rules.ts`) |
+| each chat's computer (Hangar), exec, secrets, files | `src/capabilities/computer/index.ts`, then `state.ts` (who may touch it when) and `secrets.ts` |
 
 ## Adding a capability
 

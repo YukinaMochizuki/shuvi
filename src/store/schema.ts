@@ -39,6 +39,8 @@ export const EVENT_KINDS = [
   "bot_message",
   /** The assistant (or the server, acknowledging a command) reacted to a message. Outbound. */
   "bot_reaction",
+  /** The assistant sent a file or a photo from its computer (capabilities/computer/). Outbound. */
+  "bot_file",
   /** The owner answered an approval card in the control bot (src/control/approvals.ts) that asked to wake this chat. */
   "approval",
   /** A schedule came due (store/schedules.ts). Written by the framework, never someone speaking. */
@@ -52,13 +54,18 @@ export const EVENT_KINDS = [
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
-export const OUTBOUND_KINDS: EventKind[] = ["bot_message", "bot_reaction", "bot_sticker"];
+export const OUTBOUND_KINDS: EventKind[] = ["bot_message", "bot_reaction", "bot_sticker", "bot_file"];
 /**
  * Kinds that, past the cursor, are a turn's input, and ask for a turn. One exception: an `external` event
  * from a source declared with `trigger: false` is input for the next turn but does not start one
  * (`asksForTurn` below, which the waker's check and the claim use).
  */
 export const TRIGGER_KINDS: EventKind[] = ["message", "approval", "scheduled", "job_done", "external"];
+
+/** An event whose attachment is still to be handled (new, or asked for). The partial index and its query share it. */
+export const ATTACHMENT_PENDING = sql.raw(
+  `json_extract(payload, '$.attachment.fileId') IS NOT NULL AND coalesce(json_extract(payload, '$.attachment.state'), 'new') IN ('new', 'requested')`,
+);
 
 export const chatEvents = sqliteTable(
   "chat_events",
@@ -84,7 +91,13 @@ export const chatEvents = sqliteTable(
     turnId: integer("turn_id"),
     at: text("at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
-  (t) => [index("chat_events_chat_seq").on(t.chatId, t.seq), index("chat_events_status").on(t.status)],
+  (t) => [
+    index("chat_events_chat_seq").on(t.chatId, t.seq),
+    index("chat_events_status").on(t.status),
+    // The files waiting to be copied into a chat's computer (store/media.ts `pendingAttachments`): only rows
+    // with an attachment still new or asked for, so the scan does not grow with every file ever sent.
+    index("chat_events_attachment_pending").on(t.seq).where(ATTACHMENT_PENDING),
+  ],
 );
 
 /** The events past the cursor that start a turn: TRIGGER_KINDS, minus quiet `external` ones. */
@@ -227,6 +240,66 @@ export const jobs = sqliteTable(
     endedAt: text("ended_at"),
   },
   (t) => [index("jobs_state").on(t.state)],
+);
+
+/**
+ * Each chat's computer (docs/design.md §15, src/capabilities/computer/): a Hangar Disk mounted as the home
+ * of a Hangar Container, both named after the chat, created on the first exec and never deleted. This row is
+ * what shuvi knows of them, so every process (the server's loops, each runner child) and a restarted server
+ * agree on it. It holds no secret: those go only into one exec's environment.
+ *
+ * Coordination between processes is on this row, in IMMEDIATE transactions (computer/state.ts):
+ *   - an exec holds a LEASE (one entry of `leases`, until a time): while one is live the computer is not
+ *     stopped or resized under it; an exec whose process died leaves one that lapses on its own;
+ *   - a change of run state that must not race an exec (the idle stop, a boost's resize and restore) holds
+ *     the OP (`op`, `op_until`): while one is held no exec starts, and it lapses on its own at `op_until`
+ *     if its holder died.
+ */
+export const computers = sqliteTable("computers", {
+  chatId: integer("chat_id")
+    .primaryKey()
+    .references(() => chats.id),
+  /** The Hangar Disk (`home-<chat>`) and Container (`ct-<chat>`). */
+  disk: text("disk").notNull(),
+  container: text("container").notNull(),
+  /** Both objects have been applied at least once. */
+  created: integer("created", { mode: "boolean" }).notNull().default(false),
+  /** The run state shuvi last applied. */
+  runState: text("run_state", { enum: ["running", "stopped"] }).notNull().default("stopped"),
+  /** While boosted: the size it runs at, and the background job it is for (null: a synchronous exec). */
+  boost: text("boost", { mode: "json" }).$type<{ cpu: string; memory: string; jobId: number | null; since: string }>(),
+  /** A run-state change in progress: `stop` (idle), `boost`, `restore`. Null when none. */
+  op: text("op"),
+  opUntil: text("op_until"),
+  /** Execs in flight, by a random id, each with the time its lease lapses (ISO). */
+  leases: text("leases", { mode: "json" }).notNull().default({}).$type<Record<string, string>>(),
+  /** When the last exec ended (or started): the idle clock. */
+  lastExecAt: text("last_exec_at"),
+  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
+
+/**
+ * Secret profiles granted to a chat's computer (docs/design.md §15, computer/secrets.ts). A grant is made
+ * from the owner's answer to a `secret` approval card, once per approval; it names the profile, never a
+ * value. It ends at `expires_at`, or when the owner presses "Revoke" on its revoke card
+ * (`revoke_approval_id`) in the control bot.
+ */
+export const secretGrants = sqliteTable(
+  "secret_grants",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id),
+    profile: text("profile").notNull(),
+    /** The approval the owner granted it on. One grant per approval. */
+    approvalId: integer("approval_id").notNull().unique(),
+    expiresAt: text("expires_at").notNull(),
+    /** The control-bot card that revokes it. */
+    revokeApprovalId: integer("revoke_approval_id"),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [index("secret_grants_chat").on(t.chatId)],
 );
 
 /**

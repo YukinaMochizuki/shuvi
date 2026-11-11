@@ -300,7 +300,7 @@ export function outboundAlertPass(db: Db, staleMs: number, now = Date.now()): nu
     .all();
   for (const r of failed) {
     const chat = getChat(db, r.chatId);
-    const what = r.kind === "bot_message" ? "A message" : "A reaction";
+    const what = r.kind === "bot_message" ? "A message" : r.kind === "bot_file" ? "A file" : "A reaction";
     if (raiseAlert(db, { key: `outbound-failed:${r.seq}`, topic: `outbound:${r.chatId}`, text: `${what} to ${chat ? chatLabel(chat) : `chat ${r.chatId}`} could not be delivered (#${r.seq}): ${oneLine(r.note ?? "unknown")}` }, now) === "pending") raised++;
   }
   const staleBefore = new Date(now - staleMs).toISOString();

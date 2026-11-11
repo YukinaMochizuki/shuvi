@@ -45,7 +45,8 @@ export interface JobKind {
   pollEveryMs?: number;
   /** How long one poll may take before it counts as failed (default: the watcher's). */
   pollTimeoutMs?: number;
-  poll?(job: Job, signal: AbortSignal): Promise<JobPoll>;
+  /** `db` is the watcher's store, for a kind whose state lives there too (the computer's). */
+  poll?(job: Job, signal: AbortSignal, db: Db): Promise<JobPoll>;
 }
 
 export interface NewJob {
@@ -100,6 +101,22 @@ export function checkJobToken(job: Job, token: string): boolean {
   const a = Buffer.from(hashToken(token), "hex");
   const b = Buffer.from(job.tokenHash, "hex");
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Drop a job that never started (its work could not be launched), so no `job_done` is written for work that
+ * never existed: the tool that tried says so in its own result. Only a running job with no event is dropped.
+ */
+export function discardJob(db: Db, id: number): void {
+  db.delete(jobs)
+    .where(and(eq(jobs.id, id), eq(jobs.state, "running")))
+    .run();
+}
+
+/** Merge `patch` into a job's kind-specific `spec`. */
+export function updateJobSpec(db: Db, id: number, patch: Record<string, unknown>): void {
+  const job = getJob(db, id);
+  if (job) db.update(jobs).set({ spec: { ...job.spec, ...patch } }).where(eq(jobs.id, id)).run();
 }
 
 /** Record when to poll next, and why the last poll failed if it did. */

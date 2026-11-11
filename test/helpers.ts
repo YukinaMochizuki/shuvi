@@ -140,8 +140,15 @@ export class FakeTelegram {
           return bytes ? new Response(bytes) : new Response("not found", { status: 404 });
         }
         const method = url.pathname.split("/").at(-1)!;
-        const text = await req.text();
-        const body = (text ? JSON.parse(text) : {}) as Record<string, unknown>;
+        let body: Record<string, unknown>;
+        if ((req.headers.get("content-type") ?? "").includes("multipart/form-data")) {
+          // An upload (sendDocument, sendPhoto): fields as strings, a file as its name and size.
+          body = {};
+          for (const [k, v] of (await req.formData()).entries()) body[k] = typeof v === "string" ? v : { file: v.name, size: v.size, bytes: new Uint8Array(await v.arrayBuffer()) };
+        } else {
+          const text = await req.text();
+          body = (text ? JSON.parse(text) : {}) as Record<string, unknown>;
+        }
         this.calls.push({ method, body });
         const f = this.failures.get(method)?.shift();
         if (f) return Response.json({ ok: false, error_code: f.code, description: f.description, ...(f.retry_after ? { parameters: { retry_after: f.retry_after } } : {}) });
@@ -172,6 +179,9 @@ export class FakeTelegram {
             const set = this.stickerSets.get(String(body.name));
             return set ? Response.json({ ok: true, result: set }) : Response.json({ ok: false, error_code: 400, description: "Bad Request: STICKERSET_INVALID" });
           }
+          case "sendDocument":
+          case "sendPhoto":
+            return Response.json({ ok: true, result: { message_id: this.nextMessageId++, date: 0, chat: { id: Number(body.chat_id), type: "private" } } });
           default:
             return Response.json({ ok: true, result: true });
         }

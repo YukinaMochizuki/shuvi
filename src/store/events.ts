@@ -26,6 +26,34 @@ export interface MessagePayload {
   forwardedFrom?: string;
   /** A picture the message carries that the model can be shown (a photo, a sticker). See MessageMedia. */
   media?: MessageMedia;
+  /** A file the message carries, to be copied into the chat's computer (`~/inbox/`). See MessageAttachment. */
+  attachment?: MessageAttachment;
+}
+
+/**
+ * A file the owner sent (a document, a photo, a video, audio), recorded with the message as a plain fact
+ * (no `state`). Only the computer capability handles it (src/capabilities/computer/files.ts), and only
+ * while it is on: it copies a new one into the chat's computer when that computer next runs, a photo only
+ * when asked to (`requested`), and completes the record in place.
+ */
+export interface MessageAttachment {
+  kind: "document" | "photo" | "video" | "audio" | "voice" | "video_note" | "animation";
+  fileId: string;
+  fileUniqueId: string;
+  /** The file's name as sent, or one made up from its kind (`photo.jpg`). */
+  name: string;
+  /** Its size in bytes, as Telegram gave it. */
+  size?: number;
+  mimeType?: string;
+  /**
+   * Unset: new, not handled yet. requested: a photo asked for (`save_photo`); ready: at `path`; failed: given
+   * up (`error`); skipped: left out (a photo nobody asked for, or a file sent before the computer was on).
+   */
+  state?: "requested" | "ready" | "failed" | "skipped";
+  /** Where it is in the computer, from its home: `inbox/<message id>-<name>`. */
+  path?: string;
+  attempts?: number;
+  error?: string;
 }
 
 /**
@@ -81,6 +109,22 @@ export interface ApprovalPayload {
 export interface BotReactionPayload {
   targetSeq: number;
   emoji: string;
+}
+
+/**
+ * A file the assistant sends (computer/files.ts `send_file`, `send_photo`). The bytes wait in the data dir
+ * at `file` (`<data dir>/outbox/…`, absolute) until the sender has delivered them, and are deleted then.
+ */
+export interface BotFilePayload {
+  as: "document" | "photo";
+  /** The bytes to send, an absolute path under `<data dir>/outbox/`. */
+  file: string;
+  /** The file name Telegram shows. */
+  name: string;
+  caption?: string;
+  /** Where it came from in the computer, for the record. */
+  source: string;
+  bytes: number;
 }
 
 /** A schedule came due. */
@@ -285,7 +329,8 @@ export function enqueueOutbound(
   e:
     | { chatId: number; kind: "bot_message"; payload: BotMessagePayload; idemKey: string; turnId?: number }
     | { chatId: number; kind: "bot_reaction"; payload: BotReactionPayload; idemKey: string; turnId?: number }
-    | { chatId: number; kind: "bot_sticker"; payload: BotStickerPayload; idemKey: string; turnId?: number },
+    | { chatId: number; kind: "bot_sticker"; payload: BotStickerPayload; idemKey: string; turnId?: number }
+    | { chatId: number; kind: "bot_file"; payload: BotFilePayload; idemKey: string; turnId?: number },
 ): void {
   db.insert(chatEvents)
     .values({
