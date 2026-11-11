@@ -95,6 +95,8 @@ function describe(c: Candidate): string {
 
 export const stickers = defineCapability<StickersConfig>({
   id: "stickers",
+  label: "stickers",
+  gives: "find_sticker, list_stickers, view_stickers and sticker from her library; add_sticker_pack and remove_sticker_pack when the owner asks.",
   enable: (env) => {
     if (env.SHUVI_STICKERS === "off") return null;
     return { dataDir: dataDirFrom(env), ownerId: ownerIdFrom(env), fetchWaitMs: FETCH_WAIT_MS };

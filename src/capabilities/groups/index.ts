@@ -1,11 +1,15 @@
 import { z } from "zod";
 import { err, ok, type ToolDef } from "agent-runtime";
+import { catalogue, checkTools, explainPolicy } from "../../policy/explain.ts";
 import { readPolicyText } from "../../policy/load.ts";
 import { checkEntry, defaultPolicy, describeTriggers, DM_DEFAULT, entryToDoc, resolveChat } from "../../policy/policy.ts";
 import { requestPolicyChange } from "../../policy/write.ts";
 import { enqueueOutbound } from "../../store/events.ts";
 import { chatLabel, isOwnerDm, ownerIdFrom, sendTarget } from "../access.ts";
-import { defineCapability } from "../types.ts";
+import { defineCapability, type Capability } from "../types.ts";
+
+/** The registry, read when a tool runs: importing it at load would be a cycle (it lists this capability). */
+const registry = async (): Promise<readonly Capability<any>[]> => (await import("../index.ts")).CAPABILITIES;
 
 /**
  * Groups: what the assistant needs to live in more than one chat (docs/design.md §6–§8). Most of groups is
@@ -20,7 +24,14 @@ import { defineCapability } from "../types.ts";
  *                    the control bot (policy/write.ts); the owner's approval writes and commits
  *                    home/policy.yaml. OWNER-ONLY: the boundary refuses it unless the turn is the owner's.
  *                    From a group, only that group's own entry
- *   read_policy      what policy says: all of it from the owner's DM, this chat's entry from a group
+ *                    The entry is checked before any card is sent: its shape (policy.ts `checkEntry`) and its
+ *                    tools against the capabilities this build has (policy/explain.ts `checkTools`); an
+ *                    error names the valid options and the explain_policy path to read
+ *   read_policy      what policy says: all of it from the owner's DM, this chat's entry from a group; then
+ *                    a short catalogue of the capabilities, one line each
+ *   explain_policy   the file's structure, one field, or one capability in detail, on demand, in the
+ *                    manner of `kubectl explain` (policy/explain.ts). Open to every turn: it only
+ *                    describes what this build has
  *   a section        in a group only: how a group works for her. The owner's DM gets no section, so its
  *                    prompt is what it was before groups existed
  *
@@ -47,6 +58,8 @@ This is a group: several people talk here, mostly to each other. You see every m
 
 export const groups = defineCapability<GroupsConfig>({
   id: "groups",
+  label: "groups and policy",
+  gives: "send to a group from the DM, read_policy, propose_policy. Always on.",
   enable: (env) => (env.SHUVI_GROUPS === "off" ? null : { ownerId: ownerIdFrom(env) }),
   always: true,
   ownerOnly: ["send", "propose_policy"],
@@ -81,8 +94,8 @@ export const groups = defineCapability<GroupsConfig>({
       description:
         "Propose a change to one chat's settings in policy.yaml (who wakes you there, which persona and memory it sees, which tools it has, with their parameters) when the owner asks for one. " +
         "Give the chat's whole entry as it should be, or null to remove the chat. The owner gets an approval card with the diff; the change is written only once they approve, and their answer comes back here as an approval event. " +
-        'An entry: { title?, trigger: "all" | [mention, reply, followup], followup_minutes?, persona: [public] (private only in the DM), memory: [chat] (private only in the DM), tools: "all" | { <capability>: { <parameters> } } }, ' +
-        "e.g. tools: { web: {}, retrieval: {}, workstream: { products: [widgetry] } }. Read the current one with read_policy first.",
+        "An entry: { title?, trigger, followup_minutes?, persona, memory, tools }. " +
+        "Read the current one with read_policy first; explain_policy describes the entry's fields and each capability's parameters.",
       inputSchema: {
         chat: z.string().optional().describe('"dm", or a group\'s chat id. Default: this chat'),
         entry: z.record(z.string(), z.unknown()).nullable().describe("The chat's whole entry as it should be, or null to remove it"),
@@ -96,7 +109,9 @@ export const groups = defineCapability<GroupsConfig>({
         let doc: Record<string, unknown> | null = null;
         if (entry !== null) {
           const r = checkEntry(target, entry);
-          if ("error" in r) return err(`That entry is not valid: ${r.error}. Nothing was proposed.`);
+          if ("error" in r) return err(`That entry is not valid: ${r.error}. See explain_policy(${r.field ? `"${r.field}"` : ""}). Nothing was proposed.`);
+          const bad = checkTools(await registry(), entry.tools);
+          if (bad) return err(`That entry is not valid: ${bad}. Nothing was proposed.`);
           doc = entryToDoc(r.entry);
         }
         const label = target === "dm" ? "the owner's DM" : `${policy.chats[target]?.title ? `"${policy.chats[target]!.title}" ` : ""}(${target})`;
@@ -112,16 +127,28 @@ export const groups = defineCapability<GroupsConfig>({
       description: dm ? "Read policy.yaml: every chat's settings (who wakes you, persona and memory layers, tools)." : "Read this chat's settings in policy.yaml (who wakes you here, persona and memory layers, tools).",
       inputSchema: {},
       async handler() {
+        const tail = `\n\n${catalogue(await registry())}`;
         if (dm) {
           const text = readPolicyText(home);
-          return ok(text?.trim() ? text : `(There is no policy.yaml: only the owner's DM is served, with its default settings:)\n${Bun.YAML.stringify({ chats: { dm: entryToDoc(DM_DEFAULT) } }, null, 2)}`);
+          return ok((text?.trim() ? text.trimEnd() : `(There is no policy.yaml: only the owner's DM is served, with its default settings:)\n${Bun.YAML.stringify({ chats: { dm: entryToDoc(DM_DEFAULT) } }, null, 2).trimEnd()}`) + tail);
         }
         if (!here) return err("This chat is not listed in policy.yaml.");
-        return ok(Bun.YAML.stringify({ chats: { [here.key]: entryToDoc(here) } }, null, 2));
+        return ok(Bun.YAML.stringify({ chats: { [here.key]: entryToDoc(here) } }, null, 2).trimEnd() + tail);
       },
     };
 
-    return [{ serverName: "shuvi", tools: [send, propose, read] as ToolDef[] }];
+    const explain: ToolDef<{ path?: string }> = {
+      name: "explain_policy",
+      description:
+        'Explain what policy.yaml can say, like `kubectl explain`: no path for the file\'s structure; a field ("trigger", "chats.<entry>.memory") for its type, values and default; a capability ("tools.workstream", or "workstream") for what it gives, its parameters, its owner-only tools and an example.',
+      inputSchema: { path: z.string().optional().describe('e.g. "trigger", "tools", "tools.workstream", "tools.workstream.products". Omit for the whole structure') },
+      async handler({ path }) {
+        const r = explainPolicy(await registry(), path ?? "");
+        return "error" in r ? err(r.error) : ok(r.text);
+      },
+    };
+
+    return [{ serverName: "shuvi", tools: [send, propose, read, explain] as ToolDef[] }];
   },
   section(ctx) {
     if (ctx.chat.kind !== "group") return null;

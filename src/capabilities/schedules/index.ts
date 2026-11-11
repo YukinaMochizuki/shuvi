@@ -39,6 +39,8 @@ function describe(s: Schedule, timeZone: string): string {
 
 export const schedules = defineCapability<true>({
   id: "schedules",
+  label: "schedules (owner only)",
+  gives: "schedule, list_schedules, cancel_schedule: wake this chat later with a note.",
   enable: (env) => (env.SHUVI_SCHEDULES === "off" ? null : true),
   ownerOnly: ["schedule", "list_schedules", "cancel_schedule"],
   tools({ db, chat, turnId, timeZone }) {

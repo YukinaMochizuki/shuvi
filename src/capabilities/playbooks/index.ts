@@ -16,6 +16,8 @@ import { defineCapability } from "../types.ts";
 
 export const playbooks = defineCapability<true>({
   id: "playbooks",
+  label: "playbooks",
+  gives: "read_playbook, and the index of her playbooks in the prompt.",
   enable: (env) => (env.SHUVI_PLAYBOOKS === "off" ? null : true),
   tools({ home }) {
     const read: ToolDef<{ name: string }> = {

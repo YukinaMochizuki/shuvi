@@ -36,6 +36,8 @@ What was said is all kept, and you can look it up rather than rely on what you h
 
 export const retrieval = defineCapability<RetrievalConfig>({
   id: "retrieval",
+  label: "searching chat history",
+  gives: "search_chats and read_chat over what was said: every chat from the owner's DM, only itself elsewhere.",
   enable: (env) => (env.SHUVI_RETRIEVAL === "off" ? null : { ownerId: ownerIdFrom(env) }),
   tools(ctx: TurnContext, { ownerId }) {
     const { db, timeZone } = ctx;

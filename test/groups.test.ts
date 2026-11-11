@@ -180,7 +180,7 @@ describe("per-chat capabilities and layers", () => {
     expect(sp).not.toContain("PRIVATE PERSONA");
     expect(sp).not.toContain("PRIVATE MEMORY");
     expect(sp).toContain("only these products: widgetry");
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "ask_workstream", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "send", "propose_policy", "read_policy", "web_fetch"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "ask_workstream", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "send", "propose_policy", "read_policy", "explain_policy", "web_fetch"]);
   });
 
   test("workstream-read limits ask_workstream to its products, before the desk is asked", async () => {

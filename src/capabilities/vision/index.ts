@@ -36,6 +36,8 @@ export const DEFAULT_WAIT_MS = 5_000;
 
 export const vision = defineCapability<VisionConfig>({
   id: "vision",
+  label: "seeing photos and stickers",
+  gives: "the photos and stickers people send, shown to her as images.",
   enable: (env) => {
     if (env.SHUVI_VISION === "off") return null;
     const wait = Number(env.SHUVI_VISION_WAIT_MS);

@@ -67,6 +67,9 @@ export function deskJobKind(cfg: WorkstreamConfig, call: typeof callDesk = callD
 
 export const workstream = defineCapability<WorkstreamConfig>({
   id: "workstream",
+  label: "workstream (owner only)",
+  gives: "ask_workstream: bring a request to a workstream product's desk; the answer comes back later.",
+  params: { products: { type: "string[]", meaning: "only these products' desks may be asked from this chat (by id or name)", default: "any product", example: ["widgetry"] } },
   enable: (env) =>
     env.SHUVI_WORKSTREAM_MCP_URL && env.SHUVI_WORKSTREAM_MCP_TOKEN
       ? {

@@ -160,8 +160,8 @@ export const controlMessages = sqliteTable(
   "control_messages",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    /** alert | reply (to a control command) | approval (a card) | approval_closed (edit a card once answered or expired). */
-    kind: text("kind", { enum: ["alert", "reply", "approval", "approval_closed"] }).notNull(),
+    /** alert | reply (to a control command; reply_html: its text is Telegram HTML) | approval (a card) | approval_closed (edit a card once answered or expired). */
+    kind: text("kind", { enum: ["alert", "reply", "reply_html", "approval", "approval_closed"] }).notNull(),
     text: text("text").notNull(),
     idemKey: text("idem_key").unique(),
     topic: text("topic"),

@@ -113,24 +113,33 @@ export function listsGroup(policy: Policy, tgChatId: number): boolean {
 
 // ---- parsing -----------------------------------------------------------------------------------------
 
-class Invalid extends Error {}
-const fail = (m: string): never => {
-  throw new Invalid(m);
+/** A broken file or entry. `field`: the entry field it is about (`trigger`, `tools`), for explain_policy. */
+class Invalid extends Error {
+  constructor(
+    message: string,
+    readonly field?: string,
+  ) {
+    super(message);
+  }
+}
+const fail = (m: string, field?: string): never => {
+  throw new Invalid(m, field);
 };
 
-function list<T extends string>(v: unknown, allowed: readonly T[], where: string): T[] {
-  if (!Array.isArray(v)) fail(`${where} must be a list of ${allowed.join(" / ")}`);
-  for (const x of v as unknown[]) if (!allowed.includes(x as T)) fail(`${where}: "${String(x)}" is not one of ${allowed.join(" / ")}`);
+function list<T extends string>(v: unknown, allowed: readonly T[], where: string, field?: string): T[] {
+  if (!Array.isArray(v)) fail(`${where} must be a list of ${allowed.join(" / ")}`, field);
+  for (const x of v as unknown[]) if (!allowed.includes(x as T)) fail(`${where}: "${String(x)}" is not one of ${allowed.join(" / ")}`, field);
   return [...new Set(v as T[])];
 }
 
-function object(v: unknown, where: string): Record<string, unknown> {
+function object(v: unknown, where: string, field?: string): Record<string, unknown> {
   if (v === null || v === undefined) return {};
-  if (typeof v !== "object" || Array.isArray(v)) fail(`${where} must be a mapping`);
+  if (typeof v !== "object" || Array.isArray(v)) fail(`${where} must be a mapping`, field);
   return v as Record<string, unknown>;
 }
 
-const ENTRY_KEYS = new Set(["title", "trigger", "followup_minutes", "persona", "memory", "tools"]);
+/** The fields of a chat's entry, as the file writes them (src/policy/explain.ts documents each). */
+export const ENTRY_KEYS: ReadonlySet<string> = new Set(["title", "trigger", "followup_minutes", "persona", "memory", "tools"]);
 
 /** One chat's entry, as written in the file, checked. Throws `Invalid`. */
 function parseEntry(key: string, raw: unknown): ChatEntry {
@@ -140,35 +149,37 @@ function parseEntry(key: string, raw: unknown): ChatEntry {
   const base = key === "dm" ? DM_DEFAULT : GROUP_DEFAULTS;
 
   let trigger: ChatEntry["trigger"] = base.trigger;
-  if (r.trigger !== undefined) trigger = r.trigger === "all" ? "all" : list(r.trigger, TRIGGERS, `${where}.trigger`);
+  if (r.trigger !== undefined) trigger = r.trigger === "all" ? "all" : list(r.trigger, TRIGGERS, `${where}.trigger`, "trigger");
 
   let followupMinutes = base.followupMinutes;
   if (r.followup_minutes !== undefined) {
-    if (typeof r.followup_minutes !== "number" || !(r.followup_minutes > 0)) fail(`${where}.followup_minutes must be a positive number`);
+    if (typeof r.followup_minutes !== "number" || !(r.followup_minutes > 0)) fail(`${where}.followup_minutes must be a positive number`, "followup_minutes");
     followupMinutes = r.followup_minutes as number;
   }
 
-  const persona = r.persona === undefined ? base.persona : list(r.persona, ["public", "private"] as const, `${where}.persona`);
-  const memory = r.memory === undefined ? base.memory : list(r.memory, ["private", "chat"] as const, `${where}.memory`);
-  if (key !== "dm" && (persona.includes("private") || memory.includes("private"))) fail(`${where}: private persona and memory are for the owner's DM only`);
+  const persona = r.persona === undefined ? base.persona : list(r.persona, ["public", "private"] as const, `${where}.persona`, "persona");
+  const memory = r.memory === undefined ? base.memory : list(r.memory, ["private", "chat"] as const, `${where}.memory`, "memory");
+  if (key !== "dm" && persona.includes("private")) fail(`${where}.persona: private is for the owner's DM only; in a group persona may only be [public]`, "persona");
+  if (key !== "dm" && memory.includes("private")) fail(`${where}.memory: private is for the owner's DM only; in a group memory may only be [chat]`, "memory");
 
   let tools: ChatEntry["tools"] = base.tools;
   if (r.tools !== undefined) {
     if (r.tools === "all") tools = "all";
     else {
       tools = {};
-      for (const [name, params] of Object.entries(object(r.tools, `${where}.tools`))) {
-        const p = object(params, `${where}.tools.${name}`);
+      for (const [name, params] of Object.entries(object(r.tools, `${where}.tools`, "tools"))) {
+        const p = object(params, `${where}.tools.${name}`, `tools.${name}`);
         for (const id of TOOL_ALIASES[name] ?? [name]) tools[id] = { ...(tools[id] ?? {}), ...p };
       }
     }
   }
 
-  if (r.title !== undefined && typeof r.title !== "string") fail(`${where}.title must be text`);
+  if (r.title !== undefined && typeof r.title !== "string") fail(`${where}.title must be text`, "title");
   return { ...(typeof r.title === "string" ? { title: r.title } : {}), trigger, followupMinutes, persona, memory, tools };
 }
 
-const TOP_KEYS = new Set(["owner", "chats", "unknown_chat"]);
+/** The top-level keys of the file. */
+export const TOP_KEYS: ReadonlySet<string> = new Set(["owner", "chats", "unknown_chat"]);
 
 /**
  * Parse and check policy.yaml's text. `ownerId` is SHUVI_OWNER_ID: a file naming another owner is
@@ -209,13 +220,16 @@ export function policyFromDoc(doc: unknown, ownerId?: number): Policy {
   return policy;
 }
 
-/** Whether a value (a parsed entry) is a valid entry for `key`; the reason when not. */
-export function checkEntry(key: string, raw: unknown): { entry: ChatEntry } | { error: string } {
+/**
+ * Whether a value (a parsed entry) is a valid entry for `key`; the reason when not, and the entry field it
+ * is about when it is about one (`trigger`, `tools.web`).
+ */
+export function checkEntry(key: string, raw: unknown): { entry: ChatEntry } | { error: string; field?: string } {
   try {
     if (key !== "dm" && !/^-?\d+$/.test(key)) fail(`"${key}" must be dm or a Telegram chat id`);
     return { entry: parseEntry(key, raw) };
   } catch (e) {
-    if (e instanceof Invalid) return { error: e.message };
+    if (e instanceof Invalid) return { error: e.message, ...(e.field ? { field: e.field } : {}) };
     throw e;
   }
 }

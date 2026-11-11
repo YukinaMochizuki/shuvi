@@ -2,9 +2,13 @@ import { and, asc, count, desc, eq, gte, inArray, lt, max } from "drizzle-orm";
 import { GrammyError, HttpError, type Api } from "grammy";
 import type { BotCommand, Update } from "grammy/types";
 import { formatTime } from "../agent/render.ts";
+import { CAPABILITIES } from "../capabilities/index.ts";
+import type { Capability } from "../capabilities/types.ts";
+import { defaultPolicy, type Policy } from "../policy/policy.ts";
+import { findListed, listedChats, policyDetail, policyOverview, type PolicyViewInput } from "../policy/view.ts";
 import { stopTurn } from "../server/commands.ts";
 import type { SignalTurn } from "../server/spawn.ts";
-import { markControlFailed, markControlSent, pendingControl, queueReply, raiseAlert, approvalCard, type ControlMessage } from "../store/control.ts";
+import { markControlFailed, markControlSent, pendingControl, queueHtmlReply, queueReply, raiseAlert, approvalCard, type ControlMessage } from "../store/control.ts";
 import type { Db } from "../store/db.ts";
 import { allChats, getChat, kvGet, kvSet, type Speaker } from "../store/events.ts";
 import { approvals, chatEvents, OUTBOUND_KINDS, turns } from "../store/schema.ts";
@@ -19,6 +23,9 @@ import { answerApproval, cardKeyboard, getApproval, parseCallback } from "./appr
  *   /status          running turns, recently failed turns, outbound rows still pending, the deployed commit
  *   /stop <chat>     stop that chat's turn, exactly as `/stop` in the chat does (server/commands.ts
  *                    `stopTurn`); <chat> is the chat number /status shows, or its Telegram id
+ *   /policy [chat]   the policy in effect, in words (policy/view.ts): every chat, or one in detail with
+ *                    what is off; <chat> is the number /policy shows, or the Telegram id. Telegram HTML,
+ *                    queued as `reply_html` rows, one per message
  *   approval buttons recorded through approvals.ts
  *
  * `CONTROL_COMMANDS` is the one list of the commands: /help is built from it, and the server registers it
@@ -53,11 +60,18 @@ export interface ControlDeps {
   timeZone: string;
   signal?: SignalTurn;
   now?: () => number;
+  /** The policy in effect (the server's PolicyWatch), for /policy. Absent: the default policy. */
+  policy?: () => Policy;
+  /** The registered capabilities, for their labels. Absent: the registry (capabilities/index.ts). */
+  registry?: readonly Capability<any>[];
+  /** The capability ids enabled in this process. Absent: all registered. */
+  enabled?: ReadonlySet<string>;
 }
 
 export const CONTROL_COMMANDS = [
   { command: "status", description: "Running turns, recent failures, pending outbound, commit" },
   { command: "stop", description: "Stop a chat's turn: /stop <chat> (the number from /status)" },
+  { command: "policy", description: "What each chat may do; /policy <chat> for one in detail" },
 ] as const satisfies readonly BotCommand[];
 
 const HELP = ["Commands:", ...CONTROL_COMMANDS.map((c) => `/${c.command}: ${c.description}`)].join("\n");
@@ -125,6 +139,26 @@ export function statusText(db: Db, deps: ControlDeps): string {
   return lines.join("\n");
 }
 
+function policyInput(db: Db, deps: ControlDeps): PolicyViewInput {
+  return {
+    policy: deps.policy?.() ?? defaultPolicy(),
+    registry: deps.registry ?? CAPABILITIES,
+    ownerId: deps.ownerId,
+    ...(deps.enabled ? { enabled: deps.enabled } : {}),
+    titleOf: (tg) => allChats(db).find((c) => c.tgChatId === tg)?.title ?? undefined,
+  };
+}
+
+/** What /policy [chat] says: messages of Telegram HTML. */
+export function policyText(db: Db, deps: ControlDeps, arg = ""): string[] {
+  const input = policyInput(db, deps);
+  if (!arg) return policyOverview(input);
+  const chat = findListed(input, arg);
+  if (chat) return policyDetail(input, chat);
+  const n = listedChats(input).length;
+  return [`No chat ${arg.replace(/[<>&]/g, "")} in policy. Use its number (1 to ${n}) from /policy, or its Telegram id.`];
+}
+
 /** Find a chat by the number /status shows, or by its Telegram id. */
 function findChat(db: Db, arg: string) {
   const n = Number(arg);
@@ -165,6 +199,7 @@ function handleUpdate(db: Db, u: Update, deps: ControlDeps, out: Handled): void 
   const name = cmd?.[1];
   const arg = cmd?.[2]?.trim() ?? "";
   if (name === "status") return queueReply(db, key, statusText(db, deps));
+  if (name === "policy") return queueHtmlReply(db, key, policyText(db, deps, arg));
   if (name === "stop") {
     const chat = findChat(db, arg);
     if (!chat) return queueReply(db, key, arg ? `No chat ${arg}. /status lists the chats with running turns.` : "Usage: /stop <chat>");
@@ -223,7 +258,8 @@ async function deliver(db: Db, api: Api, ownerId: number, row: ControlMessage): 
     }
     return markControlSent(db, row.id, card.tgMessageId);
   }
-  const msg = await api.sendMessage(ownerId, clip(row.text));
+  // An HTML part is cut to fit by its maker (policy/view.ts), never here: a cut could end inside a tag.
+  const msg = row.kind === "reply_html" ? await api.sendMessage(ownerId, row.text, { parse_mode: "HTML" }) : await api.sendMessage(ownerId, clip(row.text));
   markControlSent(db, row.id, msg.message_id);
 }
 

@@ -162,6 +162,8 @@ Every change is saved with a \`why\`, one line on why you made it, and shows you
 
 export const memory = defineCapability<MemoryConfig>({
   id: "memory",
+  label: "memory and this chat's notes (editing her files: owner only)",
+  gives: "read_home and edit_chat_notes; edit_home and write_home change her files when the owner asks.",
   enable: (env) => (env.SHUVI_MEMORY === "off" ? null : { ownerId: ownerIdFrom(env) }),
   ownerOnly: ["edit_home", "write_home"],
   tools(ctx, config) {

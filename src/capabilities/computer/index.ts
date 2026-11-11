@@ -141,6 +141,8 @@ export async function maintainPass(db: Db, computers: Computers, cfg: ComputerCo
 
 export const computer = defineCapability<ComputerConfig>({
   id: "computer",
+  label: "computer (owner only)",
+  gives: "this chat's own computer: exec, files, secrets, photos, video frames, transcription.",
   enable: computerConfig,
   ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "video_frames", "apply_computer_config"],
   tools({ db, chat, state: s }, cfg) {
