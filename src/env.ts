@@ -1,5 +1,4 @@
 import { join, resolve } from "node:path";
-import type { WebToolsConfig } from "agent-runtime/tools/web";
 
 /**
  * Configuration, all from the environment, read in one place. The server and the runner child read the
@@ -15,10 +14,10 @@ import type { WebToolsConfig } from "agent-runtime/tools/web";
  *   SHUVI_MODEL               the model turns run on (default: the driver's)
  *   SHUVI_TZ                  the time zone messages are shown to the model in (default: the host's)
  *   SHUVI_CLAUDE_CONFIG_DIR   which Claude login turns run on (default: the process user's)
- *   SHUVI_WEB                 "off" disables the web capability (default on: web_fetch, and
- *                             web_search when SHUVI_TAVILY_API_KEY is set)
- *   SHUVI_TAVILY_API_KEY      enables web_search
  *   SHUVI_TELEGRAM_API_ROOT   the Bot API base URL (default Telegram's; a fake one in tests)
+ *
+ * These are the framework's own variables. A capability reads its own (e.g. SHUVI_WEB,
+ * SHUVI_TAVILY_API_KEY) in its own module, src/capabilities/<id>/, which lists them in its header.
  */
 
 export interface Config {
@@ -32,8 +31,6 @@ export interface Config {
   timeZone: string;
   claudeConfigDir?: string;
   telegramApiRoot?: string;
-  /** Absent when the web capability is off. */
-  web?: WebToolsConfig;
 }
 
 function required(name: string): string {
@@ -57,12 +54,5 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     timeZone: process.env.SHUVI_TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
     ...(process.env.SHUVI_CLAUDE_CONFIG_DIR ? { claudeConfigDir: process.env.SHUVI_CLAUDE_CONFIG_DIR } : {}),
     ...(process.env.SHUVI_TELEGRAM_API_ROOT ? { telegramApiRoot: process.env.SHUVI_TELEGRAM_API_ROOT } : {}),
-    ...(process.env.SHUVI_WEB === "off"
-      ? {}
-      : {
-          web: {
-            ...(process.env.SHUVI_TAVILY_API_KEY ? { tavilyApiKey: process.env.SHUVI_TAVILY_API_KEY } : {}),
-          },
-        }),
   };
 }

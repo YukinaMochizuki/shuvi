@@ -30,6 +30,7 @@ const { ClaudeBackend } = await import("agent-runtime/claude");
 const { loadConfig } = await import("../env.ts");
 const { openDb } = await import("../store/db.ts");
 const { runTurn } = await import("../agent/turn.ts");
+const { enabledCapabilities } = await import("../capabilities/index.ts");
 
 const cfg = loadConfig({ needToken: false });
 const db = openDb(cfg.dbPath);
@@ -41,7 +42,7 @@ const outcome = await runTurn({
   timeZone: cfg.timeZone,
   ...(cfg.model ? { model: cfg.model } : {}),
   ...(cfg.ownerLanguage ? { ownerLanguage: cfg.ownerLanguage } : {}),
-  ...(cfg.web ? { web: cfg.web } : {}),
+  capabilities: enabledCapabilities(),
   makeAdapter: (boundary) => new ClaudeBackend({ boundary, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
   signal: ac.signal,
 });

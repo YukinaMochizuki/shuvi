@@ -9,15 +9,21 @@
  *   sender    deliver what turns queued (sender.ts)
  *   typing    show "typing…" in chats with a running turn
  *
+ * and, alongside them, the loops of every enabled capability (src/capabilities/), through the same
+ * loop helper (loop.ts).
+ *
  * Everything it knows is in the store, so stopping it at any moment and starting it again loses nothing:
  * running turns carry on in their own processes, and the loops resume from the rows.
  */
 import { Api } from "grammy";
+import { enabledCapabilities } from "../capabilities/index.ts";
+import { capabilityLoops } from "../capabilities/types.ts";
 import { loadConfig } from "../env.ts";
 import { openDb } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
 import { runningTurns } from "../store/turns.ts";
 import { commandPass } from "./commands.ts";
+import { loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
 import { sendPass } from "./sender.ts";
 import { spawnTurn } from "./spawn.ts";
@@ -30,27 +36,7 @@ const me = await api.getMe();
 console.log(`shuvi server: @${me.username}, data in ${cfg.dataDir}`);
 
 const stop = new AbortController();
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-
-/**
- * Run `body` forever, `everyMs` apart. The waker and the sender poll the store rather than being
- * signalled: a child writes from another process, and a 300 ms read of a local SQLite file is cheaper
- * than any cross-process wake-up would be to get right. `body` may return a longer wait (a 429).
- */
-async function loop(name: string, body: () => Promise<number | void>, everyMs: number): Promise<void> {
-  while (!stop.signal.aborted) {
-    let wait = everyMs;
-    try {
-      const asked = await body();
-      if (typeof asked === "number" && asked > wait) wait = asked;
-    } catch (e) {
-      if (stop.signal.aborted) return;
-      console.error(`${name}:`, e);
-      wait = Math.max(everyMs * 4, 2000);
-    }
-    await sleep(wait);
-  }
-}
+const loop = (name: string, body: () => Promise<number | void>, everyMs: number) => runLoop(name, body, everyMs, stop.signal);
 
 // The poller's own long poll is its wait; it loops straight back.
 void loop("poller", async () => void (await pollOnce(db, api, cfg.ownerId, me.username, 25, stop.signal)), 0);
@@ -73,6 +59,7 @@ void loop(
   },
   4000,
 );
+startLoops(capabilityLoops(enabledCapabilities(), { db, home: cfg.home, timeZone: cfg.timeZone, ownerId: cfg.ownerId, signal: stop.signal }), stop.signal);
 
 function shutdown(signal: string): void {
   // Running turns are NOT stopped: they are detached, and outliving this process is why they are.
