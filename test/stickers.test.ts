@@ -386,7 +386,7 @@ describe("the contact sheet", () => {
     }
   });
 
-  test("add_sticker_pack: the server fetches the set, she gets the sheet and a skeleton, and saves it with write_home, which commits it; the index picks it up; a pack she already has is read first, then edited", async () => {
+  test("add_sticker_pack: the server fetches the set, she gets the sheet, and a new pack's skeleton is committed with its role; she reads it and fills it in with write_home; the index picks it up; a pack she already has is read first, then edited", async () => {
     const w = world();
     await serveSet(w, "Fox", 3);
     // The server's loop, running beside the turn as it would in production.
@@ -397,9 +397,11 @@ describe("the contact sheet", () => {
         await Bun.sleep(20);
       }
     })();
-    const filled = packYaml("Fox", "common", [{ n: 1, desc: "a fox waving", use: "hello" }, { n: 2, desc: "a fox sleeping", use: "good night", tier: "go-to" }, { n: 3 }]);
+    const filled = packYaml("Fox", "meme", [{ n: 1, desc: "a fox waving", use: "hello" }, { n: 2, desc: "a fox sleeping", use: "good night", tier: "go-to" }, { n: 3 }]);
     const a = await turn(w, [
-      { tool: "add_sticker_pack", args: { name: "Fox" } },
+      { tool: "add_sticker_pack", args: { name: "Fox", role: "meme" } },
+      { tool: "write_home", args: { path: "stickers/Fox.yaml", content: filled, why: "unread" } },
+      { tool: "read_home", args: { path: "stickers/Fox.yaml" } },
       { tool: "write_home", args: { path: "stickers/Fox.yaml", content: filled, why: "Describe the Fox pack" } },
       { tool: "write_home", args: { path: "stickers/preferences.md", content: "Prefer the fox.\n", why: "The owner likes the fox" } },
       { tool: "find_sticker", args: { terms: ["night"] } },
@@ -412,15 +414,22 @@ describe("the contact sheet", () => {
     expect(first.content.filter((c) => c.type === "image")).toHaveLength(1);
     const skeleton = textOf(first);
     expect(skeleton).toContain("Fox title: 3 stickers");
-    expect(skeleton).toContain("save it filled in with write_home");
+    expect(skeleton).toContain("created it as this skeleton (commit ");
     for (const n of [1, 2, 3]) expect(skeleton).toContain(`  - n: ${n}  # 🙂\n    file_unique_id: "Fox-${n}"\n    desc:\n    use:`);
-    expect(parsePack(skeleton.split("```yaml\n")[1]!.split("```")[0]!).stickers).toHaveLength(3);
+    const yaml = skeleton.split("```yaml\n")[1]!.split("```")[0]!;
+    expect(parsePack(yaml)).toMatchObject({ pack: "Fox", role: "meme" });
+    expect(parsePack(yaml).stickers).toHaveLength(3);
 
-    expect(a.toolResults.slice(1, 3).map((r) => !!r.result.isError)).toEqual([false, false]);
+    // The skeleton was committed as-is; a whole write without reading it first is refused.
+    expect(a.toolResults[1]!.result.isError).toBe(true);
+    expect(textOf(a.toolResults[1]!.result)).toContain("not read in this turn");
+    expect(a.toolResults.slice(2, 5).map((r) => !!r.result.isError)).toEqual([false, false, false]);
     expect(readFileSync(join(w.home, "stickers", "Fox.yaml"), "utf8")).toBe(filled);
     const log = Bun.spawnSync(["git", "-C", w.home, "log", "--format=%an|%s"]).stdout.toString().trim().split("\n");
-    expect(log).toEqual(["shuvi|The owner likes the fox", "shuvi|Describe the Fox pack"]);
-    expect(textOf(a.toolResults[3]!.result)).toContain("Fox/2");
+    expect(log).toEqual(["shuvi|The owner likes the fox", "shuvi|Describe the Fox pack", "shuvi|stickers: skeleton for Fox"]);
+    const committed = Bun.spawnSync(["git", "-C", w.home, "show", "HEAD~2:stickers/Fox.yaml"]).stdout.toString();
+    expect(committed).toBe(yaml);
+    expect(textOf(a.toolResults[5]!.result)).toContain("Fox/2");
 
     // Again, now that the file exists: the skeleton says to read it first; a whole write unread is refused.
     const b = await turn(w, [
@@ -431,12 +440,35 @@ describe("the contact sheet", () => {
     ]);
     const [again, unread, read, edit] = b.toolResults.map((r) => r.result);
     expect(textOf(again!)).toContain("that file already exists, so read it first with read_home, then save your changes with edit_home");
+    // No role given: the file's own role is kept, and nothing new is committed for an existing pack.
+    expect(textOf(again!)).toContain("role: meme");
     expect(unread!.isError).toBe(true);
     expect(textOf(unread!)).toContain("not read in this turn");
     expect(textOf(read!)).toContain("     1\tpack: Fox");
     expect(edit!.isError).toBeFalsy();
     expect(textOf(edit!)).toContain('-    desc: "a fox waving"\n+    desc: "a fox saying hi"');
     expect(readFileSync(join(w.home, "stickers", "Fox.yaml"), "utf8")).toBe(filled.replace("a fox waving", "a fox saying hi"));
+    const after = Bun.spawnSync(["git", "-C", w.home, "log", "--format=%s"]).stdout.toString().trim().split("\n");
+    expect(after).toEqual(["Better words for Fox/1", "The owner likes the fox", "Describe the Fox pack", "stickers: skeleton for Fox"]);
+  });
+
+  test("add_sticker_pack: a new pack's role defaults to common; a bad role is refused", async () => {
+    const w = world();
+    await serveSet(w, "Owl", 2);
+    let running = true;
+    const loop = (async () => {
+      while (running) {
+        await fetchPass(w.db, w.files, w.dataDir);
+        await Bun.sleep(20);
+      }
+    })();
+    const a = await turn(w, [{ tool: "add_sticker_pack", args: { name: "Owl", role: "boss" } }, { tool: "add_sticker_pack", args: { name: "Owl" } }]);
+    running = false;
+    await loop;
+    expect(a.toolResults[0]!.result.isError).toBe(true);
+    expect(textOf(a.toolResults[0]!.result)).toContain("role must be one of avatar / common / meme");
+    expect(a.toolResults[1]!.result.isError).toBeFalsy();
+    expect(parsePack(readFileSync(join(w.home, "stickers", "Owl.yaml"), "utf8"))).toMatchObject({ pack: "Owl", role: "common" });
   });
 
   test("add_sticker_pack is owner-only; finding and sending stay open; a group cannot read pack files", async () => {

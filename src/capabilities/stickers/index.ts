@@ -5,10 +5,11 @@ import { err, ok, type ToolContent, type ToolDef } from "agent-runtime";
 import { dataDirFrom } from "../../env.ts";
 import { enqueueOutbound } from "../../store/events.ts";
 import { isOwnerDm, ownerIdFrom } from "../access.ts";
+import { commitHomeEdit } from "../memory/home.ts";
 import { defineCapability } from "../types.ts";
 import { fetchPass, getSet, requestMissingSets, requestSet, setStickers, waitForSet } from "./fetch.ts";
 import { findStickers, getSticker, RECENT_DAYS, type Candidate } from "./find.ts";
-import { PACK_NAME, packFileName, packSkeleton, parsePack, stickersDir, syncLibrary, type PackFile, type SyncResult } from "./library.ts";
+import { PACK_NAME, packFileName, packSkeleton, parsePack, ROLES, stickersDir, syncLibrary, type PackFile, type Role, type SyncResult } from "./library.ts";
 import { refusal } from "./rules.ts";
 import { renderContactSheet } from "./sheet.ts";
 
@@ -30,9 +31,13 @@ import { renderContactSheet } from "./sheet.ts";
  * The library and preferences.md are written with memory's `write_home` (a new file) and `edit_home` (a
  * change to an existing one; owner-only; both are on its allow-list, memory/home.ts). A file that already
  * exists is read with `read_home` first: write_home refuses to overwrite a file not read in this turn, and
- * `add_sticker_pack` says so rather than share that turn state. Never written by this capability:
- * `add_sticker_pack` only returns the contact sheet and a skeleton. The index notices any change to the
- * files by itself, whoever made it.
+ * `add_sticker_pack` says so rather than share that turn state. The one file this capability writes itself
+ * is a NEW pack's skeleton: `add_sticker_pack` commits it in home/ (through memory/home.ts `commitHomeEdit`,
+ * the same helper as `write_home`) with the role it was given, so adding a pack is one step; an existing
+ * file is never touched, only shown again as a skeleton. The index notices any change to the files by
+ * itself, whoever made it.
+ *
+ * Which packs are in the library is runtime data in home/, never in this repository.
  *
  * `sticker` queues a `bot_sticker` row; the sender delivers it with `sendSticker`. The mechanical rules it
  * enforces are in rules.ts, the ranking in find.ts, the contact sheet in sheet.ts.
@@ -93,7 +98,7 @@ export const stickers = defineCapability<StickersConfig>({
     const view: ToolDef<{ ids: string[] }> = {
       name: "view_stickers",
       description: "Look at stickers by id (from find_sticker), when their description is not enough to choose. Up to 10.",
-      inputSchema: { ids: z.array(z.string()).min(1).max(10).describe("Sticker ids, e.g. [\"EveOneCat/12\"]") },
+      inputSchema: { ids: z.array(z.string()).min(1).max(10).describe("Sticker ids, e.g. [\"ExamplePack/3\"]") },
       async handler({ ids }) {
         syncLibrary(db, home);
         const content: ToolContent[] = [];
@@ -122,7 +127,7 @@ export const stickers = defineCapability<StickersConfig>({
       name: "sticker",
       description:
         "Send a sticker by id (from find_sticker). It goes out as its own message, after any text you wrote before calling this, and can be your whole reply. One at a time: put words or another action between two stickers.",
-      inputSchema: { id: z.string().describe("The sticker's id, e.g. \"EveOneCat/12\"") },
+      inputSchema: { id: z.string().describe("The sticker's id, e.g. \"ExamplePack/3\"") },
       async handler({ id }) {
         syncLibrary(db, home);
         const st = getSticker(db, id);
@@ -140,13 +145,17 @@ export const stickers = defineCapability<StickersConfig>({
       },
     };
 
-    const add: ToolDef<{ name: string }> = {
+    const add: ToolDef<{ name: string; role?: Role }> = {
       name: "add_sticker_pack",
       description:
-        "Learn a sticker pack, when the owner asks. Give the pack's Telegram set `name` (e.g. from a sticker someone sent): returns a numbered contact sheet of every sticker and a YAML skeleton for stickers/<name>.yaml (what the current file says is carried over). Look at the sheet; fill in each sticker's desc (what it shows: a fact) and use (when to send it); set the pack's role (avatar / common / meme) and any tier (go-to / rare / never); leave stickers you cannot place without desc. Then save it: a new pack's file with `write_home` (path stickers/<name>.yaml); when the file already exists, read it with `read_home` first, then change it with `edit_home` (or rewrite it whole with `write_home`). Only the owner can have this done.",
-      inputSchema: { name: z.string().describe("The sticker set's name") },
-      async handler({ name }) {
+        "Add a sticker pack to the library, or learn it again, when the owner asks. Give the pack's Telegram set `name` (e.g. from a sticker someone sent) and its `role` (avatar / common / meme; default common). A pack not in the library yet gets its file stickers/<name>.yaml created and committed as a skeleton: every sticker numbered, desc and use empty. Returns a numbered contact sheet of every sticker and the skeleton (for a pack you already have, what its file says is carried over). Look at the sheet; fill in each sticker's desc (what it shows: a fact) and use (when to send it), and any tier (go-to / rare / never); leave stickers you cannot place without desc. To save, read the file with `read_home` first, then change it with `edit_home` (or rewrite it whole with `write_home`). Only the owner can have this done.",
+      inputSchema: {
+        name: z.string().describe("The sticker set's name, e.g. \"ExamplePack\""),
+        role: z.enum(ROLES).optional().describe("The pack's role: avatar / common / meme (default common; for a pack you already have, default its current role)"),
+      },
+      async handler({ name, role }) {
         if (!PACK_NAME.test(name)) return err(`"${name}" is not a sticker set name (letters, digits and _ only).`);
+        if (role !== undefined && !(ROLES as readonly string[]).includes(role)) return err(`role must be one of ${ROLES.join(" / ")}.`);
 
         const set = getSet(db, name);
         if (!set || set.state !== "ready" || !set.fetchedAt || Date.now() - Date.parse(set.fetchedAt) > 60_000) requestSet(db, name);
@@ -162,7 +171,22 @@ export const stickers = defineCapability<StickersConfig>({
         try {
           existing = exists ? parsePack(readFileSync(file, "utf8")) : undefined;
         } catch {}
-        const skeleton = packSkeleton(name, existing?.role ?? "common", metas.map((m) => ({ n: m.position, fileUniqueId: m.fileUniqueId, emoji: m.emoji })), existing, got.title);
+        const skeleton = packSkeleton(
+          name,
+          role ?? existing?.role ?? "common",
+          metas.map((m) => ({ n: m.position, fileUniqueId: m.fileUniqueId, emoji: m.emoji })),
+          existing && role ? { ...existing, role } : existing,
+          got.title,
+        );
+        let created: string | null = null;
+        if (!exists) {
+          try {
+            created = commitHomeEdit(home, join("stickers", packFileName(name)), skeleton, `stickers: skeleton for ${name}`);
+          } catch (e) {
+            return err(`Could not create stickers/${packFileName(name)}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          syncLibrary(db, home);
+        }
         const missing = metas.filter((m) => !m.path).map((m) => m.position);
         const content: ToolContent[] = [
           {
@@ -174,7 +198,10 @@ export const stickers = defineCapability<StickersConfig>({
           content.push({ type: "text", text: `Sheet ${i + 1}/${pages.length}: ${p.numbers[0]}–${p.numbers.at(-1)}` });
           content.push({ type: "image", data: p.image.toString("base64"), mimeType: "image/jpeg" });
         });
-        content.push({ type: "text", text: `The skeleton for stickers/${packFileName(name)}; ${exists ? "that file already exists, so read it first with read_home, then save your changes with edit_home (or the whole file with write_home)" : "save it filled in with write_home"}:\n\n\`\`\`yaml\n${skeleton}\`\`\`` });
+        const how = created
+          ? `created it as this skeleton (commit ${created}); to fill it in, read it with read_home, then save your changes with edit_home (or the whole file with write_home)`
+          : `that file already exists, so read it first with read_home, then save your changes with edit_home (or the whole file with write_home)`;
+        content.push({ type: "text", text: `The skeleton for stickers/${packFileName(name)}; ${how}:\n\n\`\`\`yaml\n${skeleton}\`\`\`` });
         return { content };
       },
     };

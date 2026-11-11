@@ -9,7 +9,7 @@ What works today (the first slice): the owner's private chat, text in and out. T
 becomes messages, `say` speaks mid-turn, `react` reacts, `pass` stays silent; `/stop` and `/new` act on the
 chat. Photos and stickers are shown to the model as images (the `vision` capability). The sticker library
 (`home/stickers/*.yaml`, the `stickers` capability) lets her find, view, send and learn stickers;
-`bun scripts/import-stickers.ts` creates skeletons for existing packs. Groups, memory writing, other
+a pack is added in conversation with `add_sticker_pack`. Groups, memory writing, other
 media, background jobs and schedules are later slices on the same skeleton.
 
 The framework itself never speaks in the assistant's chat. It talks to the owner through a second bot, the

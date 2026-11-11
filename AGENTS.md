@@ -84,3 +84,6 @@ builds on the one before it.
 - Only the senders talk to Telegram (`src/server/sender.ts`, and `src/control/bot.ts` for the control
   bot). A runner child queues rows; it has neither bot token.
 - `home/` and `data/` are private and never committed.
+- The repository is public. Anything about the owner (names, ids, chats, sticker packs, preferences,
+  persona) lives only in `home/` or the environment, never in code, tests, docs or examples. Examples and
+  tests use obviously fake names (`ExamplePack/3`).
