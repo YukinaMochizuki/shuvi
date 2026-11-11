@@ -115,6 +115,13 @@ function git(home: string, args: string[]): { ok: boolean; out: string } {
   return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
 }
 
+/** The short id of the latest commit that removed `rel` from home/, or null when none did. */
+export function lastRemoval(home: string, rel: string): string | null {
+  if (!existsSync(join(home, ".git"))) return null;
+  const r = git(home, ["log", "-1", "--diff-filter=D", "--format=%h", "--", rel]);
+  return r.ok && r.out ? r.out : null;
+}
+
 function ensureRepo(home: string): void {
   mkdirSync(home, { recursive: true });
   if (existsSync(join(home, ".git"))) return;
@@ -123,18 +130,25 @@ function ensureRepo(home: string): void {
 }
 
 /**
- * Write `content` to `rel` and commit it, with `why` as the message. Returns the short commit id. On any
- * failure the file is put back as it was (or removed, if the edit created it) and the error is thrown.
+ * Write `content` to `rel` and commit it, with `why` as the message; `content` null removes the file
+ * instead (it must be in home/'s history, so what it said stays recoverable). Returns the short commit id.
+ * On any failure the file is put back as it was (or removed, if the edit created it) and the error is thrown.
  */
-export function commitHomeEdit(home: string, rel: string, content: string, why: string): string {
+export function commitHomeEdit(home: string, rel: string, content: string | null, why: string): string {
   ensureRepo(home);
   const abs = inside(home, rel);
   const before = existsSync(abs) ? readFileSync(abs, "utf8") : null;
-  if (before === content) throw new Error(`${rel} already says exactly that; nothing to commit.`);
+  if (before === content) throw new Error(content === null ? `${rel} does not exist; nothing to remove.` : `${rel} already says exactly that; nothing to commit.`);
+  if (content === null && !git(home, ["ls-files", "--error-unmatch", "--", rel]).ok) {
+    throw new Error(`${rel} was never committed in home/, so removing it could not be undone; it was left in place.`);
+  }
   try {
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, content);
-    const add = git(home, ["add", "--", rel]);
+    if (content === null) rmSync(abs);
+    else {
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, content);
+    }
+    const add = git(home, ["add", "-A", "--", rel]);
     if (!add.ok) throw new Error(add.out);
     // Only this path: anything else that changed in home/ (the owner editing by hand) is not swept in.
     const commit = git(home, ["commit", "-q", "-m", why, "--", rel]);

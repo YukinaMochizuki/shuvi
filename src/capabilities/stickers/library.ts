@@ -26,7 +26,7 @@ import { IMMEDIATE } from "../../store/turns.ts";
  *
  * The YAML files are the truth; `sticker_packs` / `sticker_library` / `sticker_fts` are an index of them,
  * refreshed by `syncLibrary` whenever a file's bytes change, however it changed (memory's `write_home` / `edit_home`,
- * the skeleton `add_sticker_pack` creates, or a hand edit). It runs before every sticker tool reads the library and in a server
+ * the skeleton `add_sticker_pack` creates, the file `remove_sticker_pack` deletes, or a hand edit). It runs before every sticker tool reads the library and in a server
  * loop, so no writer has to remember to re-index. A file that stops parsing keeps its last good stickers
  * indexed and records the error, so one typo does not take a pack away.
  *
@@ -110,6 +110,7 @@ export function packSkeleton(pack: string, role: Role, stickers: SkeletonSticker
   const before = new Map(existing?.stickers.map((s) => [s.file_unique_id, s]));
   const lines = [
     `# ${title ? `${title}: ` : ""}${stickers.length} stickers. For each, write desc (what it shows) and use (when to use it).`,
+    `# use: several ways of saying it, comma- or 、-separated (happy, smile, grin / 開心、笑臉、微笑): search matches words.`,
     `# tier: go-to / rare / never, or leave it out. dm_only: true keeps a sticker (or the whole pack) out of groups.`,
     `pack: ${pack}`,
     `role: ${existing?.role ?? role}  # avatar / common / meme`,
@@ -212,6 +213,11 @@ export function syncLibrary(db: Db, home: string): SyncResult {
     if (dirty) db.$client.run("insert into sticker_fts(sticker_fts) values('rebuild')");
   }, IMMEDIATE);
   return result;
+}
+
+/** The file (under home/stickers/) that describes `pack`, as last indexed, or null when no file does. */
+export function fileOfPack(db: Db, pack: string): string | null {
+  return db.select({ file: stickerPacks.file }).from(stickerPacks).where(eq(stickerPacks.pack, pack)).get()?.file ?? null;
 }
 
 /** The packs the library describes (successfully indexed at least once). */

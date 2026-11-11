@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { capabilitySections, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
 import { defaultPolicy, GROUP_DEFAULTS, resolveChat, type ChatPolicy } from "../policy/policy.ts";
+import type { Db } from "../store/db.ts";
 import type { Chat } from "../store/events.ts";
 import { playbookIndex } from "./playbooks.ts";
 
@@ -38,9 +39,10 @@ function read(home: string, rel: string): string | null {
 
 /**
  * `capabilities` are the ones enabled in this process, in registry order; each contributes its section.
- * Without any (a bare call), the prompt has no capability sections at all, not even speech.
+ * Without any (a bare call), the prompt has no capability sections at all, not even speech. `db` is
+ * handed to the sections to read from (a section never writes; capabilities/types.ts `PromptContext`).
  */
-export function buildSystemPrompt(home: string, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy): string {
+export function buildSystemPrompt(home: string, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy, db?: Db): string {
   const cp = chatPolicy ?? resolveChat(defaultPolicy(), chat) ?? { ...GROUP_DEFAULTS, key: String(chat.tgChatId), ownerDm: false };
   const isOwnerDm = cp.ownerDm && chat.kind === "private";
   const sections: string[] = [];
@@ -66,7 +68,7 @@ export function buildSystemPrompt(home: string, chat: Chat, owner: OwnerInfo, ca
         }`) + (notes ? `\n\n### Your notes on this chat\n\n${notes}` : ""),
   );
 
-  sections.push(...capabilitySections(capabilities, { home, chat, owner, chatPolicy: cp }));
+  sections.push(...capabilitySections(capabilities, { home, chat, owner, chatPolicy: cp, ...(db ? { db } : {}) }));
 
   if (capabilities.some((c) => c.capability.id === "playbooks")) {
     const index = playbookIndex(home);
