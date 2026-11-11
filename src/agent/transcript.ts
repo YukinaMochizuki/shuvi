@@ -9,7 +9,7 @@ import { addStep, completeStep, hashText, savePrompt, saveTranscript, setTranscr
 import { SECTION_JOIN, type PromptSection } from "./prompt.ts";
 
 /**
- * The TURN TRANSCRIPT: each turn recorded as the model saw it, for the console (src/capabilities/console/).
+ * The TURN TRANSCRIPT: each turn recorded as the model saw it, for the console (src/console/).
  * The runner child records it while the turn runs; the tables are in store/schema.ts.
  *
  * What is recorded, and from where:

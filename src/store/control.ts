@@ -23,7 +23,7 @@ import { controlMessages } from "./schema.ts";
 export const ALERT_REPEAT_MS = 30 * 60_000;
 
 /**
- * The console's page for turn `turnId` (src/capabilities/console/), when `SHUVI_CONSOLE_URL` says where the
+ * The console's page for turn `turnId` (src/console/), when `SHUVI_CONSOLE_URL` says where the
  * owner opens the console; null otherwise. Read from the environment at call time, so a runner child (which
  * inherits the server's) links the same way.
  */
