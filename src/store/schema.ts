@@ -36,12 +36,14 @@ export const EVENT_KINDS = [
   "bot_message",
   /** The assistant (or the server, acknowledging a command) reacted to a message. Outbound. */
   "bot_reaction",
+  /** The owner answered an approval card in the control bot (src/control/approvals.ts) that asked to wake this chat. */
+  "approval",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
 export const OUTBOUND_KINDS: EventKind[] = ["bot_message", "bot_reaction"];
 /** Kinds that, past the cursor, ask for a turn. */
-export const TRIGGER_KINDS: EventKind[] = ["message"];
+export const TRIGGER_KINDS: EventKind[] = ["message", "approval"];
 
 export const chatEvents = sqliteTable(
   "chat_events",
@@ -80,6 +82,14 @@ export const turns = sqliteTable(
     /** running → done | stopped | failed. */
     status: text("status", { enum: ["running", "done", "stopped", "failed"] }).notNull(),
     pid: integer("pid"),
+    /**
+     * The pid's process start time (field 22 of /proc/<pid>/stat), recorded at spawn. The pid counts as
+     * this turn's process only while the start time still matches, so a reused pid cannot keep a dead
+     * turn "running" (server/spawn.ts). Null where /proc is not available.
+     */
+    pidStart: text("pid_start"),
+    /** When the waker sent SIGTERM because the turn passed its wall-clock limit (server/waker.ts). */
+    termAt: text("term_at"),
     /** The cursor when the turn started; the events it was given are those after it. */
     fromSeq: integer("from_seq").notNull(),
     /** The last inbound seq the turn has been shown (grows as mid-turn messages are appended). */
@@ -97,6 +107,60 @@ export const turns = sqliteTable(
   // One running turn per chat, enforced by the database rather than by the waker remembering to check.
   (t) => [uniqueIndex("turns_one_running_per_chat").on(t.chatId).where(sql`status = 'running'`)],
 );
+
+/**
+ * The framework's own messages to the owner, through the control bot (docs/design.md §13): alerts,
+ * replies to control commands, approval cards, and edits of those cards. Never `chat_events`: nothing
+ * here happened in a chat, and the assistant's chats never see it (invariant 5).
+ *
+ * A durable queue, pending → sent | failed, so an alert raised just before a restart is still delivered.
+ * `idem_key` makes raising the same alert twice (a scan repeated after a crash) a no-op. `topic` is what
+ * repeats are rate-limited on: an alert whose topic was already raised recently is recorded as
+ * `suppressed` and never sent (store/control.ts).
+ */
+export const controlMessages = sqliteTable(
+  "control_messages",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** alert | reply (to a control command) | approval (a card) | approval_closed (edit a card once answered or expired). */
+    kind: text("kind", { enum: ["alert", "reply", "approval", "approval_closed"] }).notNull(),
+    text: text("text").notNull(),
+    idemKey: text("idem_key").unique(),
+    topic: text("topic"),
+    /** For `approval` / `approval_closed`: the approval it belongs to. */
+    approvalId: integer("approval_id"),
+    status: text("status", { enum: ["pending", "sent", "failed", "suppressed"] }).notNull(),
+    tgMessageId: integer("tg_message_id"),
+    note: text("note"),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [index("control_messages_status").on(t.status), index("control_messages_topic").on(t.topic, t.createdAt)],
+);
+
+/**
+ * Questions put to the owner as a card with buttons in the control bot (src/control/approvals.ts). The
+ * answer is recorded here once, durably; an answer to a card that is no longer pending is ignored.
+ */
+export const approvals = sqliteTable("approvals", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  /** Who asked, e.g. `policy`, `secret`, `schedule`. The answer's meaning is the kind's business. */
+  kind: text("kind").notNull(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  /** The buttons, in order: `[{ id, label }]`. */
+  options: text("options", { mode: "json" }).notNull().$type<{ id: string; label: string }[]>(),
+  /** The chat to wake with an `approval` event when it is answered (null: the caller polls). */
+  originChatId: integer("origin_chat_id").references(() => chats.id),
+  /** Kind-specific data the caller wants back with the answer. */
+  data: text("data", { mode: "json" }).$type<Record<string, unknown>>(),
+  /** pending → answered | expired. */
+  status: text("status", { enum: ["pending", "answered", "expired"] }).notNull(),
+  /** The chosen option's id. */
+  answer: text("answer"),
+  answeredAt: text("answered_at"),
+  expiresAt: text("expires_at"),
+  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
 
 export const kv = sqliteTable("kv", {
   key: text("key").primaryKey(),

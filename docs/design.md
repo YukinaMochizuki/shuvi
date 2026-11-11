@@ -93,7 +93,7 @@ home/                     a local-only git repo, no remote
 ```
 
 `home/` is highly private. It never enters this repository and is never pushed anywhere. Its history
-lives only in the local git repo, and it is backed up with the machine.
+lives only in the local git repo, and it is backed up with the machine (and daily as a `git bundle`, §13).
 
 ## 4. The speech model
 
@@ -319,11 +319,37 @@ stickers:
 
 ## 13. Control and alerts
 
-- **Control bot**: a separate bot only the owner can use, for:
-  - global status: running turns, jobs, cost;
-  - stopping or cancelling across chats, reverting `home/`;
-  - approval cards;
-  - alerts: an unknown group, an expired job, a crashed turn, persistent 429s.
+- **Control bot**: a separate bot (`SHUVI_CONTROL_BOT_TOKEN`) that only the owner can use: it answers the
+  owner's user id and ignores everyone else. It is the framework's voice; its messages are short, factual
+  and English (localising them is a later step). The server polls it with its own offset in `kv`, advanced
+  in the transaction that handles the batch, as the main poller does (src/control/bot.ts).
+  - `/status`: running turns (chat, how long, pid), turns that failed in the last day with their error,
+    outbound rows still pending, and the deployed commit.
+  - `/stop <chat>`: stop that chat's turn, with the same semantics as `/stop` in the chat.
+  - Planned: jobs and cost in `/status`, cancelling jobs, reverting `home/`.
+- **The framework's messages are a durable queue** of their own, `control_messages` (pending → sent), never
+  `chat_events`: an alert raised just before a restart is still delivered, and nothing of it reaches the
+  assistant's chats. Anything may queue there, a runner child included; only the server sends. Delivery is
+  at-least-once: a send whose response is lost (or a crash before it is recorded) is sent again, and
+  while the owner has not sent the control bot `/start` (403, "chat not found") everything waits rather
+  than failing.
+- **Alerts**, each raised once (keyed on what it is about). Genuine repeats, such as one chat's turns
+  failing again and again, are rate-limited per topic: a repeat within 30 minutes is recorded as
+  suppressed and not sent, and the next alert that does go out says how many were suppressed. An
+  unanswered message is never suppressed: each one is alerted, keyed on its seq.
+  - a turn that failed (raised in the transaction that records the failure);
+  - a chat whose input was given up after the retry cap: which message went unanswered;
+  - a turn being stopped by the wall-clock limit;
+  - outbound rows that failed, or stayed pending past `SHUVI_ALERT_OUTBOUND_MINUTES` (default 10);
+  - a lost conversation restarted fresh, and a failed backup.
+  - Planned: an unknown group, an expired job, persistent 429s.
+- **Approvals** (src/control/approvals.ts) are the generic way to ask the owner something:
+  `requestApproval({ kind, title, body, options, ttl?, originChatId? })` records the question and queues a
+  card with one button per option, and returns its id. A button press from the owner is recorded once,
+  durably; the card is then edited to show the answer. The caller reads the answer (`getApproval`), or
+  names an origin chat and is woken by an `approval` event there, which triggers a turn like a message.
+  A card past its ttl expires, and the origin chat is told so. Policy changes, secrets and schedules are
+  its intended callers.
 - **Commands that act on the current chat** are sent in that chat, and only the owner's sender id counts:
   - `/new`: start a fresh conversation context. `chat_events` and the cursor are kept; the new
     conversation opens with the last 10 messages.
@@ -331,6 +357,22 @@ stickers:
 
   The framework acknowledges a command only by reacting to it; it sends no message.
 - **CLI**: deep debugging on the machine (reading `chat_events`, turns, jobs).
+
+**Reliability** the control bot reports on:
+
+- **Turn wall-clock limit** (`SHUVI_TURN_MAX_MINUTES`, default 15): past it the waker sends SIGTERM, and
+  SIGKILL after a grace period. The turn closes as `stopped`, so its input counts as handled: a message
+  that hangs every turn is not retried into another hang. The turn records why (`term_at`, and an error
+  naming the limit), so `turns` alone tells it from an owner `/stop`.
+- **Liveness**: a turn's pid and that process's start time (`/proc/<pid>/stat`) are recorded at spawn. A
+  pid counts as the turn's only while the start time still matches, so a reused pid neither keeps a dead
+  turn "running" nor receives a `/stop` meant for it.
+- **A lost conversation** (the driver says "No conversation found with session ID"): the chat's
+  conversation is reset and the same turn runs again at once, once, as a fresh conversation opening with
+  the last 10 messages, as after `/new`. It does not count as a failed attempt.
+- **Backups**: once a day a consistent copy of `shuvi.db` (`VACUUM INTO`, online) and a `git bundle` of
+  `home/` go to `$SHUVI_DATA_DIR/backups/<time>/`; the last 7 are kept. A failed backup is alerted and
+  retried an hour later. They sit on the same disk: copying them off the machine is the deployment's job.
 
 ## 14. Tools, and where they live
 

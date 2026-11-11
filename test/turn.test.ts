@@ -3,7 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildSystemPrompt } from "../src/agent/prompt.ts";
-import { runTurn } from "../src/agent/turn.ts";
+import type { AdapterRunOptions, AdapterRunResult, ToolBoundary } from "agent-runtime";
+import { isLostSession, runTurn } from "../src/agent/turn.ts";
+import { controlMessagesOf } from "../src/store/control.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
 import { getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
@@ -226,5 +228,69 @@ describe("runTurn: input and the cursor", () => {
     expect(sp).not.toContain("They speak"); // no language configured, none named
     const second = await turnWith(db, [{ token: "ok" }], { home });
     expect(second.adapter.calls[0]).toMatchObject({ method: "continueRun", backendSessionId: "fake-session" });
+  });
+});
+
+/** A scripted driver whose `continueRun` fails the way a lost Claude session does (or with `error`). */
+class LostSessionAdapter extends ScriptedAdapter {
+  constructor(
+    boundary: ToolBoundary,
+    script: Step[],
+    private readonly error: string,
+  ) {
+    super(boundary, script);
+  }
+  override continueRun(input: Parameters<ScriptedAdapter["continueRun"]>[0], opts: AdapterRunOptions): Promise<AdapterRunResult> {
+    this.calls.push({ method: "continueRun", prompt: input.prompt, backendSessionId: input.backendSessionId, tools: [] });
+    opts.onSessionId?.(input.backendSessionId); // the CLI echoes the id it was asked for
+    return Promise.reject(new Error(this.error));
+  }
+}
+
+describe("runTurn: a lost conversation", () => {
+  // The exact text agent-runtime's Claude driver produces when the session no longer exists: its own
+  // prefix, then the SDK result's `errors` (the Claude Code CLI's message) after a colon.
+  const LOST = 'Claude Agent SDK run ended with "error_during_execution": No conversation found with session ID: 6b0b8a3e-1111-4222-8333-444455556666';
+
+  async function lostTurn(db: Db, error: string) {
+    const turn = claimTurn(db, ownerChatId(db))!;
+    let adapter!: LostSessionAdapter;
+    const outcome = await runTurn({ db, turnId: turn.id, home: emptyHome, timeZone: "UTC", makeAdapter: (b) => (adapter = new LostSessionAdapter(b, [{ token: "Fresh start." }], error)), capabilities: enabledCapabilities({ SHUVI_WEB: "off" }) });
+    return { outcome, adapter, turn: getTurn(db, turn.id)! };
+  }
+
+  test("the pinned driver text is recognised, and nothing else is", () => {
+    expect(isLostSession(new Error(LOST))).toBe(true);
+    expect(isLostSession(new Error('Claude Agent SDK run ended with "error_during_execution"'))).toBe(false);
+  });
+
+  test("the conversation is reset and the same turn runs again at once as a fresh one, with the last messages, costing no attempt", async () => {
+    const db = memDb();
+    ownerSays(db, "earlier message");
+    const chatId = ownerChatId(db);
+    db.$client.exec(`update chats set cursor_seq = (select max(seq) from chat_events), backend_session_id = 'gone-session'`);
+    ownerSays(db, "are you there");
+    const { outcome, adapter, turn } = await lostTurn(db, LOST);
+    expect(outcome).toBe("done");
+    expect(turn.status).toBe("done");
+    expect(adapter.calls.map((c) => c.method)).toEqual(["continueRun", "run"]);
+    const prompt = adapter.calls[1]!.prompt as string; // no image: a plain string
+    expect(prompt).toContain("earlier message");
+    expect(prompt.indexOf("are you there")).toBeGreaterThan(prompt.indexOf("(New messages:)"));
+    expect(adapter.calls[1]!.systemPrompt).toBeDefined();
+    expect(getChat(db, chatId)!.backendSessionId).toBe("fake-session");
+    expect(messages(db)).toEqual(["Fresh start."]);
+    expect(db.$client.query("select count(*) as n from turns where status = 'failed'").get()).toEqual({ n: 0 });
+    expect(controlMessagesOf(db, "alert")[0]!.text).toContain("was lost (gone-session)");
+  });
+
+  test("any other error is an ordinary failure: the conversation is kept", async () => {
+    const db = memDb();
+    ownerSays(db, "hi");
+    db.$client.exec(`update chats set backend_session_id = 'kept-session'`);
+    const { outcome, adapter } = await lostTurn(db, 'Claude Agent SDK run ended with "error_during_execution"');
+    expect(outcome).toBe("failed");
+    expect(adapter.calls.map((c) => c.method)).toEqual(["continueRun"]);
+    expect(getChat(db, ownerChatId(db))!.backendSessionId).toBe("kept-session");
   });
 });

@@ -1,6 +1,7 @@
 import { and, desc, eq, gt, inArray, isNull, lte, max } from "drizzle-orm";
 import type { TurnUsage } from "agent-runtime";
 import type { Db } from "./db.ts";
+import { raiseAlert } from "./control.ts";
 import { chatEvents, chats, TRIGGER_KINDS, turns } from "./schema.ts";
 
 /**
@@ -19,12 +20,18 @@ import { chatEvents, chats, TRIGGER_KINDS, turns } from "./schema.ts";
  *                  (`retryDelayMs`). After `MAX_ATTEMPTS` failures on the same `from_seq` it moves to
  *                  `to_seq` anyway: one message that always crashes a turn must not wedge the chat.
  *
+ * Every failure raises an alert to the owner in the transaction that records it (store/control.ts), so it
+ * is raised exactly once whichever process closed the turn: a failed turn (rate-limited per chat), and
+ * when the cap gives up, which message went unanswered.
+ *
  * The price of retrying: a turn that died after sending some of its messages may say them again on the
  * retry (with different wording, so idempotency keys cannot catch it). That is accepted here; the
  * alternative, never retrying, loses the reply entirely.
  */
 
 export const MAX_ATTEMPTS = 3;
+/** The error recorded on a turn the wall-clock limit stopped (server/waker.ts). */
+export const WALL_CLOCK_STOP = "stopped: ran past the wall-clock limit";
 /** The wait before retrying after the first failure; it doubles with each further one. */
 export const RETRY_BASE_MS = 5_000;
 
@@ -78,9 +85,21 @@ export function runningTurnFor(db: Db, chatId: number): Turn | undefined {
     .get();
 }
 
-export function setTurnPid(db: Db, id: number, pid: number): void {
-  db.update(turns).set({ pid }).where(eq(turns.id, id)).run();
+export function setTurnPid(db: Db, id: number, pid: number, pidStart: string | null = null): void {
+  db.update(turns).set({ pid, pidStart }).where(eq(turns.id, id)).run();
 }
+
+/** Record that the waker sent SIGTERM for the wall-clock limit (the first time only). */
+export function markTerm(db: Db, id: number, at: string): void {
+  db.update(turns).set({ termAt: at }).where(and(eq(turns.id, id), isNull(turns.termAt))).run();
+}
+
+/** How a chat is named to the owner in the control bot. */
+export function chatLabel(chat: { id: number; tgChatId: number; title: string | null }): string {
+  return chat.title ? `"${chat.title}" (chat ${chat.id})` : `chat ${chat.id} (tg ${chat.tgChatId})`;
+}
+
+const excerpt = (s: string, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /** Record which command stopped a turn (the first one wins). */
 export function markStop(db: Db, id: number, stopSeq: number): void {
@@ -123,10 +142,13 @@ export function finishTurn(
     const t = tx.select().from(turns).where(eq(turns.id, id)).get();
     if (!t || t.status !== "running") return; // already closed (a stop racing an end, or boot recovery)
     const u = outcome.usage;
+    // A turn the wall-clock limit stopped says so on its row, whichever process closes it (the child on
+    // SIGTERM, or the waker after SIGKILL): `term_at` plus this error is what tells it from an owner /stop.
+    const error = outcome.status === "stopped" && t.termAt ? WALL_CLOCK_STOP : (outcome.error ?? null);
     tx.update(turns)
       .set({
         status: outcome.status,
-        error: outcome.error ?? null,
+        error,
         endedAt: new Date().toISOString(),
         ...(u
           ? {
@@ -152,9 +174,32 @@ export function finishTurn(
       cursor = last?.m ?? null;
     } else {
       const recent = tx.select().from(turns).where(eq(turns.chatId, t.chatId)).orderBy(desc(turns.id)).limit(MAX_ATTEMPTS).all();
+      const chat = tx.select().from(chats).where(eq(chats.id, t.chatId)).get()!;
+      const tdb = tx as unknown as Db;
       if (recent.length === MAX_ATTEMPTS && recent.every((r) => r.status === "failed" && r.fromSeq === t.fromSeq)) {
         cursor = t.toSeq;
         console.error(`chat ${t.chatId}: ${MAX_ATTEMPTS} turns failed on the same input; moving past seq ${t.toSeq} unanswered (${outcome.error ?? ""})`);
+        const lost = tx
+          .select()
+          .from(chatEvents)
+          .where(and(eq(chatEvents.chatId, t.chatId), gt(chatEvents.seq, t.fromSeq), lte(chatEvents.seq, t.toSeq), inArray(chatEvents.kind, TRIGGER_KINDS)))
+          .orderBy(chatEvents.seq)
+          .all();
+        // One alert per message, keyed on its seq and never rate-limited: an unanswered message must not
+        // go unseen because another one in the same chat was reported a minute earlier.
+        for (const e of lost) {
+          const p = e.payload as { text?: string; title?: string };
+          raiseAlert(tdb, {
+            key: `unanswered:${e.seq}`,
+            text: `Unanswered in ${chatLabel(chat)}: "${excerpt(p.text ?? p.title ?? e.kind)}" (#${e.seq}). ${MAX_ATTEMPTS} turns failed on it, so it was skipped. Last error: ${excerpt(outcome.error ?? "unknown", 300)}`,
+          });
+        }
+      } else {
+        raiseAlert(tdb, {
+          key: `turn-failed:${t.id}`,
+          topic: `turn-failed:${t.chatId}`,
+          text: `Turn ${t.id} failed in ${chatLabel(chat)}: ${excerpt(outcome.error ?? "unknown", 300)}. It will be retried.`,
+        });
       }
     }
     if (cursor != null && cursor > t.fromSeq) tx.update(chats).set({ cursorSeq: cursor }).where(eq(chats.id, t.chatId)).run();

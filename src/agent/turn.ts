@@ -1,13 +1,28 @@
-import type { BackendAdapter, ToolBoundary } from "agent-runtime";
+import type { BackendAdapter, Prompt, ToolBoundary } from "agent-runtime";
 import { capabilityHolds, capabilityPerception, capabilityTools, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
 import type { Db } from "../store/db.ts";
-import { enqueueOutbound, getChat, recentHistory, triggersAfter, type Chat, type ChatEvent, type MessagePayload } from "../store/events.ts";
-import { extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
+import { raiseAlert } from "../store/control.ts";
+import { enqueueOutbound, getChat, recentHistory, resetConversation, triggersAfter, type Chat, type ChatEvent, type MessagePayload } from "../store/events.ts";
+import { chatLabel, extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, type Perceive } from "./render.ts";
 
 /** How many earlier events a fresh conversation opens with (docs/design.md §13, `/new`). */
 export const HISTORY_ON_NEW = 10;
+
+/**
+ * What the driver's error says when the conversation it was asked to continue no longer exists (the
+ * Claude Code session file is gone: a new machine, a cleaned config dir). It is the Claude Code CLI's own
+ * text, which agent-runtime appends to its error as `Claude Agent SDK run ended with
+ * "error_during_execution": No conversation found with session ID: <id>` (pinned in test/turn.test.ts).
+ * Only this exact text counts: a generic failure may be an outage or an expired login, and resetting the
+ * conversation on those would throw its context away for nothing.
+ */
+export const LOST_SESSION_TEXT = "No conversation found with session ID";
+
+export function isLostSession(e: unknown): boolean {
+  return (e instanceof Error ? e.message : String(e)).includes(LOST_SESSION_TEXT);
+}
 
 /**
  * One turn, from the events it answers to the messages it leaves queued. The runner child calls this; it
@@ -37,6 +52,11 @@ export const HISTORY_ON_NEW = 10;
  *
  * The turn's tools and the capability sections of its system prompt come from the enabled capabilities
  * (src/capabilities/), in registry order; this module does not know which capabilities exist.
+ *
+ * A LOST conversation (`continueRun` fails with `LOST_SESSION_TEXT`) is not a failure of the turn: the
+ * chat's conversation is reset and the same turn runs again at once, once, as a fresh conversation that
+ * opens with the last `HISTORY_ON_NEW` messages (as after `/new`). It costs no failure attempt; the owner
+ * is told through the control bot.
  */
 
 export interface TurnDeps {
@@ -162,13 +182,30 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     ...(deps.signal ? { signal: deps.signal } : {}),
   };
 
+  const fresh = (p: Prompt) => adapter.run({ prompt: p, tools, systemPrompt: buildSystemPrompt(deps.home, chat, owner, deps.capabilities), ...(deps.model ? { model: deps.model } : {}) }, opts);
   try {
-    const result = chat.backendSessionId
-      ? await adapter.continueRun(
+    let result;
+    if (!chat.backendSessionId) result = await fresh(prompt);
+    else {
+      try {
+        result = await adapter.continueRun(
           { backendSessionId: chat.backendSessionId, prompt, tools, ...(deps.model ? { model: deps.model } : {}), ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
           opts,
-        )
-      : await adapter.run({ prompt, tools, systemPrompt: buildSystemPrompt(deps.home, chat, owner, deps.capabilities), ...(deps.model ? { model: deps.model } : {}) }, opts);
+        );
+      } catch (e) {
+        if (deps.signal?.aborted || !isLostSession(e)) throw e;
+        resetConversation(db, chat.id);
+        raiseAlert(db, {
+          key: `lost-session:${turnId}`,
+          topic: `lost-session:${chat.id}`,
+          text: `The conversation of ${chatLabel(chat)} was lost (${chat.backendSessionId}); turn ${turnId} restarted it fresh with the last ${HISTORY_ON_NEW} messages.`,
+        });
+        buf = "";
+        lastThinking = false;
+        const lastSeen = recentHistory(db, chat.id, input[0]!.seq - 1, HISTORY_ON_NEW);
+        result = await fresh(lastSeen.length ? renderWithHistory(lastSeen, input, deps.timeZone, perceive) : renderTurnInput(input, deps.timeZone, perceive));
+      }
+    }
     flush();
     const u = result.usage;
     finishTurn(db, turnId, { status: "done", usage: u, contextTokens: u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens + u.outputTokens });

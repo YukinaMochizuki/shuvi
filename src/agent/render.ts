@@ -1,5 +1,5 @@
 import type { Prompt, PromptPart, ToolContent } from "agent-runtime";
-import type { ChatEvent, MessagePayload } from "../store/events.ts";
+import type { ApprovalPayload, ChatEvent, MessagePayload } from "../store/events.ts";
 
 /**
  * How chat events read to the model. One line per message, led by its `#seq` (the handle `react` takes),
@@ -38,6 +38,12 @@ export function renderMessage(e: ChatEvent, timeZone: string): string {
   if (e.kind === "bot_message") {
     // Something the assistant itself said earlier (only shown when a fresh conversation is opened).
     return `[#${e.seq} · ${formatTime(e.at, timeZone)} · you] ${(e.payload as { text: string }).text}`;
+  }
+  if (e.kind === "approval") {
+    // Not something said in the chat: the owner's answer to a card in the control bot, asked for from here.
+    const a = e.payload as unknown as ApprovalPayload;
+    const outcome = a.answer ? `the owner answered "${a.label ?? a.answer}" (${a.answer})` : "it expired without an answer";
+    return `[#${e.seq} · ${formatTime(e.at, timeZone)} · system] Approval #${a.approvalId} (${a.kind}) "${a.title}": ${outcome}.`;
   }
   const p = e.payload as unknown as MessagePayload;
   const head = `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${p.from.name}]`;

@@ -8,6 +8,9 @@
  *   commands  /stop, /new (commands.ts)
  *   sender    deliver what turns queued (sender.ts)
  *   typing    show "typing…" in chats with a running turn
+ *   scan      alert on outbound rows that are not getting through; expire approvals (control/)
+ *   backup    a daily copy of shuvi.db and home/ (control/backup.ts)
+ *   control   when `SHUVI_CONTROL_BOT_TOKEN` is set, the control bot's poller and sender (control/bot.ts)
  *
  * and, alongside them, the loops of every enabled capability (src/capabilities/), through the same
  * loop helper (loop.ts).
@@ -15,7 +18,12 @@
  * Everything it knows is in the store, so stopping it at any moment and starting it again loses nothing:
  * running turns carry on in their own processes, and the loops resume from the rows.
  */
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Api } from "grammy";
+import { expireApprovals } from "../control/approvals.ts";
+import { backupPass } from "../control/backup.ts";
+import { controlPollOnce, controlSendPass, deployedCommit, outboundAlertPass } from "../control/bot.ts";
 import { enabledCapabilities } from "../capabilities/index.ts";
 import { capabilityLoops } from "../capabilities/types.ts";
 import { loadConfig } from "../env.ts";
@@ -27,7 +35,7 @@ import { commandPass } from "./commands.ts";
 import { loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
 import { sendPass } from "./sender.ts";
-import { spawnTurn } from "./spawn.ts";
+import { signalTurn, spawnTurn } from "./spawn.ts";
 import { wakerPass } from "./waker.ts";
 
 const cfg = loadConfig();
@@ -46,7 +54,7 @@ void loop(
   "waker",
   async () => {
     commandPass(db);
-    wakerPass({ db, spawn: spawnTurn, capabilities });
+    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs });
   },
   300,
 );
@@ -61,6 +69,24 @@ void loop(
   },
   4000,
 );
+void loop(
+  "scan",
+  async () => {
+    outboundAlertPass(db, cfg.outboundAlertMs);
+    expireApprovals(db, cfg.ownerId);
+  },
+  5000,
+);
+void loop("backup", async () => void backupPass({ db, dataDir: cfg.dataDir, home: cfg.home }), 10 * 60_000);
+
+if (cfg.controlBotToken) {
+  const control = new Api(cfg.controlBotToken, cfg.controlApiRoot ? { apiRoot: cfg.controlApiRoot } : undefined);
+  const deps = { ownerId: cfg.ownerId, commit: deployedCommit(join(dirname(fileURLToPath(import.meta.url)), "../..")), timeZone: cfg.timeZone, signal: signalTurn };
+  void loop("control-poller", async () => void (await controlPollOnce(db, control, deps, 25, stop.signal)), 0);
+  void loop("control-sender", async () => (await controlSendPass(db, control, cfg.ownerId)).backoffMs, 500);
+  console.log(`control bot on, ${deps.commit}`);
+} else console.log("control bot off (SHUVI_CONTROL_BOT_TOKEN unset): alerts are queued and logged only");
+
 const files = telegramFiles(api, cfg.botToken, cfg.telegramApiRoot);
 startLoops(capabilityLoops(capabilities, { db, home: cfg.home, timeZone: cfg.timeZone, ownerId: cfg.ownerId, files, signal: stop.signal }), stop.signal);
 
