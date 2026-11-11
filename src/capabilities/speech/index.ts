@@ -7,8 +7,8 @@ import { defineCapability } from "../types.ts";
 
 /**
  * Speech: `say`, `react` and `pass`, and the section that tells the model how its output becomes Telegram
- * messages. Always enabled, and first in the registry, so its tools come first and its section directly
- * follows "this chat" (docs/design.md §6).
+ * messages. Always enabled, in every chat whatever its policy (`always`), and first in the registry, so
+ * its tools come first and its section directly follows "this chat" (docs/design.md §6).
  *
  * Only the tools live here. The speech model itself (docs/design.md §4, "C'"), that reply text becomes
  * messages at each boundary, that nothing is queued after `pass`, that later tool calls are refused and
@@ -32,6 +32,7 @@ const emojiList = REACTION_EMOJI.join(" ");
 export const speech = defineCapability<true>({
   id: "speech",
   enable: () => true,
+  always: true,
   tools({ db, state: s }) {
     const say: ToolDef<{ text: string }> = {
       name: "say",

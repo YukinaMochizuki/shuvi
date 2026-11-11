@@ -1,5 +1,6 @@
 import type { BackendAdapter, Prompt, ToolBoundary } from "agent-runtime";
-import { capabilityHolds, capabilityOwnerOnly, capabilityPerception, capabilityTools, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
+import { capabilityHolds, capabilityOwnerOnly, capabilityPerception, capabilityTools, chatCapabilities, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
+import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
 import {
@@ -9,6 +10,7 @@ import {
   resetConversation,
   triggersAfter,
   type ApprovalPayload,
+  type BotMessagePayload,
   type Chat,
   type ChatEvent,
   type ExternalPayload,
@@ -20,10 +22,13 @@ import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
 import { chatLabel, extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
 import { buildSystemPrompt } from "./prompt.ts";
-import { renderMidTurn, renderTurnInput, renderWithHistory, type Perceive } from "./render.ts";
+import { renderMidTurn, renderTurnInput, renderWithHistory, type InputOptions, type Perceive } from "./render.ts";
+import { isTrigger, type BotIdentity } from "./triggers.ts";
 
 /** How many earlier events a fresh conversation opens with (docs/design.md §13, `/new`). */
 export const HISTORY_ON_NEW = 10;
+/** In a group, how many unseen messages before the ones that woke the turn it opens with (design §7). */
+export const GROUP_CONTEXT = 10;
 
 /**
  * What the driver's error says when the conversation it was asked to continue no longer exists (the
@@ -68,6 +73,19 @@ export function isLostSession(e: unknown): boolean {
  * The turn's tools and the capability sections of its system prompt come from the enabled capabilities
  * (src/capabilities/), in registry order; this module does not know which capabilities exist.
  *
+ * PER-CHAT POLICY (src/policy/): the turn uses only the capabilities its chat's policy enables
+ * (capabilities/types.ts `chatCapabilities`), and the persona and memory layers it allows (prompt.ts). A
+ * chat the policy no longer lists gets no turn: it closes at once, as `empty`.
+ *
+ * IN A GROUP (design §7) most messages are recorded without waking anyone (agent/triggers.ts), so a turn
+ * finds many unseen ones past the cursor. It opens with the messages that woke it, preceded by up to
+ * `GROUP_CONTEXT` earlier unseen ones, and a line saying how many older ones it does not show; all of
+ * them count as seen when it ends. The owner's lines are marked (render.ts). Its first message is sent as
+ * a reply to the message that woke it when anyone has spoken since (design §4); that message is recorded
+ * on the turn (`turns.trigger_seq`), which is how a follow-up is recognised. The earlier
+ * unseen lines it opens with are CONTEXT: rendered under their own heading, and outside the turn's
+ * authority (`ownerAuthority`).
+ *
  * A LOST conversation (`continueRun` fails with `LOST_SESSION_TEXT`) is not a failure of the turn: the
  * chat's conversation is reset and the same turn runs again at once, once, as a fresh conversation that
  * opens with the last `HISTORY_ON_NEW` messages (as after `/new`). It costs no failure attempt; the owner
@@ -87,6 +105,10 @@ export interface TurnDeps {
   model?: string;
   /** The capabilities enabled in this process, in registry order (capabilities/index.ts). */
   capabilities: readonly EnabledCapability[];
+  /** The policy in effect (default: the owner's DM, as it always was). */
+  policy?: Policy;
+  /** Who the bot is (agent/triggers.ts), to tell which group messages woke the turn. */
+  bot?: BotIdentity;
   /** The driver for this turn, built around the boundary the turn supplies. */
   makeAdapter: (boundary: ToolBoundary) => BackendAdapter;
   signal?: AbortSignal;
@@ -100,17 +122,35 @@ export interface TurnState {
   stopping: boolean;
   /** Next message number within the turn (the `n` of the idempotency key). */
   n: number;
-  /** The cursor the turn started from: what it has been shown is (fromSeq, toSeq]. */
+  /**
+   * What the turn answers is (fromSeq, toSeq], and owner authority is judged over it: in the DM, from the
+   * cursor; in a group, from the first event that woke the turn (the context lines before it are not in it).
+   */
   fromSeq: number;
   /** The last inbound seq the model has been shown. */
   toSeq: number;
+  /** In a group: the message that woke the turn (its first message replies to it if others spoke since). */
+  wokenBy?: number;
+  /** Whether the turn's first message has been queued. */
+  spoke?: boolean;
+  /** In a group: the owner's id, whose lines are marked. */
+  markOwner?: number;
+}
+
+/** Has anyone said something in the chat after event `seq`? */
+function spokeAfter(db: Db, chatId: number, seq: number): boolean {
+  return triggersAfter(db, chatId, seq).some((e) => e.kind === "message");
 }
 
 /** Queue one message of the turn. After `pass` nothing is queued: that is where `pass` closes speech. */
 export function queueMessage(db: Db, s: TurnState, text: string): void {
   const body = text.trim();
   if (!body || s.passed) return;
-  enqueueOutbound(db, { chatId: s.chat.id, kind: "bot_message", payload: { text: body }, idemKey: `turn:${s.turnId}:${s.n++}`, turnId: s.turnId });
+  const first = !s.spoke;
+  s.spoke = true;
+  const payload: BotMessagePayload = { text: body };
+  if (s.wokenBy !== undefined && first && spokeAfter(db, s.chat.id, s.wokenBy)) payload.replyToSeq = s.wokenBy;
+  enqueueOutbound(db, { chatId: s.chat.id, kind: "bot_message", payload, idemKey: `turn:${s.turnId}:${s.n++}`, turnId: s.turnId });
 }
 
 export function queueReaction(db: Db, s: TurnState, targetSeq: number, emoji: string): void {
@@ -133,42 +173,55 @@ export interface TurnAuthority {
 }
 
 /**
- * May this turn act for the owner NOW? Decided at each owner-only call, over everything the turn has been
- * shown so far, (fromSeq, toSeq], the initial input and every mid-turn append alike, because authority
- * follows the sender (design §8) and a turn's senders can change while it runs:
+ * May this turn act for the owner NOW? Decided at each owner-only call, over what the turn answers so far,
+ * (fromSeq, toSeq]: the events that woke it and everything after them, the initial input and every
+ * mid-turn append alike (design §8, "authority follows the sender"). In a group the turn also opens with
+ * earlier unseen lines as CONTEXT (`GROUP_CONTEXT`, under "Earlier, before you were called"); those come
+ * before `fromSeq` and count for nothing.
  *
- *   - a `message` must be from the owner's user id: anyone else's line in the turn blocks the call, even
- *     when the owner wrote too (what a stranger wrote may be what the model is acting on);
+ * THE RULE: the turn may act for the owner when the owner HIMSELF is in it: a message from the owner's
+ * user id among those that woke it or came after (appended included), or something only he can produce
+ * (below). Nothing else is a veto: the owner is usually in the conversation and people talk after his
+ * command, so another person's line, inbound text, or a schedule or job he never authorised neither grants
+ * authority nor takes it away. Telling whose request is whose is left to the model, and the framework
+ * makes it unmistakable: the owner's lines carry a mark nobody else can produce (render.ts, `⚙ owner`),
+ * framework events carry `⚙` labels saying what they are, the input says which messages called her, and
+ * the group section tells her to act for the owner only on the owner's own request.
+ *
+ *   - a `message` from the owner's user id counts; anyone else's neither counts nor blocks;
  *   - a `scheduled` / `job_done` counts as the owner's only when its schedule or job was created by a call
- *     the owner authorised (`owner_authorised` on its row); otherwise it blocks like a stranger's line;
- *   - an `external` event blocks like a stranger's line: text that arrived from outside never rides along
- *     with the owner's authority (the owner can ask again in a turn of their own);
+ *     the owner authorised (`owner_authorised` on its row); one that was not neither counts nor blocks;
+ *   - an `external` event (inbound text) neither counts nor blocks;
  *   - an answered `approval` counts as the owner's: only the owner can press its button in the control bot.
  *     One that expired unanswered is nobody's: it neither blocks nor counts;
- *   - and at least one event must be the owner's.
+ *   - and at least one event must be the owner's: a turn of strangers only, of inbound events only, or
+ *     started only by schedules or jobs he never authorised, never acts for the owner.
  *
  * Returns null when the call may run, or why it may not, in words the model can pass on.
  */
 export function ownerAuthority(db: Db, chatId: number, fromSeq: number, toSeq: number, ownerId: number | undefined): string | null {
   let owners = 0;
+  /** Why not, from the first thing in the turn that is not the owner's (said only if nothing is his). */
+  let why: string | undefined;
   for (const e of triggersAfter(db, chatId, fromSeq)) {
     if (e.seq > toSeq) break;
     if (e.kind === "message") {
       const from = (e.payload as unknown as MessagePayload).from;
-      if (ownerId === undefined || from.id !== ownerId) return `#${e.seq} in this turn is from ${from.name}, not the owner`;
-      owners++;
+      if (ownerId !== undefined && from.id === ownerId) owners++;
+      else why ??= `#${e.seq} in this turn is from ${from.name}, not the owner`;
     } else if (e.kind === "scheduled" || e.kind === "job_done") {
       const authorised =
         e.kind === "scheduled" ? getSchedule(db, (e.payload as unknown as ScheduledPayload).scheduleId)?.ownerAuthorised : getJob(db, (e.payload as unknown as JobDonePayload).jobId)?.ownerAuthorised;
-      if (!authorised) return `#${e.seq} in this turn is a ${e.kind === "scheduled" ? "schedule" : "job"} the owner did not set up`;
-      owners++;
+      if (authorised) owners++;
+      else why ??= `#${e.seq} in this turn is a ${e.kind === "scheduled" ? "schedule" : "job"} the owner did not set up`;
     } else if (e.kind === "approval") {
       if ((e.payload as unknown as ApprovalPayload).answer !== null) owners++;
     } else if (e.kind === "external") {
-      return `#${e.seq} in this turn came from outside (inbound: ${(e.payload as unknown as ExternalPayload).source}), not from the owner`;
+      why ??= `#${e.seq} in this turn came from outside (inbound: ${(e.payload as unknown as ExternalPayload).source}), not from the owner`;
     }
   }
-  return owners ? null : "nothing in this turn is from the owner";
+  if (owners) return null;
+  return why ? `${why}, and nothing in it is from the owner` : "nothing in this turn is from the owner";
 }
 
 /**
@@ -200,7 +253,7 @@ export function turnBoundary(
       if (!fresh.length) return null;
       s.toSeq = fresh.at(-1)!.seq;
       extendTurn(db, s.turnId, s.toSeq);
-      return renderMidTurn(fresh, timeZone, perceive);
+      return renderMidTurn(fresh, timeZone, perceive, s.markOwner !== undefined ? { owner: s.markOwner } : {});
     },
   };
 }
@@ -213,19 +266,48 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const turn = getTurn(db, turnId);
   if (!turn || turn.status !== "running") return "failed";
   const chat = getChat(db, turn.chatId)!;
-
-  const input = untilHeld(triggersAfter(db, chat.id, turn.fromSeq), deps.capabilities, Date.now(), turn.toSeq);
-  const perceive: Perceive = (e) => capabilityPerception(deps.capabilities, e);
-  // A fresh conversation (the first turn, or after `/new`) opens with the chat's last few exchanges, so
-  // starting over forgets the model's context, not what was just being talked about.
-  if (!input.length) {
+  const policy = deps.policy ?? defaultPolicy();
+  // Without the owner's id: a private chat is only ever recorded for the owner (telegram/inbound.ts), and
+  // the waker, which does check it, decides whether a chat gets a turn at all.
+  const chatPolicy = resolveChat(policy, chat);
+  if (!chatPolicy) {
     finishTurn(db, turnId, { status: "done" });
     return "empty";
   }
+  const capabilities = chatCapabilities(deps.capabilities, chatPolicy.tools);
+  const group = chat.kind === "group";
+
+  const unseen = untilHeld(triggersAfter(db, chat.id, turn.fromSeq), deps.capabilities, Date.now(), turn.toSeq);
+  const perceive: Perceive = (e) => capabilityPerception(capabilities, e);
+  // A fresh conversation (the first turn, or after `/new`) opens with the chat's last few exchanges, so
+  // starting over forgets the model's context, not what was just being talked about.
+  if (!unseen.length) {
+    finishTurn(db, turnId, { status: "done" });
+    return "empty";
+  }
+  // In a group: from up to GROUP_CONTEXT messages before the first that woke the turn.
+  let input = unseen;
+  let context = 0;
+  if (chatPolicy.trigger !== "all") {
+    const first = unseen.findIndex((e) => isTrigger(db, e, chatPolicy, deps.bot));
+    const woke = first >= 0 ? first : Math.max(0, unseen.findIndex((e) => e.seq >= (turn.triggerSeq ?? turn.toSeq)));
+    const start = Math.max(0, woke - GROUP_CONTEXT);
+    input = unseen.slice(start);
+    context = woke - start;
+  }
+  const unread = unseen.length - input.length;
   // Everything said before the first message being answered, the assistant's own replies included
   // (those come after the cursor, so the cursor is not the bound).
-  const history = chat.backendSessionId ? [] : recentHistory(db, chat.id, input[0]!.seq - 1, HISTORY_ON_NEW);
-  const s: TurnState = { chat, turnId, passed: false, stopping: deps.signal?.aborted ?? false, n: 0, fromSeq: turn.fromSeq, toSeq: input.at(-1)!.seq };
+  const history = chat.backendSessionId ? [] : recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW);
+  const s: TurnState = { chat, turnId, passed: false, stopping: deps.signal?.aborted ?? false, n: 0, fromSeq: input[context]!.seq - 1, toSeq: input.at(-1)!.seq };
+  if (group) {
+    s.wokenBy = turn.triggerSeq ?? turn.toSeq;
+    if (deps.ownerId !== undefined) s.markOwner = deps.ownerId;
+  }
+  // In a group the input names the messages that called her (the first that woke the turn, and any after it).
+  const called = group ? input.slice(context).filter((e) => isTrigger(db, e, chatPolicy, deps.bot)).map((e) => e.seq) : [];
+  if (group && !called.length) called.push(s.wokenBy!);
+  const renderOpts: InputOptions = { ...(s.markOwner !== undefined ? { owner: s.markOwner } : {}), ...(unread ? { unread } : {}), ...(context ? { context } : {}), ...(called.length ? { called } : {}) };
   deps.signal?.addEventListener("abort", () => (s.stopping = true), { once: true });
   extendTurn(db, turnId, s.toSeq);
 
@@ -235,13 +317,24 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     buf = "";
   };
 
-  const authority: TurnAuthority = { ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}), ownerOnly: capabilityOwnerOnly(deps.capabilities) };
-  const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone, deps.capabilities, authority));
+  const authority: TurnAuthority = { ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}), ownerOnly: capabilityOwnerOnly(capabilities) };
+  const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone, capabilities, authority));
   const firstOwnerMessage = input.find((e) => e.kind === "message" && (deps.ownerId === undefined || (e.payload as unknown as MessagePayload).from.id === deps.ownerId));
   const ownerName = deps.ownerName ?? (firstOwnerMessage ? (firstOwnerMessage.payload as unknown as MessagePayload).from.name : undefined);
   const owner: OwnerInfo = { ...(ownerName ? { name: ownerName } : {}), ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
-  const tools = capabilityTools(deps.capabilities, { db, home: deps.home, chat, turnId, timeZone: deps.timeZone, owner, state: s });
-  const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive) : renderTurnInput(input, deps.timeZone, perceive);
+  const tools = capabilityTools(capabilities, {
+    db,
+    home: deps.home,
+    chat,
+    turnId,
+    timeZone: deps.timeZone,
+    owner,
+    state: s,
+    policy,
+    chatPolicy,
+    ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}),
+  });
+  const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive, renderOpts) : renderTurnInput(input, deps.timeZone, perceive, renderOpts);
   let lastThinking = false;
   const opts = {
     onToken: (text: string, thinking?: boolean) => {
@@ -265,7 +358,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   // Built fresh every turn and sent on a resume too, so an edit to home/ reaches the model from the next
   // turn without `/new`. The driver decides whether a resume honours it: the runner's Claude driver does
   // (`liveSystemPrompt`), and openai-compat always sends the prompt it is given.
-  const systemPrompt = buildSystemPrompt(deps.home, chat, owner, deps.capabilities);
+  const systemPrompt = buildSystemPrompt(deps.home, chat, owner, capabilities, chatPolicy);
   const fresh = (p: Prompt) => adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
   try {
     let result;
@@ -286,8 +379,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         });
         buf = "";
         lastThinking = false;
-        const lastSeen = recentHistory(db, chat.id, input[0]!.seq - 1, HISTORY_ON_NEW);
-        result = await fresh(lastSeen.length ? renderWithHistory(lastSeen, input, deps.timeZone, perceive) : renderTurnInput(input, deps.timeZone, perceive));
+        const lastSeen = recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW);
+        result = await fresh(lastSeen.length ? renderWithHistory(lastSeen, input, deps.timeZone, perceive, renderOpts) : renderTurnInput(input, deps.timeZone, perceive, renderOpts));
       }
     }
     flush();

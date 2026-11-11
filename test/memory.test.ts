@@ -9,6 +9,7 @@ import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { refusal, type HomeAccess } from "../src/capabilities/memory/home.ts";
 import { parseBound } from "../src/capabilities/retrieval/logs.ts";
 import { capabilityTools, type TurnContext } from "../src/capabilities/types.ts";
+import { GROUP_DEFAULTS, type Policy } from "../src/policy/policy.ts";
 import type { Db } from "../src/store/db.ts";
 import { enqueueOutbound, ensureChat, getChat, markSent, recordInbound, type Chat } from "../src/store/events.ts";
 import { claimTurn } from "../src/store/turns.ts";
@@ -319,7 +320,9 @@ describe("home/ edits and failures", () => {
   async function turnIn(db: Db, chat: Chat, home: string, script: ConstructorParameters<typeof ScriptedAdapter>[1]) {
     const turn = claimTurn(db, chat.id)!;
     let adapter!: ScriptedAdapter;
-    await runTurn({ db, turnId: turn.id, home, timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities(ENV), makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)) });
+    // A group is listed in policy, woken by every message and with every tool (src/policy/).
+    const policy: Policy = { chats: { [String(GROUP)]: { ...GROUP_DEFAULTS, trigger: "all", tools: "all" } }, unknownChat: "ignore" };
+    await runTurn({ db, turnId: turn.id, home, timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities(ENV), policy, makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)) });
     return adapter.toolResults.map((r) => ({ name: r.name, isError: !!r.result.isError, text: r.result.content.map((c) => (c.type === "text" ? c.text : "")).join("\n") }));
   }
 
@@ -349,7 +352,7 @@ describe("home/ edits and failures", () => {
     expect(readFileSync(join(home, `chats/${OWNER}.md`), "utf8")).toBe("- Someone asked for a pirate\n");
   });
 
-  test("a message from someone else appended mid-turn takes the owner's authority away", async () => {
+  test("a message from someone else appended mid-turn neither grants nor takes away the owner's authority", async () => {
     const db = memDb();
     const home = newHome();
     const g = group(db);
@@ -364,10 +367,10 @@ describe("home/ edits and failures", () => {
     expect(results.map((r) => [r.name, r.isError])).toEqual([
       ["write_home", false],
       ["read_home", true], // a group never sees the private layers
-      ["edit_home", true],
+      ["edit_home", false], // the owner is in the turn; whose request it was is hers to tell (design §8)
       ["edit_chat_notes", false],
     ]);
-    expect(readFileSync(join(home, "directives.md"), "utf8")).toBe("- Always use metric\n");
+    expect(readFileSync(join(home, "directives.md"), "utf8")).toBe("- Always use metric\n- Never mention cats\n");
   });
 
   test("the prompt asks her to mention an edit in one line, and the framework says nothing itself", async () => {

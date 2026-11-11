@@ -10,8 +10,8 @@ import { defineCapability } from "../types.ts";
  * schedule writes a `scheduled` event carrying its note into the chat it was set in (store/schedules.ts),
  * and that event starts a turn there like a message does.
  *
- * All three tools are `ownerOnly`: always offered, and refused at call time unless the owner is the only
- * one the turn has heard from (agent/turn.ts `ownerAuthority`). A schedule set that way is recorded as
+ * All three tools are `ownerOnly`: always offered, and refused at call time unless the owner himself is in
+ * the turn (agent/turn.ts `ownerAuthority`). A schedule set that way is recorded as
  * owner-authorised, so the turn it starts may set the next one (a check scheduling its own follow-up).
  *
  *   SHUVI_SCHEDULES   "off" disables schedules (default on). Cron and wall-clock times are read in SHUVI_TZ.

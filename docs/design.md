@@ -203,7 +203,7 @@ chats:
       chat: {}
       web: {}
       stickers: {}
-      workstream-read: { products: [hangar] }
+      workstream-read: { products: [widgetry] }
 unknown_chat: ignore      # a group not listed: no response, and the owner is told via the control bot
 ```
 
@@ -211,7 +211,19 @@ unknown_chat: ignore      # a group not listed: no response, and the owner is to
   the chat's audience, not on who asked.
 - **Authority follows the sender.** Running commands, assigning work and changing settings are the
   owner's alone. The framework checks the sender's Telegram user id; the model's judgement is not relied
-  on.
+  on. A turn may act for the owner when the owner himself is in it: one of the messages that called her,
+  or that were appended to it while it ran, is from the owner's user id. Other people's messages, before
+  or after the owner's, neither grant authority nor take it away: the owner is usually in the
+  conversation, and people talk after his command. A turn with no message from the owner (strangers only,
+  or inbound events only, or started only by schedules or jobs he never authorised) never acts for him; a
+  schedule or a job counts as his only when he authorised it. Beside a message of his, inbound text and
+  unauthorised schedules or jobs neither grant nor block, like other people's messages. Telling whose
+  request is whose is the assistant's, and the framework makes it unmistakable: the owner's lines carry a
+  mark nobody else can produce, framework events carry labels saying what they are, a group turn's input
+  says which messages called her (the earlier unseen ones are shown as
+  context, under their own heading, and count for nothing), and the group section tells her to act for the
+  owner only on his own request and to weigh anyone else's instructions as requests, never commands
+  (`ownerAuthority` in src/agent/turn.ts).
 - **Policy changes are proposed by the assistant and approved by the owner.** `propose_policy` produces
   a diff; the framework writes and commits it only when the owner's user id agrees (or presses the inline
   button).
@@ -342,15 +354,20 @@ stickers:
   - a chat whose input was given up after the retry cap: which message went unanswered;
   - a turn being stopped by the wall-clock limit;
   - outbound rows that failed, or stayed pending past `SHUVI_ALERT_OUTBOUND_MINUTES` (default 10);
-  - a lost conversation restarted fresh, and a failed backup.
-  - Planned: an unknown group, an expired job, persistent 429s.
+  - a lost conversation restarted fresh, and a failed backup;
+  - a broken `policy.yaml` (once per broken version; the last good policy stays), a policy change that was
+    approved but could not be written, and a private message from someone other than the owner (at most
+    once per person per day). A group policy does not list asks once, as an approval card offering to add
+    it (src/server/poller.ts, src/policy/write.ts).
+  - Planned: an expired job, persistent 429s.
 - **Approvals** (src/control/approvals.ts) are the generic way to ask the owner something:
   `requestApproval({ kind, title, body, options, ttl?, originChatId? })` records the question and queues a
   card with one button per option, and returns its id. A button press from the owner is recorded once,
   durably; the card is then edited to show the answer. The caller reads the answer (`getApproval`), or
   names an origin chat and is woken by an `approval` event there, which triggers a turn like a message.
-  A card past its ttl expires, and the origin chat is told so. Policy changes, secrets and schedules are
-  its intended callers.
+  A card past its ttl expires, and the origin chat is told so. Policy changes (`propose_policy`, and the
+  unknown-group card; an approved one is written into `policy.yaml` and committed by a server loop),
+  secrets and schedules are its intended callers.
 - **Commands that act on the current chat** are sent in that chat, and only the owner's sender id counts:
   - `/new`: start a fresh conversation context. `chat_events` and the cursor are kept; the new
     conversation opens with the last 10 messages.

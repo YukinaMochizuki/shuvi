@@ -126,6 +126,12 @@ export const turns = sqliteTable(
     fromSeq: integer("from_seq").notNull(),
     /** The last inbound seq the turn has been shown (grows as mid-turn messages are appended). */
     toSeq: integer("to_seq").notNull(),
+    /**
+     * The event the turn was claimed for: the newest one that asked for a turn (in a group, the newest
+     * mention, reply or follow-up, agent/triggers.ts). Unlike `to_seq` it never moves. A group turn's first
+     * message replies to it, and whoever sent it is someone she is answering (follow-ups).
+     */
+    triggerSeq: integer("trigger_seq"),
     /** The `/stop` (or `/new`) that stopped this turn: messages from it on are not the stopped turn's. */
     stopSeq: integer("stop_seq"),
     error: text("error"),

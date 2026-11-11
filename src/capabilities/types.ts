@@ -1,5 +1,6 @@
 import type { ToolBundle, ToolContent } from "agent-runtime";
 import type { TurnState } from "../agent/turn.ts";
+import type { ChatPolicy, Policy, ToolParams } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import type { Chat, ChatEvent } from "../store/events.ts";
 import type { JobKind } from "../store/jobs.ts";
@@ -22,12 +23,16 @@ import type { TelegramFiles } from "../telegram/files.ts";
  *     arrives while they run is appended to their result. A capability does not get around that.
  *   - A tool that acts FOR THE OWNER (sets a schedule, asks workstream, edits memory) is named in
  *     `ownerOnly`. It is always offered (the tool list and the prompt stay the same turn to turn, so the
- *     cached prefix holds), and the boundary decides at CALL time whether this call may run: only if
- *     everyone the turn has been shown so far is the owner (agent/turn.ts `ownerAuthority`). A capability
+ *     cached prefix holds), and the boundary decides at CALL time whether this call may run: only if the
+ *     owner himself is in the turn so far (agent/turn.ts `ownerAuthority`). A capability
  *     does not check authority itself, and does not hide its tools to get the same effect.
  *
- * The turn context carries the chat, so a later per-chat filter (policy.yaml, design §8) can sit in front
- * of `tools` and `section` without changing this interface.
+ * PER-CHAT POLICY (home/policy.yaml, src/policy/, design §8) sits in front of all this: a turn uses only
+ * the capabilities its chat's policy enables (`chatCapabilities`), so only those give it tools, prompt
+ * sections and perception. Policy may pass a capability parameters (`workstream: { products: [widgetry] }`),
+ * which reach it through `configure`, as a narrower config for that chat. A capability marked `always`
+ * (speech, groups) is on in every chat whatever policy says. Loops, job kinds and perception gating are
+ * the server's and stay process-wide.
  */
 
 /** What a turn hands a capability's tools. */
@@ -41,6 +46,11 @@ export interface TurnContext {
   owner: OwnerInfo;
   /** The turn's speech state (agent/turn.ts). Only speech should need to touch it. */
   state: TurnState;
+  /** The policy in effect (src/policy/), and this chat's part of it. Always set by a real turn. */
+  policy?: Policy;
+  chatPolicy?: ChatPolicy;
+  /** The owner's Telegram user id, when known. */
+  ownerId?: number;
 }
 
 export interface OwnerInfo {
@@ -54,6 +64,8 @@ export interface PromptContext {
   home: string;
   chat: Chat;
   owner: OwnerInfo;
+  /** This chat's policy (src/policy/). Absent in a bare call: the chat's default. */
+  chatPolicy?: ChatPolicy;
 }
 
 /** What the server hands a capability's loops. No Telegram API: only the sender talks to Telegram. */
@@ -88,6 +100,14 @@ export interface Capability<C = unknown> {
   readonly id: string;
   /** Read this capability's configuration from `env`. `null`: it is off in this process. */
   enable(env: Env): C | null;
+  /** On in every chat, whatever the chat's policy enables (speech: without it nothing can be said). */
+  always?: boolean;
+  /**
+   * The config for one chat, given the parameters its policy passes this capability (`{}` for none, and
+   * for a chat whose policy is `tools: all`). Return a narrower config, never a wider one. Absent: the
+   * parameters are ignored.
+   */
+  configure?(config: C, params: ToolParams): C;
   /** The tools this capability gives one turn. */
   tools?(ctx: TurnContext, config: C): ToolBundle[];
   /** Its section of the system prompt ("when to use" these tools), or null for none in this chat. */
@@ -106,7 +126,7 @@ export interface Capability<C = unknown> {
   jobKinds?(config: C): JobKind[];
   /**
    * The names of its tools that act for the owner. The turn's boundary refuses a call to one unless the
-   * owner is the only one the turn has heard from (agent/turn.ts `ownerAuthority`).
+   * owner himself is in the turn (agent/turn.ts `ownerAuthority`).
    */
   ownerOnly?: readonly string[];
 }
@@ -115,6 +135,20 @@ export interface Capability<C = unknown> {
 export interface EnabledCapability<C = unknown> {
   capability: Capability<C>;
   config: C;
+}
+
+/**
+ * The capabilities a chat uses: those its policy enables (`tools: all`, or by id), with the parameters
+ * policy passes them (`configure`), plus every `always` one; in registry order.
+ */
+export function chatCapabilities(enabled: readonly EnabledCapability[], tools: ChatPolicy["tools"]): EnabledCapability[] {
+  const out: EnabledCapability[] = [];
+  for (const { capability, config } of enabled) {
+    const params = tools === "all" ? {} : tools[capability.id];
+    if (params === undefined && !capability.always) continue;
+    out.push({ capability, config: capability.configure && params ? capability.configure(config, params) : config });
+  }
+  return out;
 }
 
 /** The enabled capabilities of `registry`, in registry order. */

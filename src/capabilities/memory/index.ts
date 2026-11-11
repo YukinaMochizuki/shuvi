@@ -23,8 +23,8 @@ import { chatNotesPath, commitHomeEdit, readHomeFile, refusal, type HomeAccess }
  *                    is mostly for. Open to any turn: what someone in a chat asks her to remember can at
  *                    most go there (design §8)
  *
- * edit_home and write_home are OWNER-ONLY: the turn's boundary refuses the call unless everyone the turn has
- * been shown is the owner (agent/turn.ts `ownerAuthority`), so persona, directives, private memory and
+ * edit_home and write_home are OWNER-ONLY: the turn's boundary refuses the call unless the owner himself is
+ * in the turn (agent/turn.ts `ownerAuthority`), so persona, directives, private memory and
  * playbooks change only when the owner asks. Authority is not checked here: that is the boundary's, per
  * call. What is checked here is what a chat may see at all (private layers only in the owner's DM) and the
  * allow-list.
@@ -52,8 +52,13 @@ export interface MemoryConfig {
   ownerId: number | null;
 }
 
-export function homeAccess(ctx: TurnContext, ownerId: number | null): HomeAccess {
-  return { chatTgId: ctx.chat.tgChatId, ownerDm: isOwnerDm(ctx.chat, ownerId) };
+/**
+ * What this turn may reach in home/: by the chat (the private layers only in the owner's DM) and by the
+ * chat's policy layers, the same ones its system prompt is built from (src/policy/, agent/prompt.ts).
+ */
+export function homeAccess(ctx: Pick<TurnContext, "chat" | "chatPolicy" | "ownerId">, ownerId: number | null): HomeAccess {
+  const cp = ctx.chatPolicy;
+  return { chatTgId: ctx.chat.tgChatId, ownerDm: isOwnerDm(ctx.chat, ownerId ?? ctx.ownerId ?? null), ...(cp ? { persona: cp.persona, memory: cp.memory } : {}) };
 }
 
 type EditArgs = { old_string?: string; new_string?: string; replace_all?: boolean; edits?: Edit[]; why: string };
@@ -123,21 +128,30 @@ function writeFile(home: string, seen: Seen, path: string, args: WriteArgs, part
   return save(home, seen, path, before, keepEnding(before, args.content), args.why);
 }
 
-function memorySection(chatTgId: number, ownerDm: boolean): string {
-  const notes = chatNotesPath(chatTgId);
-  const files = ownerDm
-    ? `- \`persona/public.md\`: who you are, the side every chat sees
-- \`persona/private.md\`: the side of you only this DM sees
-- \`directives.md\`: the owner's standing rules (Always / Never, with the date you learned each)
-- \`memory/private.md\`: what you should know about the owner without having to look it up
-- \`${notes}\`: notes about this chat
-- \`playbooks/<name>.md\`: how to do one particular thing, in full; the first line says when to use it`
-    : `- \`persona/public.md\`, \`directives.md\`: who you are and the owner's rules
-- \`${notes}\`: notes about this chat, which anyone here may ask you to keep
-- \`playbooks/<name>.md\`: how-tos`;
+function memorySection(access: HomeAccess): string {
+  const { ownerDm } = access;
+  const notes = chatNotesPath(access.chatTgId);
+  const may = (path: string) => refusal(path, access) === null;
+  const hasNotes = may(notes);
+  // Only the files this chat may reach are named (by default: every one in the DM, the public ones elsewhere).
+  const lines = ownerDm
+    ? [
+        may("persona/public.md") && "- `persona/public.md`: who you are, the side every chat sees",
+        may("persona/private.md") && "- `persona/private.md`: the side of you only this DM sees",
+        "- `directives.md`: the owner's standing rules (Always / Never, with the date you learned each)",
+        may("memory/private.md") && "- `memory/private.md`: what you should know about the owner without having to look it up",
+        hasNotes && `- \`${notes}\`: notes about this chat`,
+        "- `playbooks/<name>.md`: how to do one particular thing, in full; the first line says when to use it",
+      ]
+    : [
+        may("persona/public.md") ? "- `persona/public.md`, `directives.md`: who you are and the owner's rules" : "- `directives.md`: the owner's rules",
+        hasNotes && `- \`${notes}\`: notes about this chat, which anyone here may ask you to keep`,
+        "- `playbooks/<name>.md`: how-tos",
+      ];
+  const files = lines.filter(Boolean).join("\n");
   return `## Your files
 
-Your persona, the rules and the memory in this prompt come from files you keep yourself. Read one with \`read_home\`. When the owner asks (only the owner can have them changed), change part of one with \`edit_home\` (an exact \`old_string\` → \`new_string\`, or several in \`edits\`), or write one whole with \`write_home\` (read it first if it exists). Keep this chat's notes with \`edit_chat_notes\`, which anyone here may ask for:
+Your persona, the rules and the memory in this prompt come from files you keep yourself. Read one with \`read_home\`. When the owner asks (only the owner can have them changed), change part of one with \`edit_home\` (an exact \`old_string\` → \`new_string\`, or several in \`edits\`), or write one whole with \`write_home\` (read it first if it exists).${hasNotes ? " Keep this chat's notes with `edit_chat_notes`, which anyone here may ask for" : ""}:
 
 ${files}
 
@@ -154,10 +168,12 @@ export const memory = defineCapability<MemoryConfig>({
     const home = ctx.home;
     const access = () => homeAccess(ctx, config.ownerId);
     const notes = chatNotesPath(ctx.chat.tgChatId);
+    // This chat's policy may leave its notes out (memory without `chat`): then they are neither shown nor kept.
+    const notesRefused = refusal(notes, access());
     // This turn's state: the notes are in the system prompt, so they count as seen as they are now.
     const seen: Seen = new Map();
-    const shown = current(home, notes);
-    if ("text" in shown) seen.set(notes, shown.text);
+    const shown = notesRefused ? null : current(home, notes);
+    if (shown && "text" in shown) seen.set(notes, shown.text);
 
     const readHome: ToolDef<{ path: string; offset?: number; limit?: number }> = {
       name: "read_home",
@@ -210,6 +226,7 @@ export const memory = defineCapability<MemoryConfig>({
       description: `Change your notes on this chat (${notes}), which anyone here may ask you to keep: replace an exact passage (\`old_string\` → \`new_string\`, or several in \`edits\`), or write them whole with \`content\`. Saved as a commit with \`why\` as its message; returns the diff.`,
       inputSchema: { content: z.string().optional().describe("The notes' whole new text, instead of edits"), ...editSchema },
       async handler({ content, ...args }) {
+        if (notesRefused) return err(notesRefused);
         if (content === undefined) return editFile(home, seen, notes, args, "write them whole with `content`");
         if (args.old_string !== undefined || args.new_string !== undefined || args.replace_all !== undefined || args.edits !== undefined) {
           return err("Give either `content` (the whole notes) or edits (`old_string` + `new_string`, or `edits`), not both.");
@@ -220,5 +237,5 @@ export const memory = defineCapability<MemoryConfig>({
 
     return [{ serverName: "shuvi", tools: [readHome, editHome, writeHome, editChatNotes] as ToolDef[] }];
   },
-  section: (ctx, config) => memorySection(ctx.chat.tgChatId, isOwnerDm(ctx.chat, config.ownerId)),
+  section: (ctx, config) => memorySection(homeAccess(ctx, config.ownerId)),
 });

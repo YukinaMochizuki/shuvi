@@ -52,19 +52,27 @@ export type Turn = typeof turns.$inferSelect;
  * read INSIDE the claiming transaction: read outside it, a turn that finished in between (moving the
  * cursor) would let the new turn start from the old cursor and answer the same messages twice. Returns
  * null when there is nothing to do or a turn is already running (the unique index is the lock).
+ *
+ * `trigger`: in a chat where not every message starts a turn (a group, agent/triggers.ts), the waker has
+ * found the newest event that does, and names it: the turn is claimed up to it, and only while it is
+ * still past the cursor.
  */
-export function claimTurn(db: Db, chatId: number): Turn | null {
+export function claimTurn(db: Db, chatId: number, trigger?: number): Turn | null {
   try {
     return db.transaction((tx) => {
       const chat = tx.select().from(chats).where(eq(chats.id, chatId)).get();
       if (!chat) return null;
+      if (trigger !== undefined) {
+        if (trigger <= chat.cursorSeq) return null;
+        return tx.insert(turns).values({ chatId, status: "running", fromSeq: chat.cursorSeq, toSeq: trigger, triggerSeq: trigger }).returning().get();
+      }
       const pending = tx
         .select({ m: max(chatEvents.seq) })
         .from(chatEvents)
         .where(and(eq(chatEvents.chatId, chatId), gt(chatEvents.seq, chat.cursorSeq), asksForTurn()))
         .get();
       if (!pending?.m) return null;
-      return tx.insert(turns).values({ chatId, status: "running", fromSeq: chat.cursorSeq, toSeq: pending.m }).returning().get();
+      return tx.insert(turns).values({ chatId, status: "running", fromSeq: chat.cursorSeq, toSeq: pending.m, triggerSeq: pending.m }).returning().get();
     }, IMMEDIATE);
   } catch (e) {
     if (String(e).includes("UNIQUE")) return null;

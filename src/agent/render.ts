@@ -19,13 +19,18 @@ import type { ApprovalPayload, ChatEvent, ExternalPayload, JobDonePayload, Messa
  * has the sender's name they have what they are (docs/design.md §6, "system events never pose as the user"):
  *
  *   [#41 · 11/11 18:30 · ⚙ schedule 3] check whether the deploy finished
- *   [#42 · 11/11 18:31 · ⚙ job 7 · workstream · done] asked: "is the hangar PR merged?"
+ *   [#42 · 11/11 18:31 · ⚙ job 7 · workstream · done] asked: "is the widgetry PR merged?"
  *     Yes, merged an hour ago as #212.
  *   [#43 · 11/11 18:32 · ⚙ inbound: grafana]
  *     disk 91% on vm-3
  *   [#44 · 11/11 18:33 · ⚙ approval] Approval #5 (deploy) "Deploy to prod?": the owner answered "Yes" (yes).
  *
  * The assistant's own earlier messages read `[#13 · 11/11 21:04 · ⚙ you] …`.
+ *
+ * In a GROUP, where many people speak, the owner's lines say so (`RenderOptions.owner`), with the same
+ * unforgeable mark: `[#14 · 11/11 21:05 · Ownerly · ⚙ owner] …`. Someone who names themselves
+ * "Ownerly · owner" reads as exactly that, a name. In the owner's DM nothing is marked: everyone there is.
+ * Another bot's lines are marked the same way: `[#15 · 11/11 21:06 · Helper · ⚙ bot] …`.
  *
  * No label may be FORGEABLE by what people write, since authority and trust hang on telling them apart:
  *   - the framework's labels and the assistant's (`⚙ you`) carry `FRAMEWORK_MARK` (⚙), which this module
@@ -39,6 +44,11 @@ import type { ApprovalPayload, ChatEvent, ExternalPayload, JobDonePayload, Messa
 /** The images to show after an event's line (capabilities/types.ts `capabilityPerception`). */
 export type Perceive = (e: ChatEvent) => ToolContent[];
 const blind: Perceive = () => [];
+
+export interface RenderOptions {
+  /** Mark this user's lines as the owner's (in a group). */
+  owner?: number;
+}
 /** Marks a framework event's label. Never appears in anything people wrote, as rendered here. */
 export const FRAMEWORK_MARK = "⚙";
 
@@ -108,7 +118,7 @@ function renderFrameworkEvent(e: ChatEvent, timeZone: string): string | null {
   return null;
 }
 
-export function renderMessage(e: ChatEvent, timeZone: string): string {
+export function renderMessage(e: ChatEvent, timeZone: string, opts: RenderOptions = {}): string {
   const framework = renderFrameworkEvent(e, timeZone);
   if (framework !== null) return framework;
   if (e.kind === "bot_message") {
@@ -116,7 +126,9 @@ export function renderMessage(e: ChatEvent, timeZone: string): string {
     return `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${FRAMEWORK_MARK} you] ${inline(plain((e.payload as { text: string }).text))}`;
   }
   const p = e.payload as unknown as MessagePayload;
-  const head = `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${plainName(p.from.name)}]`;
+  const owner = opts.owner !== undefined && p.from.id === opts.owner ? ` · ${FRAMEWORK_MARK} owner` : "";
+  const bot = p.from.isBot ? ` · ${FRAMEWORK_MARK} bot` : "";
+  const head = `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${plainName(p.from.name)}${owner}${bot}]`;
   const lines = [`${head} ${p.forwardedFrom ? `(forwarded from ${plainName(p.forwardedFrom)}) ` : ""}${inline(plain(p.text))}`];
   if (p.replyTo) {
     const who = p.replyTo.fromName ? `${plainName(p.replyTo.fromName)}: ` : "";
@@ -127,8 +139,8 @@ export function renderMessage(e: ChatEvent, timeZone: string): string {
 }
 
 /** Each event's line, then what it shows. */
-function eventParts(events: ChatEvent[], timeZone: string, perceive: Perceive): PromptPart[] {
-  return events.flatMap((e) => [{ type: "text" as const, text: renderMessage(e, timeZone) }, ...perceive(e)]);
+function eventParts(events: ChatEvent[], timeZone: string, perceive: Perceive, opts: RenderOptions = {}): PromptPart[] {
+  return events.flatMap((e) => [{ type: "text" as const, text: renderMessage(e, timeZone, opts) }, ...perceive(e)]);
 }
 
 /** Adjacent text parts joined by newlines; a prompt with no image is a plain string. */
@@ -145,22 +157,63 @@ export function joinParts(parts: PromptPart[]): Prompt {
 
 const text = (t: string): PromptPart => ({ type: "text", text: t });
 
-/** The prompt a turn opens with: the messages it is answering. */
-export function renderTurnInput(events: ChatEvent[], timeZone: string, perceive: Perceive = blind): Prompt {
-  return joinParts(eventParts(events, timeZone, perceive));
+/**
+ * A group turn's note on what it does not show: the unread messages older than the ones it opens with
+ * (agent/turn.ts `GROUP_CONTEXT`).
+ */
+export function unreadNote(n: number): string {
+  return `(${n} earlier message${n === 1 ? "" : "s"} since your last turn ${n === 1 ? "is" : "are"} not shown here; read_chat reaches ${n === 1 ? "it" : "them"}.)`;
+}
+
+const note = (unread: number | undefined): PromptPart[] => (unread ? [text(unreadNote(unread))] : []);
+
+/** What a turn's input opens with: in a group, `unread` and `context` (see `InputOptions`). */
+export interface InputOptions extends RenderOptions {
+  /** How many older unread messages are not shown. */
+  unread?: number;
+  /** How many of the first events are context from before she was called (they carry no authority). */
+  context?: number;
+  /** In a group: the events that called her (by seq), named in a heading before the first of them. */
+  called?: number[];
+}
+
+export const CONTEXT_HEADING = "(Earlier, before you were called; context only:)";
+export const CALLED_PREFIX = "(You were called by";
+/** The heading before the messages that called her: which ones did (the owner's carry `⚙ owner`). */
+export function calledHeading(seqs: number[]): string {
+  return `${CALLED_PREFIX} ${seqs.map((s) => `#${s}`).join(", ")}. From here on is what you answer:)`;
+}
+
+function inputParts(events: ChatEvent[], timeZone: string, perceive: Perceive, opts: InputOptions): PromptPart[] {
+  const n = opts.context ?? 0;
+  if (!opts.called?.length) return [...note(opts.unread), ...eventParts(events, timeZone, perceive, opts)];
+  return [
+    ...note(opts.unread),
+    ...(n ? [text(CONTEXT_HEADING), ...eventParts(events.slice(0, n), timeZone, perceive, opts)] : []),
+    text(calledHeading(opts.called)),
+    ...eventParts(events.slice(n), timeZone, perceive, opts),
+  ];
+}
+
+/**
+ * The prompt a turn opens with: the messages it is answering. In a group, after a note on unread ones and
+ * under its own heading, the earlier messages shown as context (agent/turn.ts `GROUP_CONTEXT`).
+ */
+export function renderTurnInput(events: ChatEvent[], timeZone: string, perceive: Perceive = blind, opts: InputOptions = {}): Prompt {
+  return joinParts(inputParts(events, timeZone, perceive, opts));
 }
 
 /** The opening of a fresh conversation: the recent exchange for context, then what to answer now. */
-export function renderWithHistory(history: ChatEvent[], input: ChatEvent[], timeZone: string, perceive: Perceive = blind): Prompt {
+export function renderWithHistory(history: ChatEvent[], input: ChatEvent[], timeZone: string, perceive: Perceive = blind, opts: InputOptions = {}): Prompt {
   return joinParts([
     text(`(A new conversation. The last ${history.length} messages of this chat, for context:)`),
-    ...eventParts(history, timeZone, perceive),
+    ...eventParts(history, timeZone, perceive, opts),
     text("\n(New messages:)"),
-    ...eventParts(input, timeZone, perceive),
+    ...inputParts(input, timeZone, perceive, opts),
   ]);
 }
 
 /** What a running turn is told at its next tool call, when messages arrived while it worked. */
-export function renderMidTurn(events: ChatEvent[], timeZone: string, perceive: Perceive = blind): Prompt {
-  return joinParts([text("(New messages arrived while you were working:)"), ...eventParts(events, timeZone, perceive)]);
+export function renderMidTurn(events: ChatEvent[], timeZone: string, perceive: Perceive = blind, opts: RenderOptions = {}): Prompt {
+  return joinParts([text("(New messages arrived while you were working:)"), ...eventParts(events, timeZone, perceive, opts)]);
 }

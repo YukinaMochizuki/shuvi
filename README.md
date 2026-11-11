@@ -5,12 +5,13 @@ A personal assistant on Telegram, for one person. The agent itself runs on
 and sending messages, deciding when to think, assembling the context, and keeping a turn alive across
 restarts. The architecture, and why it is shaped this way, is in [docs/design.md](docs/design.md).
 
-What works today (the first slice): the owner's private chat, text in and out. The assistant's reply text
-becomes messages, `say` speaks mid-turn, `react` reacts, `pass` stays silent; `/stop` and `/new` act on the
-chat. Photos and stickers are shown to the model as images (the `vision` capability). The sticker library
-(`home/stickers/*.yaml`, the `stickers` capability) lets her find, view, send and learn stickers;
-a pack is added in conversation with `add_sticker_pack`. Groups, memory writing, other
-media, background jobs and schedules are later slices on the same skeleton.
+What works today: the owner's private chat and the groups `home/policy.yaml` lists, text in and out. The
+assistant's reply text becomes messages, `say` speaks mid-turn, `react` reacts, `pass` stays silent; `/stop`
+and `/new` act on the chat. Photos and stickers are shown to the model as images (the `vision` capability).
+She keeps her own memory in `home/`, looks back through every chat, runs schedules and background jobs, and
+asks workstream's desk. The sticker library (`home/stickers/*.yaml`, the `stickers` capability) lets her
+find, view, send and learn stickers; a pack is added in conversation with `add_sticker_pack`. With Hangar
+configured, each chat has its own computer. Other media are later slices on the same skeleton.
 
 The framework itself never speaks in the assistant's chat. It talks to the owner through a second bot, the
 **control bot** (`SHUVI_CONTROL_BOT_TOKEN`; create it with BotFather like the first): `/status` lists
@@ -19,6 +20,27 @@ chat's turn; it sends alerts (a failed turn, a message given up after the retrie
 wall-clock limit `SHUVI_TURN_MAX_MINUTES`, messages that are not getting through, a failed backup); and it
 carries approval cards with buttons (`src/control/approvals.ts`). It answers only `SHUVI_OWNER_ID`.
 Without its token, alerts are only logged and queued. See docs/design.md §13.
+
+## Groups and policy
+
+`home/policy.yaml` says which chats she serves and what each may do (docs/design.md §6–§8; the format is
+in the header of `src/policy/policy.ts`). With no file she serves only the owner's DM, with everything, as
+before. A group is listed by its chat id, with what wakes her there (`mention`, `reply`, `followup`), the
+persona and memory layers it sees (never the private ones), and the capabilities it may use, with their
+parameters (e.g. `workstream: { products: [widgetry] }`). Every message in a listed group is recorded; only a
+mention, a reply to her or a follow-up starts a turn. The server reloads the file when it changes; a broken
+file is alerted and the last good policy stays.
+
+A group that is not listed is not recorded. Its first message brings an approval card to the control bot
+offering to add it; approving writes the entry into `policy.yaml` and commits it in `home/`. She can propose
+policy changes herself (`propose_policy`, when the owner asks); they too go through a card and are written
+only once approved. A private chat with anyone but the owner is ignored, with at most one alert per person
+per day.
+
+**Deploying for groups is the owner's step:** Telegram delivers every group message to a bot only when its
+privacy mode is off (BotFather → `/setprivacy` → Disable, then re-add the bot to groups it was already in)
+or when the bot is an admin of the group. With privacy mode on, she sees only mentions, replies to her and
+commands, so a group turn has no unseen messages to open with and follow-ups never arrive.
 
 ## Running it
 
@@ -30,6 +52,7 @@ bun scripts/e2e-fake.ts      # the whole path against a fake Telegram and a fake
 bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
 bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
 bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
+bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
 ```
 
 ```bash
@@ -45,7 +68,7 @@ assistant replies in it. Turns run on the Claude login of the user the server ru
 ## Data
 
 `SHUVI_DATA_DIR` (default `./data`) holds `shuvi.db`, `home/` (the assistant's persona, directives and
-memory as markdown) and `media/` (the photos and stickers it was sent, by `file_unique_id`). All of it is
+memory as markdown, and `policy.yaml`) and `media/` (the photos and stickers it was sent, by `file_unique_id`). All of it is
 private: it lives outside this repository and is never committed or pushed. Note that Claude Code also
 keeps a copy of each image a turn is shown, next to its session files.
 

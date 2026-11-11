@@ -75,14 +75,14 @@ let toolsOffered: string[] = [];
 const SCRIPT: Array<[RegExp, () => Response]> = [
   [/Refused: `schedule` acts for the owner/, () => say("I can't set that up: only the owner can.")],
   [/Scheduled #\d+/, () => say("Reminder set.")],
-  [/Asked the hangar desk/, () => say("I asked the hangar desk.")],
+  [/Asked the widgetry desk/, () => say("I asked the widgetry desk.")],
   [/⚙ inbound: grafana\]\\n  disk 91% on vm-3/, () => stream([{ type: "text", text: "Grafana: the disk on vm-3 is at 91%." }, { type: "tool_use", name: "mcp__shuvi__schedule", input: { at: "+1h", note: "reboot vm-3" } }])],
   [/remind me to stretch/, () => stream([{ type: "tool_use", name: "mcp__shuvi__schedule", input: { at: "+3s", note: "stretch reminder" } }])],
   [/· ⚙ schedule \d+\] stretch reminder/, () => say("Time to stretch!")],
   [/· ⚙ job \d+ · transcribe · done\] asked: \\"transcribe voice\\"\\n  hello from the transcriber/, () => say("Transcript: hello from the transcriber")],
   [/· ⚙ job \d+ · transcribe · expired\]/, () => say("The slow transcription never came back.")],
-  [/ask the desk about the PR/, () => stream([{ type: "tool_use", name: "mcp__shuvi__ask_workstream", input: { product: "hangar", message: "is the boost PR merged?" } }])],
-  [/· ⚙ job \d+ · workstream · done\] asked: \\"hangar: is the boost PR merged\?\\"\\n  Yes, merged as #212\./, () => say("The desk says: merged as #212.")],
+  [/ask the desk about the PR/, () => stream([{ type: "tool_use", name: "mcp__shuvi__ask_workstream", input: { product: "widgetry", message: "is the login PR merged?" } }])],
+  [/· ⚙ job \d+ · workstream · done\] asked: \\"widgetry: is the login PR merged\?\\"\\n  Yes, merged as #212\./, () => say("The desk says: merged as #212.")],
 ];
 
 const anthropic = Bun.serve({
@@ -214,7 +214,7 @@ await until("the turn to close", turnsIdle);
 
 // ---- 5. the workstream desk, polled ------------------------------------------------------------------
 tg.updates.push(dmUpdate(2, "ask the desk about the PR"));
-await replied("I asked the hangar desk.", "ask_workstream asked the desk and the turn ended");
+await replied("I asked the widgetry desk.", "ask_workstream asked the desk and the turn ended");
 const reqId = [...desk.requests.keys()][0]!;
 check(desk.calls.some((c) => c.tool === "tell_desk" && c.args.wait === 0), "tell_desk was called with wait: 0");
 await until("the watcher to poll the desk", () => desk.calls.some((c) => c.tool === "request_status"), 15_000);

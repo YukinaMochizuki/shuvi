@@ -6,7 +6,7 @@ describe("classify", () => {
   test("only the owner's private chat is taken", () => {
     expect(classify(dmUpdate(1, "hi", 777), OWNER).kind).toBe("ignore");
     const group = { update_id: 2, message: { message_id: 1, date: 0, chat: { id: -5, type: "group", title: "g" }, from: { id: OWNER, is_bot: false, first_name: "O" }, text: "hi" } };
-    expect(classify(group as never, OWNER).kind).toBe("ignore");
+    expect(classify(group as never, OWNER).kind).toBe("unknown_chat"); // not listed in policy (test/groups.test.ts)
     expect(classify(dmUpdate(3, "hi"), OWNER).kind).toBe("message");
   });
 

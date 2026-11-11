@@ -1,4 +1,5 @@
-import type { Message, Sticker, Update } from "grammy/types";
+import type { Message, MessageEntity, Sticker, Update } from "grammy/types";
+import { defaultPolicy, listsGroup, type Policy } from "../policy/policy.ts";
 import { MAIN_COMMANDS } from "../server/commands.ts";
 import type { CommandPayload, MessageAttachment, MessageMedia, MessagePayload, Speaker } from "../store/events.ts";
 
@@ -6,19 +7,32 @@ import type { CommandPayload, MessageAttachment, MessageMedia, MessagePayload, S
  * What an inbound Telegram update IS to shuvi, decided before anything is written. Pure, so the rules
  * are testable without a bot:
  *
- *   - `ignore`: not for us. In this slice that is everything except the owner's private chat. Ignored
- *     updates are still confirmed (the offset moves past them), they are just never recorded.
- *   - `command`: an owner command. Recorded, then handled by the server; it never reaches the model.
+ *   - `ignore`: not for us. Ignored updates are still confirmed (the offset moves past them), they are
+ *     just never recorded. A private message from anyone but the owner is ignored and names its sender
+ *     (`stranger`), so the server can tell the owner (server/poller.ts).
+ *   - `unknown_chat`: a message in a group that policy.yaml does not list (src/policy/). Not recorded;
+ *     the server asks the owner whether to add the group (server/poller.ts).
+ *   - `command`: an owner command, in the DM or in a listed group (only the owner's sender id counts).
+ *     Recorded, then handled by the server; it never reaches the model.
  *   - `message`: something said in the chat. Text as written; anything this slice cannot read yet (a
  *     sticker, a photo, a voice note) becomes a short placeholder, so the assistant at least knows that
  *     something was sent and what it was, rather than seeing nothing. A photo or a sticker also records
  *     its `media` (which file to show the model); the server downloads it (src/capabilities/vision/).
  */
 
+/**
+ * Groups and supergroups alike are `group` to shuvi; a message in a group listed in policy is recorded
+ * whoever sent it, another bot included. Who it is FROM never decides whether it is recorded there, only
+ * whether it starts a turn (agent/triggers.ts) and whether it carries the owner's authority
+ * (agent/turn.ts `ownerAuthority`).
+ */
+export type InboundChat = { id: number; type: "private" } | { id: number; type: "group"; title: string | null };
+
 export type Classified =
-  | { kind: "ignore"; reason: string }
-  | { kind: "command"; chat: { id: number; type: "private" }; tgMessageId: number; payload: CommandPayload }
-  | { kind: "message"; chat: { id: number; type: "private" }; tgMessageId: number; payload: MessagePayload };
+  | { kind: "ignore"; reason: string; stranger?: Speaker }
+  | { kind: "unknown_chat"; chat: { id: number; type: "group"; title: string | null }; from: Speaker }
+  | { kind: "command"; chat: InboundChat; tgMessageId: number; payload: CommandPayload }
+  | { kind: "message"; chat: InboundChat; tgMessageId: number; payload: MessagePayload };
 
 const COMMANDS = new Set<string>(MAIN_COMMANDS.map((c) => c.command));
 
@@ -26,7 +40,20 @@ function speaker(m: Message): Speaker {
   const u = m.from;
   if (!u) return { id: 0, name: "?" };
   const name = [u.first_name, u.last_name].filter(Boolean).join(" ") || u.username || String(u.id);
-  return { id: u.id, name };
+  return { id: u.id, name, ...(u.username ? { username: u.username } : {}), ...(u.is_bot ? { isBot: true } : {}) };
+}
+
+/** Who a message names: its @mentions and its text mentions (of users without a username). */
+export function mentionsOf(m: Message): { usernames: string[]; userIds: number[] } | undefined {
+  const text = m.text ?? m.caption ?? "";
+  const entities: MessageEntity[] = m.entities ?? m.caption_entities ?? [];
+  const usernames: string[] = [];
+  const userIds: number[] = [];
+  for (const e of entities) {
+    if (e.type === "mention") usernames.push(text.slice(e.offset + 1, e.offset + e.length).toLowerCase());
+    else if (e.type === "text_mention") userIds.push(e.user.id);
+  }
+  return usernames.length || userIds.length ? { usernames: [...new Set(usernames)], userIds: [...new Set(userIds)] } : undefined;
 }
 
 /** A one-line stand-in for content without text. */
@@ -120,17 +147,24 @@ function forwardedFrom(m: Message): string | undefined {
   }
 }
 
-export function classify(update: Update, ownerId: number, botUsername?: string): Classified {
+export function classify(update: Update, ownerId: number, botUsername?: string, policy: Policy = defaultPolicy()): Classified {
   const m = update.message;
   if (!m) return { kind: "ignore", reason: "not a new message" };
-  if (m.chat.type !== "private") return { kind: "ignore", reason: `chat type ${m.chat.type} (this slice handles the owner's DM only)` };
-  if (m.from?.id !== ownerId) return { kind: "ignore", reason: `private chat with a non-owner (${m.from?.id})` };
-  const chat = { id: m.chat.id, type: "private" as const };
   const from = speaker(m);
+  let chat: InboundChat;
+  if (m.chat.type === "private") {
+    if (m.from?.id !== ownerId) return { kind: "ignore", reason: `private chat with a non-owner (${m.from?.id})`, stranger: from };
+    chat = { id: m.chat.id, type: "private" };
+  } else if (m.chat.type === "group" || m.chat.type === "supergroup") {
+    const group = { id: m.chat.id, type: "group" as const, title: m.chat.title ?? null };
+    if (!listsGroup(policy, m.chat.id)) return { kind: "unknown_chat", chat: group, from };
+    chat = group;
+  } else return { kind: "ignore", reason: `chat type ${(m.chat as { type: string }).type}` };
 
   const text = m.text ?? m.caption ?? "";
   const cmd = m.text?.match(/^\/(\w+)(?:@(\w+))?\s*$/);
-  if (cmd && COMMANDS.has(cmd[1]!) && (!cmd[2] || !botUsername || cmd[2] === botUsername)) {
+  // A command counts only from the owner; anyone else's `/stop` in a group is just something they said.
+  if (cmd && COMMANDS.has(cmd[1]!) && from.id === ownerId && (!cmd[2] || !botUsername || cmd[2].toLowerCase() === botUsername.toLowerCase())) {
     return { kind: "command", chat, tgMessageId: m.message_id, payload: { from, command: cmd[1] as CommandPayload["command"] } };
   }
 
@@ -146,11 +180,15 @@ export function classify(update: Update, ownerId: number, botUsername?: string):
   if (attachment) payload.attachment = attachment;
   const fwd = forwardedFrom(m);
   if (fwd) payload.forwardedFrom = fwd;
+  const mentions = mentionsOf(m);
+  if (mentions) payload.mentions = mentions;
   const r = m.reply_to_message;
-  if (r) {
+  // In a forum group, a message in a topic carries the topic's opening message as reply_to_message: that
+  // is where it was posted, not whom it answers.
+  if (r && !(m.is_topic_message && r.forum_topic_created)) {
     payload.replyTo = {
       tgMessageId: r.message_id,
-      ...(r.from ? { fromName: speaker(r).name } : {}),
+      ...(r.from ? { fromName: speaker(r).name, fromId: r.from.id } : {}),
       ...(r.text || r.caption ? { text: (r.text ?? r.caption ?? "").slice(0, 200) } : {}),
     };
   }

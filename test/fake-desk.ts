@@ -13,7 +13,7 @@ import { z } from "zod";
 export class FakeDesk {
   readonly calls: { tool: string; args: Record<string, unknown> }[] = [];
   readonly requests = new Map<string, { product: string; message: string; status: "running" | "waiting-approval" | "answered" | "failed"; text: string }>();
-  readonly products = new Set(["hangar", "shuvi"]);
+  readonly products = new Set(["widgetry", "shuvi"]);
   private next = 1;
   private server: ReturnType<typeof Bun.serve>;
 

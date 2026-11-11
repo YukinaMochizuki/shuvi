@@ -16,6 +16,7 @@ import { findStickers, getSticker, MATCH_USE, ROLE_WEIGHT, TIER_WEIGHT, USE_PENA
 import { parsePack, syncLibrary } from "../src/capabilities/stickers/library.ts";
 import { refusal } from "../src/capabilities/stickers/rules.ts";
 import { cellBox, decode, PER_PAGE, renderContactSheet } from "../src/capabilities/stickers/sheet.ts";
+import { GROUP_DEFAULTS, type Policy } from "../src/policy/policy.ts";
 import { sendPass } from "../src/server/sender.ts";
 import type { Db } from "../src/store/db.ts";
 import { enqueueOutbound, ensureChat, getChat, recordInbound } from "../src/store/events.ts";
@@ -134,7 +135,9 @@ async function groupTurn(w: World, script: Step[]): Promise<ScriptedAdapter> {
   recordInbound(w.db, { chatId: chat.id, kind: "message", payload: { from: { id: 2002, name: "Someone" }, text: "hey" }, tgUpdateId: groupUpdate++, tgMessageId: groupUpdate });
   const t = claimTurn(w.db, chat.id)!;
   let adapter!: ScriptedAdapter;
-  await runTurn({ db: w.db, turnId: t.id, home: w.home, timeZone: "UTC", ownerId: OWNER, capabilities: capsFor(w), makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)) });
+  // The group is listed in policy (src/policy/), with every capability: dm_only is the stickers' own rule.
+  const policy: Policy = { chats: { "-100777": { ...GROUP_DEFAULTS, trigger: "all", tools: "all" } }, unknownChat: "ignore" };
+  await runTurn({ db: w.db, turnId: t.id, home: w.home, timeZone: "UTC", ownerId: OWNER, capabilities: capsFor(w), policy, makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)) });
   return adapter;
 }
 

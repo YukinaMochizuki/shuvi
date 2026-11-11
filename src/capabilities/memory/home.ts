@@ -32,6 +32,15 @@ export interface HomeAccess {
   chatTgId: number;
   /** The turn runs in the owner's DM (it may see the private layers). */
   ownerDm: boolean;
+  /**
+   * The persona and memory layers the chat's policy gives it (src/policy/): the same ones its system
+   * prompt is built from. `persona/public.md` needs `public`, `persona/private.md` needs `private`,
+   * `memory/private.md` needs memory `private`, this chat's notes need memory `chat`; the private ones
+   * only in the owner's DM in any case. Absent: the chat's defaults (all of them in the DM; `public` and
+   * `chat` elsewhere).
+   */
+  persona?: readonly ("public" | "private")[];
+  memory?: readonly ("private" | "chat")[];
 }
 
 export const SELF_FILES = ["persona/public.md", "persona/private.md", "directives.md", "memory/private.md"] as const;
@@ -54,6 +63,11 @@ export function refusal(path: string, access: HomeAccess): string | null {
   const isSticker = path === STICKER_PREFERENCES || isStickerPack;
   if (!isChatNotes && !isPlaybook && !isSelf && !isSticker) return `${path} is not one of your files. You can reach: ${allowedFor(access).join(", ")}.`;
   if ((PRIVATE_FILES.has(path) || isStickerPack) && !access.ownerDm) return `${path} is not available in this chat.`;
+  const persona = access.persona ?? ["public", "private"];
+  const memory = access.memory ?? ["private", "chat"];
+  const layer =
+    path === "persona/public.md" ? persona.includes("public") : path === "persona/private.md" ? persona.includes("private") : path === "memory/private.md" ? memory.includes("private") : isChatNotes ? memory.includes("chat") : true;
+  if (!layer) return `${path} is not available in this chat (its settings do not include it).`;
   return null;
 }
 
