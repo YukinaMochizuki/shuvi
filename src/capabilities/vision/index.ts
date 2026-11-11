@@ -1,8 +1,6 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { ToolContent } from "agent-runtime";
 import { dataDirFrom } from "../../env.ts";
-import { mediaOfEvent } from "../../store/media.ts";
+import { imageFromFile, mediaOfEvent } from "../../store/media.ts";
 import { defineCapability } from "../types.ts";
 import { downloadPass } from "./download.ts";
 
@@ -51,7 +49,7 @@ export const vision = defineCapability<VisionConfig>({
     const m = mediaOfEvent(event);
     if (m?.state !== "ready" || !m.path) return [];
     try {
-      return [{ type: "image", data: readFileSync(join(dataDir, m.path)).toString("base64"), mimeType: m.mimeType ?? "image/jpeg" }];
+      return [imageFromFile(dataDir, m.path, m.mimeType ?? "image/jpeg")];
     } catch {
       return []; // the file is gone (a moved data dir): the placeholder still says what it was
     }

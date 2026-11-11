@@ -338,8 +338,9 @@ export function enqueueOutbound(
     | { chatId: number; kind: "bot_reaction"; payload: BotReactionPayload; idemKey: string; turnId?: number }
     | { chatId: number; kind: "bot_sticker"; payload: BotStickerPayload; idemKey: string; turnId?: number }
     | { chatId: number; kind: "bot_file"; payload: BotFilePayload; idemKey: string; turnId?: number },
-): void {
-  db.insert(chatEvents)
+): number | null {
+  const row = db
+    .insert(chatEvents)
     .values({
       chatId: e.chatId,
       kind: e.kind,
@@ -349,7 +350,10 @@ export function enqueueOutbound(
       turnId: e.turnId ?? null,
     })
     .onConflictDoNothing()
-    .run();
+    .returning({ seq: chatEvents.seq })
+    .get();
+  // A second write of the same key wrote nothing: the row that holds the key is the message.
+  return row?.seq ?? db.select({ seq: chatEvents.seq }).from(chatEvents).where(eq(chatEvents.idemKey, e.idemKey)).get()?.seq ?? null;
 }
 
 /** Outbound rows not yet delivered, oldest first (the sender keeps each chat in order). */

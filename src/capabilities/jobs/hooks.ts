@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { sameSecret } from "../../secrets/compare.ts";
 import type { Db } from "../../store/db.ts";
 import { ensureChat, recordFrameworkEvent } from "../../store/events.ts";
 import { checkJobToken, finishJob, getJob } from "../../store/jobs.ts";
@@ -43,12 +43,6 @@ const unauthorized = () => json(401, { error: "unauthorized" });
 function bearer(req: Request): string | null {
   const m = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.get("authorization") ?? "");
   return m ? m[1]! : null;
-}
-
-/** Constant-time equality of two secrets, by their sha256 (so differing lengths leak nothing either). */
-export function sameSecret(a: string, b: string): boolean {
-  const h = (s: string) => createHash("sha256").update(s).digest();
-  return timingSafeEqual(h(a), h(b));
 }
 
 async function readBody(req: Request): Promise<string | Response> {

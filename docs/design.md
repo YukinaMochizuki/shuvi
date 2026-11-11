@@ -72,6 +72,11 @@ Everything is in one SQLite file (WAL mode).
 - **cursor**: per chat, "the last event the assistant has seen". The waker only looks past it.
 - **turns**: each turn's start, end, usage and cost. This is bookkeeping and is kept out of
   `chat_events`.
+- **turn transcripts** (`prompt_texts`, `turn_transcripts`, `turn_steps`): each turn as the model saw it,
+  for debugging: the system prompt by hash, the input, and a timeline of thinking, text, tool calls and
+  mid-turn appends, secrets redacted and images as paths. Recorded best effort by the runner child, read
+  only by the console, pruned after `SHUVI_TRANSCRIPT_DAYS`. Nothing decides anything from it
+  (src/agent/transcript.ts, docs/console.md).
 - **jobs**, **schedules**: see §10.
 - **The conversation the model sees** is kept by agent-runtime itself (a Claude Code session for the
   Claude driver, the `ConversationStore` for openai-compat), not rebuilt from `chat_events`.
@@ -339,6 +344,7 @@ stickers:
   - `/status`: running turns (chat, how long, pid), turns that failed in the last day with their error,
     outbound rows still pending, and the deployed commit.
   - `/stop <chat>`: stop that chat's turn, with the same semantics as `/stop` in the chat.
+  - `/turn <id>`: one paragraph on a turn, and its link in the console.
   - Planned: jobs and cost in `/status`, cancelling jobs, reverting `home/`.
 - **The framework's messages are a durable queue** of their own, `control_messages` (pending → sent), never
   `chat_events`: an alert raised just before a restart is still delivered, and nothing of it reaches the
@@ -375,6 +381,9 @@ stickers:
 
   The framework acknowledges a command only by reacting to it; it sends no message.
 - **CLI**: deep debugging on the machine (reading `chat_events`, turns, jobs).
+- **Console** (docs/console.md): a read-only web view of every turn as the model saw it, and of every chat,
+  on loopback only and published to the owner's tailnet with `tailscale serve`, which names the tailnet
+  user it lets in. Alerts about a turn link to its page (`SHUVI_CONSOLE_URL`).
 
 **Reliability** the control bot reports on:
 

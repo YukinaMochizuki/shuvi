@@ -167,6 +167,7 @@ export function finishTurn(
               inputTokens: u.inputTokens,
               outputTokens: u.outputTokens,
               cacheReadTokens: u.cacheReadTokens,
+              cacheCreationTokens: u.cacheCreationTokens,
             }
           : {}),
       })
@@ -202,12 +203,14 @@ export function finishTurn(
           const p = e.payload as { text?: string; title?: string; note?: string };
           raiseAlert(tdb, {
             key: `unanswered:${e.seq}`,
+            turnId: t.id,
             text: `Unanswered in ${chatLabel(chat)}: "${excerpt(p.text ?? p.title ?? p.note ?? e.kind)}" (#${e.seq}). ${MAX_ATTEMPTS} turns failed on it, so it was skipped. Last error: ${excerpt(outcome.error ?? "unknown", 300)}`,
           });
         }
       } else {
         raiseAlert(tdb, {
           key: `turn-failed:${t.id}`,
+          turnId: t.id,
           topic: `turn-failed:${t.chatId}`,
           text: `Turn ${t.id} failed in ${chatLabel(chat)}: ${excerpt(outcome.error ?? "unknown", 300)}. It will be retried.`,
         });

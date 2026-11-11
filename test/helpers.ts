@@ -232,3 +232,32 @@ export class FakeTelegram {
     this.server.stop(true);
   }
 }
+
+// ---- a server's log, for the e2e scripts -------------------------------------------------------------
+
+/**
+ * Pass a child's output through to ours line by line, and call `onLine` with each line: how an e2e script
+ * learns what the server bound (the console on port 0 logs `console: listening on <host>:<port>`).
+ */
+export function tapLines(stream: ReadableStream<Uint8Array> | number | undefined | null, onLine: (line: string) => void): void {
+  if (!stream || typeof stream === "number") return;
+  void (async () => {
+    const dec = new TextDecoder();
+    let buf = "";
+    for await (const chunk of stream) {
+      process.stdout.write(chunk);
+      buf += dec.decode(chunk, { stream: true });
+      let i: number;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        onLine(buf.slice(0, i));
+        buf = buf.slice(i + 1);
+      }
+    }
+  })();
+}
+
+/** The port in a `console: listening on <host>:<port>` line, if it is one. */
+export function consolePortIn(line: string): number | null {
+  const m = /console: listening on .*:(\d+) /.exec(line);
+  return m ? Number(m[1]) : null;
+}

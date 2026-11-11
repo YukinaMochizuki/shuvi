@@ -229,10 +229,6 @@ export function capabilityOwnerOnly(enabled: readonly EnabledCapability[]): Set<
   return new Set(enabled.flatMap(({ capability }) => capability.ownerOnly ?? []));
 }
 
-export function capabilitySections(enabled: readonly EnabledCapability[], ctx: PromptContext): string[] {
-  return enabled.flatMap(({ capability, config }) => capability.section?.(ctx, config) ?? []);
-}
-
 /** Whether any enabled capability holds `event` back for now (see `Capability.holds`). */
 export function capabilityHolds(enabled: readonly EnabledCapability[], event: ChatEvent, now: number): boolean {
   return enabled.some(({ capability, config }) => capability.holds?.(event, now, config) ?? false);

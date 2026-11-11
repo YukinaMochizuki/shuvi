@@ -10,7 +10,7 @@ import type { TelegramFiles } from "../../telegram/files.ts";
 import { HOME_DIR, type ComputerConfig } from "./config.ts";
 import { ComputerError, type Computers } from "./computer.ts";
 import { resolvePath, shq, type ExecContext } from "./exec.ts";
-import { redactionFor } from "./secrets.ts";
+import { redactionFor } from "../../secrets/redaction.ts";
 import { acquireLease, getComputer, opHeld, releaseLease } from "./state.ts";
 
 /**

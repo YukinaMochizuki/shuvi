@@ -13,6 +13,8 @@
  *   scan      alert on outbound rows that are not getting through; expire approvals (control/)
  *   backup    a daily copy of shuvi.db and home/ (control/backup.ts)
  *   control   when `SHUVI_CONTROL_BOT_TOKEN` is set, the control bot's poller and sender (control/bot.ts)
+ *   prune     drop turn transcripts older than SHUVI_TRANSCRIPT_DAYS (store/transcripts.ts)
+ *   console   when SHUVI_CONSOLE_USERS or SHUVI_CONSOLE_TOKEN is set, the read-only web console (src/console/)
  *
  * and, alongside them, the loops of every enabled capability (src/capabilities/), through the same
  * loop helper (loop.ts).
@@ -25,7 +27,9 @@ import { fileURLToPath } from "node:url";
 import { Api } from "grammy";
 import { saveBotIdentity, TriggerScan } from "../agent/triggers.ts";
 import { expireApprovals } from "../control/approvals.ts";
+import { pruneTranscriptMedia } from "../agent/transcript.ts";
 import { backupPass } from "../control/backup.ts";
+import { checkConsole, consoleOn, startConsole } from "../console/index.ts";
 import { CONTROL_COMMANDS, controlPollOnce, controlSendPass, deployedCommit, outboundAlertPass } from "../control/bot.ts";
 import { enabledCapabilities } from "../capabilities/index.ts";
 import { capabilityLoops } from "../capabilities/types.ts";
@@ -34,6 +38,7 @@ import { PolicyWatch } from "../policy/load.ts";
 import { applyPolicyApprovals } from "../policy/write.ts";
 import { openDb } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
+import { pruneTranscripts } from "../store/transcripts.ts";
 import { runningTurns } from "../store/turns.ts";
 import { telegramFiles } from "../telegram/files.ts";
 import { commandPass, MAIN_COMMANDS, registerCommands } from "./commands.ts";
@@ -44,6 +49,8 @@ import { signalTurn, spawnTurn } from "./spawn.ts";
 import { wakerPass } from "./waker.ts";
 
 const cfg = loadConfig();
+// Refused here, before anything starts: a console on a non-loopback address (src/console/server.ts).
+checkConsole(cfg.console);
 const db = openDb(cfg.dbPath, { migrate: true });
 const api = new Api(cfg.botToken, cfg.telegramApiRoot ? { apiRoot: cfg.telegramApiRoot } : undefined);
 const capabilities = enabledCapabilities();
@@ -98,6 +105,29 @@ void loop(
   5000,
 );
 void loop("backup", async () => void backupPass({ db, dataDir: cfg.dataDir, home: cfg.home }), 10 * 60_000);
+void loop(
+  "prune",
+  async () => {
+    const cutoff = Date.now() - cfg.transcriptDays * 24 * 3600_000;
+    const r = pruneTranscripts(db, new Date(cutoff).toISOString());
+    const images = pruneTranscriptMedia(cfg.dataDir, cutoff);
+    if (r.transcripts || r.prompts || images) console.log(`prune: ${r.transcripts} transcript(s), ${r.steps} step(s), ${r.prompts} prompt text(s), ${images} image(s) older than ${cfg.transcriptDays} days`);
+  },
+  3600_000,
+);
+if (consoleOn(cfg.console)) {
+  let served = false;
+  // From a loop, so a failure to bind is logged and retried like any loop error.
+  void loop(
+    "console",
+    async () => {
+      if (served) return;
+      startConsole(cfg.console, { db, timeZone: cfg.timeZone, dataDir: cfg.dataDir, ownerId: cfg.ownerId }, stop.signal);
+      served = true;
+    },
+    5000,
+  );
+} else console.log("console off (neither SHUVI_CONSOLE_USERS nor SHUVI_CONSOLE_TOKEN is set)");
 
 if (cfg.controlBotToken) {
   const control = new Api(cfg.controlBotToken, cfg.controlApiRoot ? { apiRoot: cfg.controlApiRoot } : undefined);

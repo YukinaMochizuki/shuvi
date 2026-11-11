@@ -33,6 +33,8 @@ const { runTurn } = await import("../agent/turn.ts");
 const { enabledCapabilities } = await import("../capabilities/index.ts");
 const { loadPolicy } = await import("../policy/load.ts");
 const { botIdentity } = await import("../agent/triggers.ts");
+const { LiveRedaction } = await import("../secrets/redaction.ts");
+const { raiseAlert } = await import("../store/control.ts");
 
 const cfg = loadConfig({ needToken: false });
 const db = openDb(cfg.dbPath);
@@ -40,6 +42,26 @@ const db = openDb(cfg.dbPath);
 // and who the bot is, which the server recorded at startup (a child has no token to ask Telegram).
 const policy = loadPolicy(db, cfg.home, cfg.ownerId);
 const bot = botIdentity(db);
+// The transcript is redacted with the computer's own redaction (every value the secrets file holds or ever
+// held), whether or not the computer capability is on, and rebuilt if the file changes during the turn. An
+// unusable file still redacts every value known before; with none known, the transcript's texts are
+// withheld. Either way the owner is told once (per version of the file) and the transcript says so.
+const redaction = new LiveRedaction(cfg.secretsFile);
+const secretsProblem = redaction.problem();
+const notes: string[] = [];
+if (secretsProblem) {
+  console.error(`turn ${turnId}: secrets file unusable for redaction: ${secretsProblem}`);
+  notes.push(`The secrets file could not be read (${secretsProblem}); this transcript is redacted with the values known before, or withheld.`);
+  try {
+    raiseAlert(db, {
+      key: `secrets-unusable:${cfg.secretsFile}:${secretsProblem}`,
+      topic: "secrets-unusable",
+      text: `The secrets file cannot be used: ${secretsProblem}. Turn transcripts and computer output are redacted with the values known before, or withheld.`,
+    });
+  } catch (e) {
+    console.error("could not raise the secrets alert:", e);
+  }
+}
 
 const outcome = await runTurn({
   db,
@@ -56,6 +78,7 @@ const outcome = await runTurn({
   // to home/ is heard from the next turn (Claude Code otherwise replays the prompt it recorded).
   makeAdapter: (boundary) => new ClaudeBackend({ boundary, liveSystemPrompt: true, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
   signal: ac.signal,
+  record: { dataDir: cfg.dataDir, redact: redaction.redact, notes },
 });
 console.log(`turn ${turnId}: ${outcome}`);
 process.exit(0);

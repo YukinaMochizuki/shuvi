@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import type { BackendAdapter, Prompt, ToolBoundary } from "agent-runtime";
 import { capabilityHolds, capabilityOwnerOnly, capabilityPerception, capabilityTools, chatCapabilities, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
 import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
@@ -21,8 +22,9 @@ import {
 import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
 import { chatLabel, extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
-import { buildSystemPrompt } from "./prompt.ts";
+import { buildPromptSections, joinSections } from "./prompt.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, type InputOptions, type Perceive } from "./render.ts";
+import { recordingBoundary, TurnRecorder, type RecorderOptions } from "./transcript.ts";
 import { isTrigger, type BotIdentity } from "./triggers.ts";
 
 /** How many earlier events a fresh conversation opens with (docs/design.md §13, `/new`). */
@@ -90,6 +92,11 @@ export function isLostSession(e: unknown): boolean {
  * chat's conversation is reset and the same turn runs again at once, once, as a fresh conversation that
  * opens with the last `HISTORY_ON_NEW` messages (as after `/new`). It costs no failure attempt; the owner
  * is told through the control bot.
+ *
+ * THE TRANSCRIPT (agent/transcript.ts): the turn is recorded as the model saw it, best effort: its system
+ * prompt by section, its input, and a timeline of thinking, text blocks (with the message each became),
+ * tool calls and appends. The boundary's record hooks and the driver callbacks feed it; nothing in the turn
+ * depends on it.
  */
 
 export interface TurnDeps {
@@ -112,6 +119,8 @@ export interface TurnDeps {
   /** The driver for this turn, built around the boundary the turn supplies. */
   makeAdapter: (boundary: ToolBoundary) => BackendAdapter;
   signal?: AbortSignal;
+  /** How the transcript is recorded (agent/transcript.ts). Default: the data dir above `home`, no redaction. */
+  record?: RecorderOptions;
 }
 
 export interface TurnState {
@@ -142,15 +151,18 @@ function spokeAfter(db: Db, chatId: number, seq: number): boolean {
   return triggersAfter(db, chatId, seq).some((e) => e.kind === "message");
 }
 
-/** Queue one message of the turn. After `pass` nothing is queued: that is where `pass` closes speech. */
-export function queueMessage(db: Db, s: TurnState, text: string): void {
+/**
+ * Queue one message of the turn. After `pass` nothing is queued: that is where `pass` closes speech.
+ * Returns the outbound event's seq, or null when nothing was queued.
+ */
+export function queueMessage(db: Db, s: TurnState, text: string): number | null {
   const body = text.trim();
-  if (!body || s.passed) return;
+  if (!body || s.passed) return null;
   const first = !s.spoke;
   s.spoke = true;
   const payload: BotMessagePayload = { text: body };
   if (s.wokenBy !== undefined && first && spokeAfter(db, s.chat.id, s.wokenBy)) payload.replyToSeq = s.wokenBy;
-  enqueueOutbound(db, { chatId: s.chat.id, kind: "bot_message", payload, idemKey: `turn:${s.turnId}:${s.n++}`, turnId: s.turnId });
+  return enqueueOutbound(db, { chatId: s.chat.id, kind: "bot_message", payload, idemKey: `turn:${s.turnId}:${s.n++}`, turnId: s.turnId });
 }
 
 export function queueReaction(db: Db, s: TurnState, targetSeq: number, emoji: string): void {
@@ -311,14 +323,18 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   deps.signal?.addEventListener("abort", () => (s.stopping = true), { once: true });
   extendTurn(db, turnId, s.toSeq);
 
+  const rec = new TurnRecorder(db, turnId, deps.record ?? { dataDir: dirname(deps.home) });
   let buf = "";
   const flush = () => {
-    queueMessage(db, s, buf);
+    const seq = queueMessage(db, s, buf);
+    rec.textFlushed(seq);
     buf = "";
   };
 
   const authority: TurnAuthority = { ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}), ownerOnly: capabilityOwnerOnly(capabilities) };
-  const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone, capabilities, authority));
+  const adapter = deps.makeAdapter(
+    recordingBoundary(turnBoundary(db, s, deps.timeZone, capabilities, authority), rec, () => s.toSeq, (seq) => triggersAfter(db, chat.id, seq)[0]?.seq),
+  );
   const firstOwnerMessage = input.find((e) => e.kind === "message" && (deps.ownerId === undefined || (e.payload as unknown as MessagePayload).from.id === deps.ownerId));
   const ownerName = deps.ownerName ?? (firstOwnerMessage ? (firstOwnerMessage.payload as unknown as MessagePayload).from.name : undefined);
   const owner: OwnerInfo = { ...(ownerName ? { name: ownerName } : {}), ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
@@ -346,10 +362,12 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         lastThinking = false;
         buf += text;
       }
+      rec.token(text, !!thinking);
     },
     onTool: () => {
       lastThinking = false;
       flush();
+      rec.toolAnnounced();
     },
     onSessionId: (id: string) => saveSession(db, chat.id, id),
     ...(deps.signal ? { signal: deps.signal } : {}),
@@ -358,13 +376,19 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   // Built fresh every turn and sent on a resume too, so an edit to home/ reaches the model from the next
   // turn without `/new`. The driver decides whether a resume honours it: the runner's Claude driver does
   // (`liveSystemPrompt`), and openai-compat always sends the prompt it is given.
-  const systemPrompt = buildSystemPrompt(deps.home, chat, owner, capabilities, chatPolicy, db);
-  const fresh = (p: Prompt) => adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
+  const sections = buildPromptSections(deps.home, chat, owner, capabilities, chatPolicy, db);
+  const systemPrompt = joinSections(sections);
+  rec.prompt(sections);
+  const fresh = (p: Prompt) => {
+    rec.input(p, false);
+    return adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
+  };
   try {
     let result;
     if (!chat.backendSessionId) result = await fresh(prompt);
     else {
       try {
+        rec.input(prompt, true);
         result = await adapter.continueRun(
           { backendSessionId: chat.backendSessionId, prompt, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}), ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
           opts,
@@ -374,26 +398,33 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         resetConversation(db, chat.id);
         raiseAlert(db, {
           key: `lost-session:${turnId}`,
+          turnId,
           topic: `lost-session:${chat.id}`,
           text: `The conversation of ${chatLabel(chat)} was lost (${chat.backendSessionId}); turn ${turnId} restarted it fresh with the last ${HISTORY_ON_NEW} messages.`,
         });
         buf = "";
         lastThinking = false;
+        rec.discardOpen();
+        rec.note(`The conversation ${chat.backendSessionId} was lost; the turn started over as a fresh conversation, opening with the last ${HISTORY_ON_NEW} messages.`);
         const lastSeen = recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW);
         result = await fresh(lastSeen.length ? renderWithHistory(lastSeen, input, deps.timeZone, perceive, renderOpts) : renderTurnInput(input, deps.timeZone, perceive, renderOpts));
       }
     }
     flush();
     const u = result.usage;
+    rec.end(u.model);
     finishTurn(db, turnId, { status: "done", usage: u, contextTokens: u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens + u.outputTokens });
     return "done";
   } catch (e) {
+    // What was half-written was not sent; the transcript keeps it as such.
+    rec.end();
     if (deps.signal?.aborted) {
       // A stop: what was half-written is dropped, what was already queued stays queued.
       finishTurn(db, turnId, { status: "stopped" });
       return "stopped";
     }
-    finishTurn(db, turnId, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+    // Redacted like the transcript: the error is shown in the console and sent in the control bot's alert.
+    finishTurn(db, turnId, { status: "failed", error: rec.redactText(e instanceof Error ? e.message : String(e)) });
     return "failed";
   }
 }

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { capabilitySections, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
+import type { EnabledCapability, OwnerInfo } from "../capabilities/types.ts";
 import { defaultPolicy, GROUP_DEFAULTS, resolveChat, type ChatPolicy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import type { Chat } from "../store/events.ts";
@@ -37,28 +37,43 @@ function read(home: string, rel: string): string | null {
   return s || null;
 }
 
+/** One part of the system prompt and where it came from (`persona/public.md`, `capability: web`, …). */
+export interface PromptSection {
+  label: string;
+  text: string;
+}
+
+/** How sections are joined into the prompt. */
+export const SECTION_JOIN = "\n\n";
+
 /**
+ * The system prompt as the sections it is built from, in order; `buildSystemPrompt` joins them. The labels
+ * are for the turn transcript (agent/transcript.ts), which records where each section begins, so the
+ * console can fold the prompt by section.
+ *
  * `capabilities` are the ones enabled in this process, in registry order; each contributes its section.
  * Without any (a bare call), the prompt has no capability sections at all, not even speech. `db` is
  * handed to the sections to read from (a section never writes; capabilities/types.ts `PromptContext`).
  */
-export function buildSystemPrompt(home: string, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy, db?: Db): string {
+export function buildPromptSections(home: string, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy, db?: Db): PromptSection[] {
   const cp = chatPolicy ?? resolveChat(defaultPolicy(), chat) ?? { ...GROUP_DEFAULTS, key: String(chat.tgChatId), ownerDm: false };
   const isOwnerDm = cp.ownerDm && chat.kind === "private";
-  const sections: string[] = [];
+  const sections: PromptSection[] = [];
+  const push = (label: string, text: string) => sections.push({ label, text });
 
   const pub = cp.persona.includes("public") ? read(home, "persona/public.md") : null;
-  if (pub) sections.push(pub);
+  if (pub) push("persona/public.md", pub);
   if (isOwnerDm && cp.persona.includes("private")) {
     const priv = read(home, "persona/private.md");
-    if (priv) sections.push(priv);
+    if (priv) push("persona/private.md", priv);
   }
 
   const directives = read(home, "directives.md");
-  if (directives) sections.push(`## Rules\n\n${directives}`);
+  if (directives) push("directives.md", `## Rules\n\n${directives}`);
 
   const notes = cp.memory.includes("chat") ? read(home, `chats/${chat.tgChatId}.md`) : null;
-  sections.push(
+  push(
+    notes ? `this chat (with chats/${chat.tgChatId}.md)` : "this chat",
     (isOwnerDm
       ? `## This chat\n\nA private chat between you and ${owner.name ?? "the owner"}.${
           owner.language ? ` They speak ${owner.language}: reply in it, unless they write to you in another language.` : ""
@@ -68,17 +83,31 @@ export function buildSystemPrompt(home: string, chat: Chat, owner: OwnerInfo, ca
         }`) + (notes ? `\n\n### Your notes on this chat\n\n${notes}` : ""),
   );
 
-  sections.push(...capabilitySections(capabilities, { home, chat, owner, chatPolicy: cp, ...(db ? { db } : {}) }));
+  // Each capability's section, in registry order, labelled with the capability it came from.
+  const ctx = { home, chat, owner, chatPolicy: cp, ...(db ? { db } : {}) };
+  for (const { capability, config } of capabilities) {
+    const s = capability.section?.(ctx, config);
+    if (s != null) push(`capability: ${capability.id}`, s);
+  }
 
   if (capabilities.some((c) => c.capability.id === "playbooks")) {
     const index = playbookIndex(home);
-    if (index) sections.push(index);
+    if (index) push("playbooks index", index);
   }
 
   if (isOwnerDm && cp.memory.includes("private")) {
     const mem = read(home, "memory/private.md");
-    if (mem) sections.push(`## Memory\n\n${mem}`);
+    if (mem) push("memory/private.md", `## Memory\n\n${mem}`);
   }
 
-  return sections.join("\n\n");
+  return sections;
+}
+
+/** The system prompt: `buildPromptSections`, joined. */
+export function buildSystemPrompt(home: string, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy, db?: Db): string {
+  return joinSections(buildPromptSections(home, chat, owner, capabilities, chatPolicy, db));
+}
+
+export function joinSections(sections: readonly PromptSection[]): string {
+  return sections.map((s) => s.text).join(SECTION_JOIN);
 }

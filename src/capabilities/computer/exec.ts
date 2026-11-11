@@ -10,7 +10,8 @@ import { codeOf, describeError, ExecRefused, SIGKILL, SIGTERM } from "./hangar/c
 import { ConditionStatus } from "./hangar/gen/hangar/meta/v1/meta_pb.ts";
 import { declaredNote } from "./declared.ts";
 import { awaitInbox } from "./files.ts";
-import { secretsForChat, type Redaction } from "./secrets.ts";
+import type { Redaction } from "../../secrets/redaction.ts";
+import { secretsForChat } from "./secrets.ts";
 import { acquireLease, COMPUTER_JOB_KIND, getComputer, releaseLease, runningComputerJobs } from "./state.ts";
 
 /**

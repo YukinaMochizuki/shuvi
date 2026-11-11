@@ -94,6 +94,8 @@ export const chatEvents = sqliteTable(
   (t) => [
     index("chat_events_chat_seq").on(t.chatId, t.seq),
     index("chat_events_status").on(t.status),
+    // A turn's outbound rows (the console, /turn), without a scan of the whole log.
+    index("chat_events_turn").on(t.turnId),
     // The files waiting to be copied into a chat's computer (store/media.ts `pendingAttachments`): only rows
     // with an attachment still new or asked for, so the scan does not grow with every file ever sent.
     index("chat_events_attachment_pending").on(t.seq).where(ATTACHMENT_PENDING),
@@ -139,11 +141,113 @@ export const turns = sqliteTable(
     inputTokens: integer("input_tokens"),
     outputTokens: integer("output_tokens"),
     cacheReadTokens: integer("cache_read_tokens"),
+    cacheCreationTokens: integer("cache_creation_tokens"),
     startedAt: text("started_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },
   // One running turn per chat, enforced by the database rather than by the waker remembering to check.
-  (t) => [uniqueIndex("turns_one_running_per_chat").on(t.chatId).where(sql`status = 'running'`)],
+  (t) => [
+    uniqueIndex("turns_one_running_per_chat").on(t.chatId).where(sql`status = 'running'`),
+    // A chat's turns in order (the console's lists, a turn's neighbours, the previous prompt).
+    index("turns_chat_id").on(t.chatId, t.id),
+  ],
+);
+
+// ---- turn transcripts: each turn as the model saw it (src/agent/transcript.ts, src/store/transcripts.ts) ----
+//
+// Kept apart from `chat_events` (what happened in a chat) and from `turns` (bookkeeping): a transcript is a
+// debugging record, written best effort by the runner child, and pruned after SHUVI_TRANSCRIPT_DAYS. Nothing
+// reads it to decide anything; losing it loses a view, never a message. Every text in it went through the
+// computer's secret redaction before it was written, and an image is a path under the data dir, never bytes.
+
+/**
+ * System prompts, by the sha256 of their text: a chat whose home/ did not change sends the same bytes every
+ * turn, so a turn stores 64 characters instead of the whole prompt. `sections` are where each part of the
+ * prompt begins and ends (agent/prompt.ts `buildPromptSections`), for the console to fold it by section.
+ * A text no transcript points at any more is pruned.
+ */
+export const promptTexts = sqliteTable("prompt_texts", {
+  hash: text("hash").primaryKey(),
+  text: text("text").notNull(),
+  /** `[{ label, start, end }]`: character offsets into `text`, in order. */
+  sections: text("sections", { mode: "json" }).notNull().$type<{ label: string; start: number; end: number }[]>(),
+  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
+
+/**
+ * One per turn that reached the model: the system prompt it sent (by hash) and the prompt it opened with.
+ * `input` is the prompt's parts in order; an image part is `{ type: "image", ref, mimeType }`, `ref` a path
+ * relative to the data dir (store/transcripts.ts `ImageRef`). A turn whose conversation was lost and run
+ * again fresh records the prompt of the run that answered.
+ */
+export const turnTranscripts = sqliteTable("turn_transcripts", {
+  turnId: integer("turn_id")
+    .primaryKey()
+    .references(() => turns.id),
+  promptHash: text("prompt_hash").references(() => promptTexts.hash),
+  input: text("input", { mode: "json" }).notNull().$type<TranscriptPart[]>(),
+  /** The driver's model for the turn, from its usage. */
+  model: text("model"),
+  /** `continueRun` on an existing conversation, rather than a fresh one. */
+  resumed: integer("resumed", { mode: "boolean" }).notNull().default(false),
+  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
+
+/** A prompt or result part as a transcript stores it: text, or a reference to an image file. */
+export type TranscriptPart = { type: "text"; text: string } | { type: "image"; ref: string; mimeType: string };
+
+export const STEP_KINDS = [
+  /** A stretch of the model's thinking (never sent). */
+  "thinking",
+  /** A text block: one message, `sent` with its outbound `outbound_seq`, or not (after `pass`, a stop). */
+  "text",
+  /** A tool call, from its start to its end, or its refusal. */
+  "tool",
+  /** What the boundary appended to a tool's result: events that arrived meanwhile, after call `call_id`. */
+  "append",
+  /** Something the framework did to the turn itself (a lost conversation restarted). */
+  "note",
+] as const;
+
+/**
+ * A turn's timeline, in the order the turn produced it (`n`). One row per thinking stretch, text block,
+ * tool call, append or note. A tool call's row is written as `running` when it starts and completed in
+ * place by `call_id` when it returns, so a call that hangs is visible while it hangs, and parallel calls
+ * cannot be mixed up.
+ */
+export const turnSteps = sqliteTable(
+  "turn_steps",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    turnId: integer("turn_id")
+      .notNull()
+      .references(() => turns.id),
+    /** Position in the turn, from 0. */
+    n: integer("n").notNull(),
+    kind: text("kind", { enum: STEP_KINDS }).notNull(),
+    /** thinking / text / note: the text. append: the rendered text the model was given. */
+    text: text("text"),
+    /** text: whether it became a message, and which outbound event. */
+    sent: integer("sent", { mode: "boolean" }),
+    outboundSeq: integer("outbound_seq"),
+    /** tool: its name (bare), its arguments as JSON, its result's text. */
+    name: text("name"),
+    args: text("args"),
+    result: text("result"),
+    /** tool: running → ok | error (the tool said so) | threw | refused (the boundary's refusal, in `error`). */
+    status: text("status", { enum: ["running", "ok", "error", "threw", "refused"] }),
+    error: text("error"),
+    /** tool: the boundary's call id. append: the call it was appended to. */
+    callId: text("call_id"),
+    /** tool / append: the images of the result or the appended events, as references. */
+    images: text("images", { mode: "json" }).$type<{ ref: string; mimeType: string }[]>(),
+    /** append: the events appended, (from_seq, to_seq]. */
+    fromSeq: integer("from_seq"),
+    toSeq: integer("to_seq"),
+    at: text("at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+    endedAt: text("ended_at"),
+  },
+  (t) => [uniqueIndex("turn_steps_turn_n").on(t.turnId, t.n), index("turn_steps_name").on(t.name, t.turnId)],
 );
 
 /**
