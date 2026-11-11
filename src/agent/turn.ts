@@ -1,10 +1,10 @@
 import type { BackendAdapter, ToolBoundary } from "agent-runtime";
-import { capabilityTools, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
+import { capabilityHolds, capabilityPerception, capabilityTools, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
 import type { Db } from "../store/db.ts";
-import { enqueueOutbound, getChat, recentHistory, triggersAfter, type Chat, type MessagePayload } from "../store/events.ts";
+import { enqueueOutbound, getChat, recentHistory, triggersAfter, type Chat, type ChatEvent, type MessagePayload } from "../store/events.ts";
 import { extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
 import { buildSystemPrompt } from "./prompt.ts";
-import { renderMidTurn, renderTurnInput, renderWithHistory } from "./render.ts";
+import { renderMidTurn, renderTurnInput, renderWithHistory, type Perceive } from "./render.ts";
 
 /** How many earlier events a fresh conversation opens with (docs/design.md §13, `/new`). */
 export const HISTORY_ON_NEW = 10;
@@ -29,6 +29,11 @@ export const HISTORY_ON_NEW = 10;
  * Messages that arrive WHILE the turn runs are appended to the next tool result (the runtime's tool
  * boundary), and the turn's `to_seq` widens to cover them, so the cursor rule in store/turns.ts counts
  * them as answered by this turn. One that arrives after the last tool call is left for the next turn.
+ *
+ * PERCEPTION GATING: a message a capability still holds (a picture still downloading, `Capability.holds`)
+ * is not taken in yet, nor anything after it, so the chat stays in order; the next tool call or the next
+ * turn takes it, once ready or once the short wait is over. What a message shows (an image) follows its line
+ * (`Capability.perceive`), in the turn's input and in what is appended.
  *
  * The turn's tools and the capability sections of its system prompt come from the enabled capabilities
  * (src/capabilities/), in registry order; this module does not know which capabilities exist.
@@ -73,8 +78,18 @@ export function queueReaction(db: Db, s: TurnState, targetSeq: number, emoji: st
   enqueueOutbound(db, { chatId: s.chat.id, kind: "bot_reaction", payload: { targetSeq, emoji }, idemKey: `turn:${s.turnId}:${s.n++}`, turnId: s.turnId });
 }
 
+/**
+ * The events up to (not including) the first one a capability still holds. Events at or before `always`
+ * are kept regardless: the turn was claimed for them.
+ */
+export function untilHeld(events: ChatEvent[], capabilities: readonly EnabledCapability[], now: number, always = 0): ChatEvent[] {
+  const i = events.findIndex((e) => e.seq > always && capabilityHolds(capabilities, e, now));
+  return i < 0 ? events : events.slice(0, i);
+}
+
 /** The boundary around every tool call of the turn: refuse after `pass`, append what arrived meanwhile. */
-export function turnBoundary(db: Db, s: TurnState, timeZone: string): ToolBoundary {
+export function turnBoundary(db: Db, s: TurnState, timeZone: string, capabilities: readonly EnabledCapability[] = []): ToolBoundary {
+  const perceive: Perceive = (e) => capabilityPerception(capabilities, e);
   return {
     refuse(call) {
       if (s.passed && call.name !== "pass") return "This turn has already passed. End it now; call no more tools.";
@@ -84,11 +99,11 @@ export function turnBoundary(db: Db, s: TurnState, timeZone: string): ToolBounda
       // After `pass` (the turn is over) or a stop (it is being abandoned), a message that arrives is not
       // this turn's to answer: leave it past to_seq, and the next turn answers it.
       if (s.passed || s.stopping) return null;
-      const fresh = triggersAfter(db, s.chat.id, s.toSeq);
+      const fresh = untilHeld(triggersAfter(db, s.chat.id, s.toSeq), capabilities, Date.now());
       if (!fresh.length) return null;
       s.toSeq = fresh.at(-1)!.seq;
       extendTurn(db, s.turnId, s.toSeq);
-      return renderMidTurn(fresh, timeZone);
+      return renderMidTurn(fresh, timeZone, perceive);
     },
   };
 }
@@ -102,7 +117,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   if (!turn || turn.status !== "running") return "failed";
   const chat = getChat(db, turn.chatId)!;
 
-  const input = triggersAfter(db, chat.id, turn.fromSeq);
+  const input = untilHeld(triggersAfter(db, chat.id, turn.fromSeq), deps.capabilities, Date.now(), turn.toSeq);
+  const perceive: Perceive = (e) => capabilityPerception(deps.capabilities, e);
   // A fresh conversation (the first turn, or after `/new`) opens with the chat's last few exchanges, so
   // starting over forgets the model's context, not what was just being talked about.
   if (!input.length) {
@@ -122,10 +138,10 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     buf = "";
   };
 
-  const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone));
+  const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone, deps.capabilities));
   const owner: OwnerInfo = { name: deps.ownerName ?? (input[0]!.payload as unknown as MessagePayload).from.name, ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
   const tools = capabilityTools(deps.capabilities, { db, chat, turnId, timeZone: deps.timeZone, owner, state: s });
-  const prompt = history.length ? renderWithHistory(history, input, deps.timeZone) : renderTurnInput(input, deps.timeZone);
+  const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive) : renderTurnInput(input, deps.timeZone, perceive);
   let lastThinking = false;
   const opts = {
     onToken: (text: string, thinking?: boolean) => {

@@ -1,5 +1,6 @@
 import { speech } from "./speech/index.ts";
 import { enableCapabilities, type Capability, type EnabledCapability, type Env } from "./types.ts";
+import { vision } from "./vision/index.ts";
 import { web } from "./web/index.ts";
 
 /**
@@ -12,6 +13,7 @@ import { web } from "./web/index.ts";
 export const CAPABILITIES: readonly Capability<any>[] = [
   speech,
   web,
+  vision,
 ];
 
 /** The capabilities enabled in this process, in registry order. */

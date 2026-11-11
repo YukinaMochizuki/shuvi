@@ -274,7 +274,10 @@ tool when it needs to. Where a forward came from and the text being replied to a
 fields.
 
 - **Images**: photos and static stickers go to the model as images. Animated (tgs) and video (webm)
-  stickers become a thumbnail or one frame, with their emoji and pack.
+  stickers become a thumbnail or one frame, with their emoji and pack. The server downloads them
+  (`media/<file_unique_id>`, once per file); a turn waits a few seconds at most for one still downloading
+  (perception gating), then shows the placeholder alone. The image follows the message's line, in a
+  turn's input and in what is appended mid-turn (`src/capabilities/vision/`).
 - **Sticker description cache**: a short description keyed by `file_unique_id`, for replay, retrieval
   and the sticker library; the model never sees it instead of the image.
 - **Video and large files** never block a turn: the assistant gets a thumbnail and metadata first and
@@ -377,7 +380,5 @@ belongs to the chat:
 ## 17. Open questions
 
 - Which machine it runs on.
-- Whether agent-runtime's Claude driver can carry images in a user message; if not, the runtime needs it
-  first.
 - Migrating from the previous assistant: splitting persona and rules into the §6 layers; converting
   sticker descriptions to the §12 format; whether to import the old conversation logs as `chat_events`.

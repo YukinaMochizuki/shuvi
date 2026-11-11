@@ -7,7 +7,8 @@ restarts. The architecture, and why it is shaped this way, is in [docs/design.md
 
 What works today (the first slice): the owner's private chat, text in and out. The assistant's reply text
 becomes messages, `say` speaks mid-turn, `react` reacts, `pass` stays silent; `/stop` and `/new` act on the
-chat. Groups, memory writing, stickers, media, background jobs and schedules are later slices on the same
+chat. Photos and stickers are shown to the model as images (the `vision` capability). Groups, memory
+writing, the sticker library, other media, background jobs and schedules are later slices on the same
 skeleton.
 
 ## Running it
@@ -31,8 +32,10 @@ assistant replies in it. Turns run on the Claude login of the user the server ru
 
 ## Data
 
-`SHUVI_DATA_DIR` (default `./data`) holds `shuvi.db` and `home/`, the assistant's persona, directives and
-memory as markdown. Both are private: they live outside this repository and are never committed or pushed.
+`SHUVI_DATA_DIR` (default `./data`) holds `shuvi.db`, `home/` (the assistant's persona, directives and
+memory as markdown) and `media/` (the photos and stickers it was sent, by `file_unique_id`). All of it is
+private: it lives outside this repository and is never committed or pushed. Note that Claude Code also
+keeps a copy of each image a turn is shown, next to its session files.
 
 ## Deploying
 

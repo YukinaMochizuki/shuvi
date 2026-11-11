@@ -9,11 +9,12 @@
  * every message the turn wrote reaches Telegram exactly once and in order. The server is killed the way
  * a terminal or systemd does it, by its whole process group, so the check also proves the child is
  * detached from it. Then `/new` and `/stop` are acknowledged with a reaction and nothing else, and a
- * stopped turn says nothing more.
+ * stopped turn says nothing more. Last, a photo: the server downloads it from the fake Bot API, and the
+ * model receives it as an image block (on a resumed conversation).
  *
  *   bun scripts/e2e-fake.ts
  */
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/store/db.ts";
@@ -36,7 +37,12 @@ async function until(what: string, cond: () => boolean, ms = 60_000): Promise<vo
 }
 
 // ---- fake Anthropic: step 1 says something and calls `say`; step 2 (after the tool result) is SLOW ----
-type Msg = { role: string; content: string | Array<{ type: string; text?: string }> };
+type Block = { type: string; text?: string; source?: { type?: string; data?: string } };
+type Msg = { role: string; content: string | Block[] };
+// A valid 1x1 PNG: the photo the owner sends in step 4.
+const PHOTO = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+type ImageSeen = { data: string; withText: string; messages: number };
+let imageSeen = null as ImageSeen | null;
 const ev = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`;
 function stream(id: string, blocks: Array<{ type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: unknown }>, stop: string): Response {
   let out = ev("message_start", { message: { id, type: "message", role: "assistant", model: "claude-fake", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 30, output_tokens: 1 } } });
@@ -67,6 +73,13 @@ const anthropic = Bun.serve({
     if (!url.pathname.endsWith("/v1/messages")) return Response.json({});
     if (!body.tools?.some((t) => t.name === "mcp__shuvi__say")) return stream("msg_side", [{ type: "text", text: "ok" }], "end_turn");
     modelRequests++;
+    const lastMsg = body.messages?.at(-1);
+    const lastBlocks = Array.isArray(lastMsg?.content) ? lastMsg!.content : [];
+    const image = lastBlocks.find((b) => b.type === "image" && b.source?.type === "base64");
+    if (lastMsg?.role === "user" && image) {
+      imageSeen = { data: image.source!.data!, withText: JSON.stringify(lastBlocks.filter((b) => b.type === "text")), messages: body.messages!.length };
+      return stream(`msg_${modelRequests}`, [{ type: "text", text: "A red square." }], "end_turn");
+    }
     if (JSON.stringify(body.messages).includes("a long time")) {
       longStepStarted = true;
       await Bun.sleep(20_000); // only ever cut short by /stop
@@ -157,6 +170,29 @@ const stopped = db.$client.query("select status from turns order by id desc limi
 check(stopped.status === "stopped", "the turn closed as stopped");
 await Bun.sleep(1000);
 check(!texts().includes("must not be sent") && texts().length === 3, "and nothing more was said");
+
+// ---- 4. a photo: downloaded by the server, shown to the model as an image ------------------------------
+tg.files.set("photo-m", Buffer.from(PHOTO, "base64"));
+tg.updates.push(
+  dmUpdate(5, undefined as never, OWNER, {
+    text: undefined,
+    caption: "what colour is this",
+    photo: [
+      { file_id: "photo-s", file_unique_id: "ps", width: 90, height: 90 },
+      { file_id: "photo-m", file_unique_id: "pm", width: 1280, height: 1280 },
+      { file_id: "photo-l", file_unique_id: "pl", width: 2560, height: 2560 },
+    ],
+  }),
+);
+await until("the reply to the photo", () => texts().includes("A red square."));
+check(tg.sent("getFile").some((b) => b.file_id === "photo-m"), "the server fetched the photo size that fits (getFile)");
+check(existsSync(join(dataDir, "media", "pm")), "the photo was stored under media/<file_unique_id>");
+const seenImage = imageSeen as ImageSeen | null; // set by the fake's handler, which TypeScript cannot follow
+check(seenImage?.data === PHOTO, "the fake Anthropic API received the photo as an image block");
+check(!!seenImage?.withText.includes("[photo] what colour is this"), `with its line and placeholder as text (${seenImage?.withText})`);
+check((seenImage?.messages ?? 0) > 1, `in a resumed conversation: the new user message follows ${(seenImage?.messages ?? 1) - 1} earlier one(s)`);
+const photoEvent = db.$client.query("select payload from chat_events where kind = 'message' order by seq desc limit 1").get() as { payload: string };
+check(JSON.parse(photoEvent.payload).media?.state === "ready", "the message event records its media as downloaded");
 
 log("PASS");
 cleanup();

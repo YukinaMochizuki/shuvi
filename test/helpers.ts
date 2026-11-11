@@ -1,4 +1,4 @@
-import { runAtBoundary, type AdapterRunOptions, type AdapterRunResult, type BackendAdapter, type ToolBoundary, type ToolDef, type ToolResult } from "agent-runtime";
+import { runAtBoundary, type AdapterRunOptions, type AdapterRunResult, type BackendAdapter, type Prompt, type ToolBoundary, type ToolDef, type ToolResult } from "agent-runtime";
 import type { Update } from "grammy/types";
 import { openDb, type Db } from "../src/store/db.ts";
 import { ensureChat, recordInbound, type MessagePayload } from "../src/store/events.ts";
@@ -59,7 +59,7 @@ export type Step =
  */
 export class ScriptedAdapter implements BackendAdapter {
   readonly id = "scripted";
-  readonly calls: { method: "run" | "continueRun"; prompt: string; systemPrompt?: string; backendSessionId?: string; tools: string[] }[] = [];
+  readonly calls: { method: "run" | "continueRun"; prompt: Prompt; systemPrompt?: string; backendSessionId?: string; tools: string[] }[] = [];
   readonly toolResults: { name: string; result: ToolResult }[] = [];
   constructor(
     private readonly boundary: ToolBoundary,
@@ -113,11 +113,15 @@ export interface FakeCall {
 
 /**
  * A minimal Telegram Bot API over real HTTP, so grammY's own client (and its error types) is what the
- * code under test talks to. `fail` queues responses for the next calls of a method.
+ * code under test talks to. `fail` queues responses for the next calls of a method. `files` are what
+ * `getFile` and the file endpoint (`/file/bot<token>/<path>`) serve, by file_id; `downloads` counts the
+ * file endpoint's hits per file_id.
  */
 export class FakeTelegram {
   readonly calls: FakeCall[] = [];
   readonly updates: Update[] = [];
+  readonly files = new Map<string, Uint8Array>();
+  readonly downloads = new Map<string, number>();
   private failures = new Map<string, { code: number; description: string; retry_after?: number }[]>();
   private nextMessageId = 9000;
   private server: ReturnType<typeof Bun.serve>;
@@ -127,6 +131,13 @@ export class FakeTelegram {
       port: 0,
       fetch: async (req) => {
         const url = new URL(req.url);
+        const file = url.pathname.match(/^\/file\/bot[^/]+\/files\/(.+)$/);
+        if (file) {
+          const id = decodeURIComponent(file[1]!);
+          const bytes = this.files.get(id);
+          this.downloads.set(id, (this.downloads.get(id) ?? 0) + 1);
+          return bytes ? new Response(bytes) : new Response("not found", { status: 404 });
+        }
         const method = url.pathname.split("/").at(-1)!;
         const text = await req.text();
         const body = (text ? JSON.parse(text) : {}) as Record<string, unknown>;
@@ -143,6 +154,12 @@ export class FakeTelegram {
             // against this fake does not spin.
             if (!pending.length && body.timeout) await Bun.sleep(200);
             return Response.json({ ok: true, result: pending });
+          }
+          case "getFile": {
+            const id = String(body.file_id);
+            const bytes = this.files.get(id);
+            if (!bytes) return Response.json({ ok: false, error_code: 400, description: "Bad Request: invalid file_id" });
+            return Response.json({ ok: true, result: { file_id: id, file_unique_id: `u-${id}`, file_size: bytes.length, file_path: `files/${encodeURIComponent(id)}` } });
           }
           case "sendMessage":
             return Response.json({ ok: true, result: { message_id: this.nextMessageId++, date: 0, chat: { id: body.chat_id, type: "private" }, text: body.text } });

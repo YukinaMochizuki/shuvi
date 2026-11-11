@@ -1,7 +1,8 @@
-import type { ToolBundle } from "agent-runtime";
+import type { ToolBundle, ToolContent } from "agent-runtime";
 import type { TurnState } from "../agent/turn.ts";
 import type { Db } from "../store/db.ts";
-import type { Chat } from "../store/events.ts";
+import type { Chat, ChatEvent } from "../store/events.ts";
+import type { TelegramFiles } from "../telegram/files.ts";
 
 /**
  * A capability: one thing the assistant can do (speak, look things up, …), with everything that thing
@@ -14,7 +15,8 @@ import type { Chat } from "../store/events.ts";
  *   - It reads its own configuration (its own `SHUVI_*` variables) in `enable`, inside its own module.
  *     The set of enabled capabilities is fixed per process, from the environment at startup.
  *   - It never talks to Telegram. Its tools and loops queue rows in the store (store/events.ts); the
- *     server's sender is the only thing that sends. That is why a loop is not handed the bot API.
+ *     server's sender is the only thing that sends. That is why a loop is not handed the bot API, only a
+ *     read-only file downloader (`ServerContext.files`).
  *   - Its tools run inside the turn's boundary (agent/turn.ts): after `pass` they are refused, and what
  *     arrives while they run is appended to their result. A capability does not get around that.
  *
@@ -52,6 +54,8 @@ export interface ServerContext {
   home: string;
   timeZone: string;
   ownerId: number;
+  /** Download a file someone sent. Read-only: it cannot send anything. */
+  files: TelegramFiles;
   /** Aborted when the server is shutting down. */
   signal: AbortSignal;
 }
@@ -80,6 +84,14 @@ export interface Capability<C = unknown> {
   section?(ctx: PromptContext, config: C): string | null;
   /** Loops the server runs for it. */
   loops?(ctx: ServerContext, config: C): ServerLoop[];
+  /**
+   * PERCEPTION GATING: true while `event` is not ready to be shown (its picture is still downloading), so
+   * no turn opens on it yet and a running turn does not take it in yet. Must turn false on its own after
+   * a short wait: a held event is then shown as it is.
+   */
+  holds?(event: ChatEvent, now: number, config: C): boolean;
+  /** What the model is shown of `event` beyond its text line (an image), in a turn's input or an append. */
+  perceive?(event: ChatEvent, config: C): ToolContent[];
 }
 
 /** A capability that is on in this process, with the configuration it read. */
@@ -104,6 +116,16 @@ export function capabilityTools(enabled: readonly EnabledCapability[], ctx: Turn
 
 export function capabilitySections(enabled: readonly EnabledCapability[], ctx: PromptContext): string[] {
   return enabled.flatMap(({ capability, config }) => capability.section?.(ctx, config) ?? []);
+}
+
+/** Whether any enabled capability holds `event` back for now (see `Capability.holds`). */
+export function capabilityHolds(enabled: readonly EnabledCapability[], event: ChatEvent, now: number): boolean {
+  return enabled.some(({ capability, config }) => capability.holds?.(event, now, config) ?? false);
+}
+
+/** Everything the enabled capabilities show of `event` beyond its text, in registry order. */
+export function capabilityPerception(enabled: readonly EnabledCapability[], event: ChatEvent): ToolContent[] {
+  return enabled.flatMap(({ capability, config }) => capability.perceive?.(event, config) ?? []);
 }
 
 export function capabilityLoops(enabled: readonly EnabledCapability[], ctx: ServerContext): ServerLoop[] {

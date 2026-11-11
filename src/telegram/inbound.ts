@@ -1,5 +1,5 @@
 import type { Message, Update } from "grammy/types";
-import type { CommandPayload, MessagePayload, Speaker } from "../store/events.ts";
+import type { CommandPayload, MessageMedia, MessagePayload, Speaker } from "../store/events.ts";
 
 /**
  * What an inbound Telegram update IS to shuvi, decided before anything is written. Pure, so the rules
@@ -10,7 +10,8 @@ import type { CommandPayload, MessagePayload, Speaker } from "../store/events.ts
  *   - `command`: an owner command. Recorded, then handled by the server; it never reaches the model.
  *   - `message`: something said in the chat. Text as written; anything this slice cannot read yet (a
  *     sticker, a photo, a voice note) becomes a short placeholder, so the assistant at least knows that
- *     something was sent and what it was, rather than seeing nothing.
+ *     something was sent and what it was, rather than seeing nothing. A photo or a sticker also records
+ *     its `media` (which file to show the model); the server downloads it (src/capabilities/vision/).
  */
 
 export type Classified =
@@ -41,6 +42,34 @@ function placeholder(m: Message): string | null {
   if (m.contact) return "[contact]";
   if (m.poll) return `[poll: ${m.poll.question}]`;
   return null;
+}
+
+/** The longest side, in pixels, of a photo size the model is shown: larger ones are downscaled by the model's API anyway. */
+export const PHOTO_MAX_SIDE = 1568;
+
+/**
+ * The picture a message carries, if any, and which file of it to fetch:
+ *   - a photo: the largest size whose longer side is at most PHOTO_MAX_SIDE (the smallest when none is);
+ *   - a static (WebP) sticker: the sticker itself;
+ *   - an animated (tgs) or video (webm) sticker: its thumbnail, which the model can read.
+ */
+export function mediaOf(m: Message): MessageMedia | undefined {
+  if (m.photo?.length) {
+    const sizes = [...m.photo].sort((a, b) => a.width * a.height - b.width * b.height);
+    const fits = sizes.filter((s) => Math.max(s.width, s.height) <= PHOTO_MAX_SIDE);
+    const pick = fits.at(-1) ?? sizes[0]!;
+    const own = sizes.at(-1)!;
+    if (!pick.file_id || !own.file_unique_id) return undefined;
+    return { kind: "photo", fileUniqueId: own.file_unique_id, file: { fileId: pick.file_id, fileUniqueId: pick.file_unique_id }, state: "pending" };
+  }
+  const s = m.sticker;
+  if (s?.file_id) {
+    const animated = s.is_animated || s.is_video;
+    const thumb = s.thumbnail;
+    const file = !animated ? { fileId: s.file_id, fileUniqueId: s.file_unique_id } : thumb ? { fileId: thumb.file_id, fileUniqueId: thumb.file_unique_id, thumbnail: true } : null;
+    return { kind: "sticker", fileUniqueId: s.file_unique_id, file, state: file ? "pending" : "none" };
+  }
+  return undefined;
 }
 
 function forwardedFrom(m: Message): string | undefined {
@@ -77,6 +106,8 @@ export function classify(update: Update, ownerId: number, botUsername?: string):
   if (!body) return { kind: "ignore", reason: "message with nothing to show" };
   const payload: MessagePayload = { from, text: body };
   if (stand) payload.placeholder = true;
+  const media = mediaOf(m);
+  if (media) payload.media = media;
   const fwd = forwardedFrom(m);
   if (fwd) payload.forwardedFrom = fwd;
   const r = m.reply_to_message;
