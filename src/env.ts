@@ -15,6 +15,13 @@ import { join, resolve } from "node:path";
  *   SHUVI_TZ                  the time zone messages are shown to the model in (default: the host's)
  *   SHUVI_CLAUDE_CONFIG_DIR   which Claude login turns run on (default: the process user's)
  *   SHUVI_TELEGRAM_API_ROOT   the Bot API base URL (default Telegram's; a fake one in tests)
+ *   SHUVI_CONTROL_BOT_TOKEN   the control bot's token (src/control/bot.ts), the framework's own channel to
+ *                             the owner: status, stop, alerts, approvals. Unset: no control bot; alerts
+ *                             still queue in the store (and go to the log) and are delivered once it is set.
+ *   SHUVI_CONTROL_API_ROOT    the control bot's Bot API base URL (default: SHUVI_TELEGRAM_API_ROOT)
+ *   SHUVI_TURN_MAX_MINUTES    a turn's wall-clock limit; past it the turn is stopped (default 15)
+ *   SHUVI_ALERT_OUTBOUND_MINUTES  alert when an outbound message is still pending after this long (default 10)
+ *   SHUVI_COMMIT              the deployed commit /status shows (default: `git describe` of the checkout)
  *
  * These are the framework's own variables. A capability reads its own (e.g. SHUVI_WEB,
  * SHUVI_TAVILY_API_KEY) in its own module, src/capabilities/<id>/, which lists them in its header.
@@ -31,6 +38,18 @@ export interface Config {
   timeZone: string;
   claudeConfigDir?: string;
   telegramApiRoot?: string;
+  controlBotToken?: string;
+  controlApiRoot?: string;
+  turnMaxMs: number;
+  outboundAlertMs: number;
+}
+
+function minutes(name: string, fallback: number): number {
+  const v = process.env[name];
+  if (!v) return fallback * 60_000;
+  const n = Number(v);
+  if (!(n > 0)) throw new Error(`${name} must be a positive number of minutes`);
+  return Math.round(n * 60_000);
 }
 
 function required(name: string): string {
@@ -59,5 +78,11 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     timeZone: process.env.SHUVI_TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
     ...(process.env.SHUVI_CLAUDE_CONFIG_DIR ? { claudeConfigDir: process.env.SHUVI_CLAUDE_CONFIG_DIR } : {}),
     ...(process.env.SHUVI_TELEGRAM_API_ROOT ? { telegramApiRoot: process.env.SHUVI_TELEGRAM_API_ROOT } : {}),
+    ...(process.env.SHUVI_CONTROL_BOT_TOKEN ? { controlBotToken: process.env.SHUVI_CONTROL_BOT_TOKEN } : {}),
+    ...(process.env.SHUVI_CONTROL_API_ROOT || process.env.SHUVI_TELEGRAM_API_ROOT
+      ? { controlApiRoot: (process.env.SHUVI_CONTROL_API_ROOT || process.env.SHUVI_TELEGRAM_API_ROOT)! }
+      : {}),
+    turnMaxMs: minutes("SHUVI_TURN_MAX_MINUTES", 15),
+    outboundAlertMs: minutes("SHUVI_ALERT_OUTBOUND_MINUTES", 10),
   };
 }

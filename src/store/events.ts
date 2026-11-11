@@ -66,6 +66,18 @@ export interface BotMessagePayload {
   sentParts?: number[];
 }
 
+/** The owner answered an approval card (src/control/approvals.ts) that was asked to wake this chat. */
+export interface ApprovalPayload {
+  from: Speaker;
+  approvalId: number;
+  /** The approval's kind (who asked) and title, as put to the owner. */
+  kind: string;
+  title: string;
+  /** The chosen option's id and label, or null when the card expired unanswered. */
+  answer: string | null;
+  label: string | null;
+}
+
 export interface BotReactionPayload {
   targetSeq: number;
   emoji: string;
@@ -186,6 +198,17 @@ export function pendingCommands(db: Db): ChatEvent[] {
 
 export function markCommandDone(db: Db, seq: number, note: string): void {
   db.update(chatEvents).set({ status: "done", note }).where(eq(chatEvents.seq, seq)).run();
+}
+
+/**
+ * Record that an approval was answered (or expired) in the chat that asked, to wake it: an `approval`
+ * event is a trigger. Keyed on the approval, so it is recorded once.
+ */
+export function recordApprovalEvent(db: Db, chatId: number, payload: ApprovalPayload): void {
+  db.insert(chatEvents)
+    .values({ chatId, kind: "approval", payload: payload as unknown as Record<string, unknown>, idemKey: `approval:${payload.approvalId}` })
+    .onConflictDoNothing()
+    .run();
 }
 
 // ---- outbound ---------------------------------------------------------------------------------------
