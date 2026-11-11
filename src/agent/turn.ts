@@ -1,8 +1,23 @@
 import type { BackendAdapter, Prompt, ToolBoundary } from "agent-runtime";
-import { capabilityHolds, capabilityPerception, capabilityTools, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
+import { capabilityHolds, capabilityOwnerOnly, capabilityPerception, capabilityTools, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
 import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
-import { enqueueOutbound, getChat, recentHistory, resetConversation, triggersAfter, type Chat, type ChatEvent, type MessagePayload } from "../store/events.ts";
+import {
+  enqueueOutbound,
+  getChat,
+  recentHistory,
+  resetConversation,
+  triggersAfter,
+  type ApprovalPayload,
+  type Chat,
+  type ChatEvent,
+  type ExternalPayload,
+  type JobDonePayload,
+  type MessagePayload,
+  type ScheduledPayload,
+} from "../store/events.ts";
+import { getJob } from "../store/jobs.ts";
+import { getSchedule } from "../store/schedules.ts";
 import { chatLabel, extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, type Perceive } from "./render.ts";
@@ -65,6 +80,8 @@ export interface TurnDeps {
   home: string;
   timeZone: string;
   ownerName?: string;
+  /** The owner's Telegram user id: a turn whose input holds their message is owner-triggered. */
+  ownerId?: number;
   /** The language the owner speaks (`SHUVI_OWNER_LANGUAGE`), named in the system prompt. */
   ownerLanguage?: string;
   model?: string;
@@ -83,6 +100,8 @@ export interface TurnState {
   stopping: boolean;
   /** Next message number within the turn (the `n` of the idempotency key). */
   n: number;
+  /** The cursor the turn started from: what it has been shown is (fromSeq, toSeq]. */
+  fromSeq: number;
   /** The last inbound seq the model has been shown. */
   toSeq: number;
 }
@@ -107,12 +126,70 @@ export function untilHeld(events: ChatEvent[], capabilities: readonly EnabledCap
   return i < 0 ? events : events.slice(0, i);
 }
 
-/** The boundary around every tool call of the turn: refuse after `pass`, append what arrived meanwhile. */
-export function turnBoundary(db: Db, s: TurnState, timeZone: string, capabilities: readonly EnabledCapability[] = []): ToolBoundary {
+/** Who may make owner-only calls in this turn: the owner's id, and the tools that need them. */
+export interface TurnAuthority {
+  ownerId?: number;
+  ownerOnly: ReadonlySet<string>;
+}
+
+/**
+ * May this turn act for the owner NOW? Decided at each owner-only call, over everything the turn has been
+ * shown so far, (fromSeq, toSeq], the initial input and every mid-turn append alike, because authority
+ * follows the sender (design §8) and a turn's senders can change while it runs:
+ *
+ *   - a `message` must be from the owner's user id: anyone else's line in the turn blocks the call, even
+ *     when the owner wrote too (what a stranger wrote may be what the model is acting on);
+ *   - a `scheduled` / `job_done` counts as the owner's only when its schedule or job was created by a call
+ *     the owner authorised (`owner_authorised` on its row); otherwise it blocks like a stranger's line;
+ *   - an `external` event blocks like a stranger's line: text that arrived from outside never rides along
+ *     with the owner's authority (the owner can ask again in a turn of their own);
+ *   - an answered `approval` counts as the owner's: only the owner can press its button in the control bot.
+ *     One that expired unanswered is nobody's: it neither blocks nor counts;
+ *   - and at least one event must be the owner's.
+ *
+ * Returns null when the call may run, or why it may not, in words the model can pass on.
+ */
+export function ownerAuthority(db: Db, chatId: number, fromSeq: number, toSeq: number, ownerId: number | undefined): string | null {
+  let owners = 0;
+  for (const e of triggersAfter(db, chatId, fromSeq)) {
+    if (e.seq > toSeq) break;
+    if (e.kind === "message") {
+      const from = (e.payload as unknown as MessagePayload).from;
+      if (ownerId === undefined || from.id !== ownerId) return `#${e.seq} in this turn is from ${from.name}, not the owner`;
+      owners++;
+    } else if (e.kind === "scheduled" || e.kind === "job_done") {
+      const authorised =
+        e.kind === "scheduled" ? getSchedule(db, (e.payload as unknown as ScheduledPayload).scheduleId)?.ownerAuthorised : getJob(db, (e.payload as unknown as JobDonePayload).jobId)?.ownerAuthorised;
+      if (!authorised) return `#${e.seq} in this turn is a ${e.kind === "scheduled" ? "schedule" : "job"} the owner did not set up`;
+      owners++;
+    } else if (e.kind === "approval") {
+      if ((e.payload as unknown as ApprovalPayload).answer !== null) owners++;
+    } else if (e.kind === "external") {
+      return `#${e.seq} in this turn came from outside (inbound: ${(e.payload as unknown as ExternalPayload).source}), not from the owner`;
+    }
+  }
+  return owners ? null : "nothing in this turn is from the owner";
+}
+
+/**
+ * The boundary around every tool call of the turn: refuse after `pass`, refuse an owner-only call the
+ * turn has no authority for (`ownerAuthority`), append what arrived meanwhile.
+ */
+export function turnBoundary(
+  db: Db,
+  s: TurnState,
+  timeZone: string,
+  capabilities: readonly EnabledCapability[] = [],
+  authority: TurnAuthority = { ownerOnly: capabilityOwnerOnly(capabilities) },
+): ToolBoundary {
   const perceive: Perceive = (e) => capabilityPerception(capabilities, e);
   return {
     refuse(call) {
       if (s.passed && call.name !== "pass") return "This turn has already passed. End it now; call no more tools.";
+      if (authority.ownerOnly.has(call.name)) {
+        const why = ownerAuthority(db, s.chat.id, s.fromSeq, s.toSeq, authority.ownerId);
+        if (why) return `Refused: \`${call.name}\` acts for the owner, and only the owner may ask for it; ${why}. Nothing was done. If someone asked for this, tell them only the owner can.`;
+      }
       return null;
     },
     append() {
@@ -148,7 +225,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   // Everything said before the first message being answered, the assistant's own replies included
   // (those come after the cursor, so the cursor is not the bound).
   const history = chat.backendSessionId ? [] : recentHistory(db, chat.id, input[0]!.seq - 1, HISTORY_ON_NEW);
-  const s: TurnState = { chat, turnId, passed: false, stopping: deps.signal?.aborted ?? false, n: 0, toSeq: input.at(-1)!.seq };
+  const s: TurnState = { chat, turnId, passed: false, stopping: deps.signal?.aborted ?? false, n: 0, fromSeq: turn.fromSeq, toSeq: input.at(-1)!.seq };
   deps.signal?.addEventListener("abort", () => (s.stopping = true), { once: true });
   extendTurn(db, turnId, s.toSeq);
 
@@ -158,8 +235,11 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     buf = "";
   };
 
-  const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone, deps.capabilities));
-  const owner: OwnerInfo = { name: deps.ownerName ?? (input[0]!.payload as unknown as MessagePayload).from.name, ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
+  const authority: TurnAuthority = { ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}), ownerOnly: capabilityOwnerOnly(deps.capabilities) };
+  const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone, deps.capabilities, authority));
+  const firstOwnerMessage = input.find((e) => e.kind === "message" && (deps.ownerId === undefined || (e.payload as unknown as MessagePayload).from.id === deps.ownerId));
+  const ownerName = deps.ownerName ?? (firstOwnerMessage ? (firstOwnerMessage.payload as unknown as MessagePayload).from.name : undefined);
+  const owner: OwnerInfo = { ...(ownerName ? { name: ownerName } : {}), ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
   const tools = capabilityTools(deps.capabilities, { db, chat, turnId, timeZone: deps.timeZone, owner, state: s });
   const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive) : renderTurnInput(input, deps.timeZone, perceive);
   let lastThinking = false;

@@ -264,8 +264,9 @@ chat's conversation with its context. The assistant may `pass()` each time. Ther
 patrol (heartbeat) and no unprompted speaking: every wake-up has a stated purpose.
 
 An **inbound source** carries external events the assistant did not start (a monitoring alert, say):
-`POST /inbound/<source>`. Each source's token, and the chat it lands in, are declared in policy.yaml. It
-becomes an `external` event in that chat; whether it triggers a turn is up to the trigger.
+`POST /inbound/<source>`. The chat it lands in, and whether it triggers a turn, are declared in
+`home/inbound.yaml`; its token is in the server's environment (`SHUVI_INBOUND_<NAME>_TOKEN`), never in
+`home/`, which the assistant can read. It becomes an `external` event in that chat.
 
 ## 11. Media
 

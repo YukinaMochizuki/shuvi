@@ -2,6 +2,7 @@ import type { ToolBundle, ToolContent } from "agent-runtime";
 import type { TurnState } from "../agent/turn.ts";
 import type { Db } from "../store/db.ts";
 import type { Chat, ChatEvent } from "../store/events.ts";
+import type { JobKind } from "../store/jobs.ts";
 import type { TelegramFiles } from "../telegram/files.ts";
 
 /**
@@ -19,6 +20,11 @@ import type { TelegramFiles } from "../telegram/files.ts";
  *     read-only file downloader (`ServerContext.files`).
  *   - Its tools run inside the turn's boundary (agent/turn.ts): after `pass` they are refused, and what
  *     arrives while they run is appended to their result. A capability does not get around that.
+ *   - A tool that acts FOR THE OWNER (sets a schedule, asks workstream, edits memory) is named in
+ *     `ownerOnly`. It is always offered (the tool list and the prompt stay the same turn to turn, so the
+ *     cached prefix holds), and the boundary decides at CALL time whether this call may run: only if
+ *     everyone the turn has been shown so far is the owner (agent/turn.ts `ownerAuthority`). A capability
+ *     does not check authority itself, and does not hide its tools to get the same effect.
  *
  * The turn context carries the chat, so a later per-chat filter (policy.yaml, design §8) can sit in front
  * of `tools` and `section` without changing this interface.
@@ -58,6 +64,8 @@ export interface ServerContext {
   files: TelegramFiles;
   /** Aborted when the server is shutting down. */
   signal: AbortSignal;
+  /** Every enabled capability's job kinds (`jobKinds`), filled by `capabilityLoops`. */
+  jobKinds?: readonly JobKind[];
 }
 
 /**
@@ -92,6 +100,13 @@ export interface Capability<C = unknown> {
   holds?(event: ChatEvent, now: number, config: C): boolean;
   /** What the model is shown of `event` beyond its text line (an image), in a turn's input or an append. */
   perceive?(event: ChatEvent, config: C): ToolContent[];
+  /** The kinds of job it starts (store/jobs.ts): how the jobs watcher polls them. */
+  jobKinds?(config: C): JobKind[];
+  /**
+   * The names of its tools that act for the owner. The turn's boundary refuses a call to one unless the
+   * owner is the only one the turn has heard from (agent/turn.ts `ownerAuthority`).
+   */
+  ownerOnly?: readonly string[];
 }
 
 /** A capability that is on in this process, with the configuration it read. */
@@ -110,8 +125,38 @@ export function enableCapabilities(registry: readonly Capability<any>[], env: En
   return out;
 }
 
+/**
+ * The tools of every enabled capability. Bundles that share a `serverName` (shuvi's own tools are all
+ * `shuvi`, whichever capability brings them) are merged into one: the Claude driver keys its MCP servers
+ * by name, so a second `shuvi` bundle would replace the first. The order that results:
+ *   - servers in the order of their first appearance in the registry;
+ *   - within a server, tools in registry order (then in the order each capability lists them).
+ * So `[speech: shuvi, web: web, schedules: shuvi]` gives `shuvi: say … pass, schedule …`, then `web`.
+ *
+ * Two tools with the same name are refused here (a throw: it is a programming error, found by the first
+ * turn or test), whatever their servers: a tool's name is what `ownerOnly` and the model refer to it by.
+ */
 export function capabilityTools(enabled: readonly EnabledCapability[], ctx: TurnContext): ToolBundle[] {
-  return enabled.flatMap(({ capability, config }) => capability.tools?.(ctx, config) ?? []);
+  const out: ToolBundle[] = [];
+  const seen = new Map<string, string>();
+  for (const { capability, config } of enabled) {
+    for (const b of capability.tools?.(ctx, config) ?? []) {
+      for (const t of b.tools) {
+        const other = seen.get(t.name);
+        if (other) throw new Error(`tool "${t.name}" is given by both the ${other} and the ${capability.id} capabilities`);
+        seen.set(t.name, capability.id);
+      }
+      const same = out.findIndex((o) => o.serverName === b.serverName);
+      if (same < 0) out.push(b);
+      else out[same] = { ...out[same]!, tools: [...out[same]!.tools, ...b.tools] };
+    }
+  }
+  return out;
+}
+
+/** The names of every enabled capability's owner-only tools. */
+export function capabilityOwnerOnly(enabled: readonly EnabledCapability[]): Set<string> {
+  return new Set(enabled.flatMap(({ capability }) => capability.ownerOnly ?? []));
 }
 
 export function capabilitySections(enabled: readonly EnabledCapability[], ctx: PromptContext): string[] {
@@ -128,8 +173,14 @@ export function capabilityPerception(enabled: readonly EnabledCapability[], even
   return enabled.flatMap(({ capability, config }) => capability.perceive?.(event, config) ?? []);
 }
 
+export function capabilityJobKinds(enabled: readonly EnabledCapability[]): JobKind[] {
+  return enabled.flatMap(({ capability, config }) => capability.jobKinds?.(config) ?? []);
+}
+
+/** Every enabled capability's loops, each handed the job kinds of all of them. */
 export function capabilityLoops(enabled: readonly EnabledCapability[], ctx: ServerContext): ServerLoop[] {
-  return enabled.flatMap(({ capability, config }) => capability.loops?.(ctx, config) ?? []);
+  const full: ServerContext = { ...ctx, jobKinds: ctx.jobKinds ?? capabilityJobKinds(enabled) };
+  return enabled.flatMap(({ capability, config }) => capability.loops?.(full, config) ?? []);
 }
 
 /** Define a capability with its config type inferred. */
