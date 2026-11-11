@@ -10,7 +10,7 @@
  *
  * Needs SHUVI_BOT_TOKEN (to call getStickerSet) and reads SHUVI_DATA_DIR / SHUVI_TELEGRAM_API_ROOT like the
  * server. A pack that already has a file is left alone. Each new file is its own commit in home/, through
- * the same helper as memory's `edit_home` (memory/home.ts `commitHomeEdit`). Nothing is written to the
+ * the same helper as memory's `write_home` (memory/home.ts `commitHomeEdit`). Nothing is written to the
  * database: the running server indexes the files and fetches each pack's Telegram-side facts on its own.
  */
 import { existsSync } from "node:fs";

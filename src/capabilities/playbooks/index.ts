@@ -9,7 +9,7 @@ import { defineCapability } from "../types.ts";
  * Playbooks: `read_playbook`, which reads one of `home/playbooks/<name>.md` in full. The index of them is
  * not this capability's section: it is a fixed slot of the system prompt (agent/prompt.ts, rendered from
  * agent/playbooks.ts) after every capability section, shown while this capability is on. Playbooks are
- * written with memory's `edit_home`.
+ * written with memory's `write_home` and `edit_home`.
  *
  *   SHUVI_PLAYBOOKS   "off" disables this capability, and with it the index (default on)
  */

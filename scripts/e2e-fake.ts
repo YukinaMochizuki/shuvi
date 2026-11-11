@@ -90,7 +90,7 @@ const anthropic = Bun.serve({
     if (latest.includes("toolu_mem")) return stream(`msg_${modelRequests}`, [{ type: "text", text: "Noted: green tea." }], "end_turn");
     if (latest.includes("remember I like green tea")) {
       memorySystems.edit = system;
-      return stream(`msg_${modelRequests}`, [{ type: "tool_use", id: "toolu_mem", name: "mcp__shuvi__edit_home", input: { path: "memory/private.md", content: "- Likes green tea", why: "The owner told me what they drink" } }], "tool_use");
+      return stream(`msg_${modelRequests}`, [{ type: "tool_use", id: "toolu_mem", name: "mcp__shuvi__write_home", input: { path: "memory/private.md", content: "- Likes green tea", why: "The owner told me what they drink" } }], "tool_use");
     }
     const lastMsg = body.messages?.at(-1);
     const lastBlocks = Array.isArray(lastMsg?.content) ? lastMsg!.content : [];
