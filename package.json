@@ -1,0 +1,24 @@
+{
+  "name": "shuvi",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "bun run src/server/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "db:generate": "drizzle-kit generate"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "drizzle-kit": "^0.31.10",
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.280",
+    "agent-runtime": "github:YukinaMochizuki/agent-runtime#0b848d7c494bb2fa669a1c570eee3b6348ac1677",
+    "drizzle-orm": "^0.45.2",
+    "grammy": "^1.46.0",
+    "zod": "^4.4.3"
+  }
+}

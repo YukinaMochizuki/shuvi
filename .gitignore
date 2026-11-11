@@ -1,0 +1,6 @@
+node_modules/
+# Runtime data: the SQLite file and home/ (persona, memory, policy). Private; never committed.
+data/
+*.db
+*.db-wal
+*.db-shm

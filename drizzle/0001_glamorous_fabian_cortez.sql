@@ -1,0 +1,1 @@
+ALTER TABLE `turns` ADD `stop_seq` integer;
