@@ -5,8 +5,8 @@ import { promptTexts, turns, turnSteps, turnTranscripts, type TranscriptPart } f
 
 /**
  * Turn transcripts in the store (schema.ts `prompt_texts`, `turn_transcripts`, `turn_steps`): written by
- * the runner child through agent/transcript.ts, read by the console (src/capabilities/console/), pruned by
- * the console capability's loop.
+ * the runner child through agent/transcript.ts, read by the console (src/console/), pruned by
+ * the server's transcript loop (server/main.ts).
  *
  * Nothing here decides anything about a turn: a transcript is a record for people. The writers are called
  * best effort (a throw is caught and logged by the recorder), and nothing in the turn waits on them beyond
