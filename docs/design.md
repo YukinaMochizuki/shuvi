@@ -329,13 +329,50 @@ stickers:
   The framework acknowledges a command only by reacting to it; it sends no message.
 - **CLI**: deep debugging on the machine (reading `chat_events`, turns, jobs).
 
-## 14. Deployment assumptions
+## 14. Tools, and where they live
+
+Most tools are shuvi's own, because they act on its concepts: `say`, `react`, `pass`, stickers, chat
+retrieval, policy. Tools that need no host state and that other hosts want too live in agent-runtime's
+shared layer (`agent-runtime/tools/*`) and are configured by shuvi, never copied: today that is the web
+tools (`web_search`, `web_fetch`; `web_scrape` once a Crawl4AI instance is available). shuvi groups its
+tools into capability groups (§6); `web` is one.
+
+## 15. Each chat's computer (planned)
+
+Work that needs a shell (processing a file, running a CLI, a long job) happens on a computer that
+belongs to the chat:
+
+- **The home directory is the chat's persistent volume.** User-level installs, configs and caches
+  survive; files received in the chat land in `~/inbox/`. The volume is created on first use and capped.
+- **The computer runs only when needed.** The first `exec` starts a sandbox container with the volume as
+  `$HOME`; it stops when idle. It holds no secrets.
+- **What lives outside home is declared, not mutated.** `~/.computer.yaml` lists apt and pip packages
+  and a setup script; the framework builds the chat's image from the base image plus that file and
+  caches it. An ad-hoc `apt install` works for the moment and is gone on the next start unless declared.
+- **One computer, three ways to run**, following workstream's box tools: `exec(cmd)` (synchronous,
+  time-limited), `exec(cmd, background: true)` (asynchronous; the result returns to the chat as an
+  event), and `boost: { cpu, memory }` (on a larger short-lived copy with the same home). Framework media
+  tools (keyframes, transcription) are prepared `exec` calls.
+- **Visibility follows §6**: the owner's DM may read other chats' homes; a group sees only its own. Only
+  a turn the owner triggered gets `exec`.
+
+**Secrets** are named profiles (e.g. `modal`: a set of env vars) kept in a host-side store outside
+`home/` and git; policy names them, never their values.
+
+- A chat's computer gets a profile only when the assistant asks (`request_secret`) and the owner
+  approves, for 4 h / 1 d / 3 d; the owner can revoke it. Groups have none by default.
+- A granted profile is injected as env into the one `exec` process that runs, never written to `$HOME`.
+- Known secret values are replaced with `[REDACTED:<profile>]` in any output before the model or the
+  chat sees it.
+- Only a turn the owner triggered can use one.
+
+## 16. Deployment assumptions
 
 - The main backend is agent-runtime's Claude driver. Each turn starts a Claude Code subprocess, so the
   machine needs at least 4 GB of memory for 2–3 turns at once.
 - Heavy computation runs remotely.
 
-## 15. Open questions
+## 17. Open questions
 
 - Which machine it runs on.
 - Whether agent-runtime's Claude driver can carry images in a user message; if not, the runtime needs it

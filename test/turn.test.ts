@@ -11,7 +11,7 @@ import { memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./hel
 
 const emptyHome = mkdtempSync(join(tmpdir(), "shuvi-home-"));
 
-async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: AbortSignal } = {}) {
+async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: AbortSignal; web?: { tavilyApiKey?: string } } = {}) {
   const turn = claimTurn(db, ownerChatId(db))!;
   let adapter!: ScriptedAdapter;
   const outcome = await runTurn({
@@ -21,6 +21,7 @@ async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: 
     timeZone: "UTC",
     makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)),
     ...(opts.signal ? { signal: opts.signal } : {}),
+    ...(opts.web ? { web: opts.web } : {}),
   });
   return { outcome, adapter, turn: getTurn(db, turn.id)! };
 }
@@ -91,6 +92,24 @@ describe("runTurn: how output becomes messages", () => {
     const { adapter } = await turnWith(db, [{ tool: "react", args: { seq, emoji: "🦖" } }, { tool: "react", args: { seq: 9999, emoji: "👍" } }]);
     expect(adapter.toolResults.map((r) => r.result.isError)).toEqual([true, true]);
     expect(pendingOutbound(db)).toEqual([]);
+  });
+});
+
+describe("capabilities", () => {
+  test("with the web capability the turn gets the shared web tools and is told when to use them", async () => {
+    const db = memDb();
+    ownerSays(db, "what happened today?");
+    const { adapter } = await turnWith(db, [{ token: "ok" }], { web: { tavilyApiKey: "tvly-test" } });
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "web_search", "web_fetch"]);
+    expect(adapter.calls[0]!.systemPrompt).toContain("## Looking things up");
+  });
+
+  test("without it there is no web tool, and the prompt does not mention one", async () => {
+    const db = memDb();
+    ownerSays(db, "hi");
+    const { adapter } = await turnWith(db, [{ token: "ok" }]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass"]);
+    expect(adapter.calls[0]!.systemPrompt ?? "").not.toContain("Looking things up");
   });
 });
 

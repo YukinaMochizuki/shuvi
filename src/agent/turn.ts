@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { err, ok, type BackendAdapter, type ToolBoundary, type ToolBundle, type ToolDef } from "agent-runtime";
+import { webTools, type WebToolsConfig } from "agent-runtime/tools/web";
 import type { Db } from "../store/db.ts";
 import { enqueueOutbound, getChat, getEvent, lastMessage, recentHistory, triggersAfter, type Chat, type MessagePayload } from "../store/events.ts";
 import { extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
@@ -39,6 +40,8 @@ export interface TurnDeps {
   /** The language the owner speaks (`SHUVI_OWNER_LANGUAGE`), named in the system prompt. */
   ownerLanguage?: string;
   model?: string;
+  /** The web capability (agent-runtime's shared web tools). Absent: the turn has no web access. */
+  web?: WebToolsConfig;
   /** The driver for this turn, built around the boundary the turn supplies. */
   makeAdapter: (boundary: ToolBoundary) => BackendAdapter;
   signal?: AbortSignal;
@@ -161,7 +164,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   };
 
   const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone));
-  const tools = [turnTools(db, s)];
+  const tools = [turnTools(db, s), ...(deps.web ? [webTools(deps.web)] : [])];
   const prompt = history.length ? renderWithHistory(history, input, deps.timeZone) : renderTurnInput(input, deps.timeZone);
   let lastThinking = false;
   const opts = {
@@ -189,7 +192,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
           { backendSessionId: chat.backendSessionId, prompt, tools, ...(deps.model ? { model: deps.model } : {}), ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
           opts,
         )
-      : await adapter.run({ prompt, tools, systemPrompt: buildSystemPrompt(deps.home, chat, { name: deps.ownerName ?? (input[0]!.payload as unknown as MessagePayload).from.name, ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) }), ...(deps.model ? { model: deps.model } : {}) }, opts);
+      : await adapter.run({ prompt, tools, systemPrompt: buildSystemPrompt(deps.home, chat, { name: deps.ownerName ?? (input[0]!.payload as unknown as MessagePayload).from.name, ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) }, { web: !!deps.web }), ...(deps.model ? { model: deps.model } : {}) }, opts);
     flush();
     const u = result.usage;
     finishTurn(db, turnId, { status: "done", usage: u, contextTokens: u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens + u.outputTokens });
