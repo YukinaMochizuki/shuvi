@@ -28,7 +28,8 @@ const fixture = (name: string) => readFileSync(join(import.meta.dir, "fixtures",
 
 describe("the owner's DM system prompt is byte-identical to before the capability seam", () => {
   // test/fixtures/owner-dm-prompt.*.txt were written by the pre-seam buildSystemPrompt for this home/ and
-  // config. They must not be regenerated to make this test pass: a difference is a behaviour change.
+  // config, and since changed only on purpose (the speech section's wording). They must not be regenerated
+  // to make this test pass: a difference is a behaviour change.
   // They pin speech and web; capabilities added since (schedules, memory, …) are turned off here by their own
   // variables, and their sections are tested where they are. Groups stays on: it adds no section to the DM.
   // The prompt is built with the default policy (no policy.yaml), as a bare call does.
