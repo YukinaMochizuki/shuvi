@@ -1,4 +1,7 @@
 import { jobs } from "./jobs/index.ts";
+import { memory } from "./memory/index.ts";
+import { playbooks } from "./playbooks/index.ts";
+import { retrieval } from "./retrieval/index.ts";
 import { schedules } from "./schedules/index.ts";
 import { speech } from "./speech/index.ts";
 import { enableCapabilities, type Capability, type EnabledCapability, type Env } from "./types.ts";
@@ -22,6 +25,9 @@ export const CAPABILITIES: readonly Capability<any>[] = [
   jobs,
   schedules,
   workstream,
+  memory,
+  retrieval,
+  playbooks,
 ];
 
 /** The capabilities enabled in this process, in registry order. */

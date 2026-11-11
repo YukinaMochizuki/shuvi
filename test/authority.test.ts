@@ -26,7 +26,7 @@ const strangerSays = (db: Db, text: string) => ownerSays(db, text, { from: STRAN
 async function turnWith(db: Db, script: Step[]) {
   const turn = claimTurn(db, ownerChatId(db))!;
   let adapter!: ScriptedAdapter;
-  await runTurn({ db, turnId: turn.id, home, timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities({ SHUVI_WEB: "off" }), makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)) });
+  await runTurn({ db, turnId: turn.id, home, timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }), makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)) });
   return adapter;
 }
 const text = (a: ScriptedAdapter, i: number) => a.toolResults[i]!.result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
@@ -213,7 +213,7 @@ describe("the tool merge", () => {
       enable: () => true,
       tools: () => [{ serverName: "other", tools: [{ name: "say", description: "", inputSchema: {}, handler: async () => ok("") }] as ToolDef[] }],
     });
-    const ctx = { db, chat: getChat(db, ownerChatId(db))!, turnId: 1, timeZone: "UTC", owner: {}, state: {} as never };
+    const ctx = { db, home: "", chat: getChat(db, ownerChatId(db))!, turnId: 1, timeZone: "UTC", owner: {}, state: {} as never };
     expect(() => capabilityTools(enableCapabilities([...CAPABILITIES, dup], {}), ctx)).toThrow('tool "say" is given by both the speech and the dup capabilities');
   });
 });

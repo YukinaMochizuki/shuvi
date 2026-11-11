@@ -10,7 +10,8 @@
  * a terminal or systemd does it, by its whole process group, so the check also proves the child is
  * detached from it. Then `/new` and `/stop` are acknowledged with a reaction and nothing else, and a
  * stopped turn says nothing more. Last, a photo: the server downloads it from the fake Bot API, and the
- * model receives it as an image block (on a resumed conversation).
+ * model receives it as an image block (on a resumed conversation). Then an edit to home/ (a git commit
+ * by shuvi) is in the system prompt of the very next turn of the same conversation, without `/new`.
  *
  *   bun scripts/e2e-fake.ts
  */
@@ -63,16 +64,30 @@ function stream(id: string, blocks: Array<{ type: "text"; text: string } | { typ
 let slowStepStarted = false;
 let longStepStarted = false;
 let modelRequests = 0;
+/** The system prompt of each request of the memory section (4), by step. */
+const memorySystems: Record<string, string> = {};
 const anthropic = Bun.serve({
   port: 0,
   idleTimeout: 60,
   async fetch(req) {
     const url = new URL(req.url);
-    const body = req.method === "POST" ? ((await req.json().catch(() => ({}))) as { messages?: Msg[]; tools?: Array<{ name: string }> }) : {};
+    const body = req.method === "POST" ? ((await req.json().catch(() => ({}))) as { system?: unknown; messages?: Msg[]; tools?: Array<{ name: string }> }) : {};
     if (url.pathname.endsWith("/count_tokens")) return Response.json({ input_tokens: 10 });
     if (!url.pathname.endsWith("/v1/messages")) return Response.json({});
     if (!body.tools?.some((t) => t.name === "mcp__shuvi__say")) return stream("msg_side", [{ type: "text", text: "ok" }], "end_turn");
     modelRequests++;
+    // Section 4 (memory). Matched on the LAST message, since the conversation's history holds section 3's.
+    const latest = JSON.stringify(body.messages?.at(-1) ?? "");
+    const system = JSON.stringify(body.system ?? "");
+    if (latest.includes("what do I drink")) {
+      memorySystems.ask = system;
+      return stream(`msg_${modelRequests}`, [{ type: "text", text: system.includes("Likes green tea") ? "Green tea." : "No idea." }], "end_turn");
+    }
+    if (latest.includes("toolu_mem")) return stream(`msg_${modelRequests}`, [{ type: "text", text: "Noted: green tea." }], "end_turn");
+    if (latest.includes("remember I like green tea")) {
+      memorySystems.edit = system;
+      return stream(`msg_${modelRequests}`, [{ type: "tool_use", id: "toolu_mem", name: "mcp__shuvi__edit_home", input: { path: "memory/private.md", content: "- Likes green tea", why: "The owner told me what they drink" } }], "tool_use");
+    }
     const lastMsg = body.messages?.at(-1);
     const lastBlocks = Array.isArray(lastMsg?.content) ? lastMsg!.content : [];
     const image = lastBlocks.find((b) => b.type === "image" && b.source?.type === "base64");
@@ -193,6 +208,24 @@ check(!!seenImage?.withText.includes("[photo] what colour is this"), `with its l
 check((seenImage?.messages ?? 0) > 1, `in a resumed conversation: the new user message follows ${(seenImage?.messages ?? 1) - 1} earlier one(s)`);
 const photoEvent = db.$client.query("select payload from chat_events where kind = 'message' order by seq desc limit 1").get() as { payload: string };
 check(JSON.parse(photoEvent.payload).media?.state === "ready", "the message event records its media as downloaded");
+
+// ---- 5. an edit to home/ is seen by the next turn of the same conversation ---------------------------
+tg.updates.push(dmUpdate(6, "remember I like green tea"));
+await until("the edit to be acknowledged", () => texts().includes("Noted: green tea."));
+const home = join(dataDir, "home");
+const gitLog = Bun.spawnSync(["git", "-C", home, "log", "--format=%an|%s", "--", "memory/private.md"]).stdout.toString().trim();
+check(gitLog === "shuvi|The owner told me what they drink", `the edit is a commit in home/ by shuvi, with its why (${gitLog})`);
+check(!memorySystems.edit!.includes("Likes green tea"), "the turn that made the edit started without it");
+await until("the edit turn to close", () => (db.$client.query("select status from turns order by id desc limit 1").get() as { status: string }).status !== "running", 15_000);
+const session = (db.$client.query("select backend_session_id from chats").get() as { backend_session_id: string | null }).backend_session_id;
+check(!!session, "the conversation goes on (no /new)");
+
+const before = texts().length;
+tg.updates.push(dmUpdate(7, "what do I drink?"));
+await until("the answer", () => texts().length > before);
+check(texts().at(-1) === "Green tea.", `the next turn's system prompt has the edit (${texts().at(-1)})`);
+const resumed = (db.$client.query("select backend_session_id from chats").get() as { backend_session_id: string }).backend_session_id;
+check(resumed === session, "and it was the same conversation, resumed");
 
 log("PASS");
 cleanup();

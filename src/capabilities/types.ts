@@ -33,6 +33,8 @@ import type { TelegramFiles } from "../telegram/files.ts";
 /** What a turn hands a capability's tools. */
 export interface TurnContext {
   db: Db;
+  /** The assistant's private data directory (docs/design.md §3). */
+  home: string;
   chat: Chat;
   turnId: number;
   timeZone: string;

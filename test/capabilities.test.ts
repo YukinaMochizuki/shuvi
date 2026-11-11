@@ -29,13 +29,13 @@ const fixture = (name: string) => readFileSync(join(import.meta.dir, "fixtures",
 describe("the owner's DM system prompt is byte-identical to before the capability seam", () => {
   // test/fixtures/owner-dm-prompt.*.txt were written by the pre-seam buildSystemPrompt for this home/ and
   // config. They must not be regenerated to make this test pass: a difference is a behaviour change.
-  // They pin speech and web; capabilities added since (schedules, …) are turned off here by their own
+  // They pin speech and web; capabilities added since (schedules, memory, …) are turned off here by their own
   // variables, and their sections are tested where they are.
   test("web on, language set", () => {
     const db = memDb();
     ownerSays(db, "hi");
     const chat = getChat(db, ownerChatId(db))!;
-    const caps = enabledCapabilities({ SHUVI_TAVILY_API_KEY: "tvly-test", SHUVI_SCHEDULES: "off" });
+    const caps = enabledCapabilities({ SHUVI_TAVILY_API_KEY: "tvly-test", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" });
     expect(buildSystemPrompt(fixtureHome(), chat, { name: "Owner", language: "Traditional Chinese (Taiwan)" }, caps)).toBe(fixture("owner-dm-prompt.web.txt"));
   });
 
@@ -43,16 +43,16 @@ describe("the owner's DM system prompt is byte-identical to before the capabilit
     const db = memDb();
     ownerSays(db, "hi");
     const chat = getChat(db, ownerChatId(db))!;
-    const caps = enabledCapabilities({ SHUVI_WEB: "off", SHUVI_SCHEDULES: "off" });
+    const caps = enabledCapabilities({ SHUVI_WEB: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" });
     expect(buildSystemPrompt(fixtureHome(), chat, { name: "Owner" }, caps)).toBe(fixture("owner-dm-prompt.no-web.txt"));
   });
 });
 
 describe("the registry", () => {
   test("speech is first and always on; web, vision and schedules follow their variables", () => {
-    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream"]);
-    expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules"]);
-    expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_SCHEDULES: "off" }).map((e) => e.capability.id)).toEqual(["speech", "jobs"]);
+    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks"]);
+    expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks"]);
+    expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }).map((e) => e.capability.id)).toEqual(["speech", "jobs"]);
   });
 
   test("workstream is on only with its URL and token", () => {
@@ -75,8 +75,8 @@ describe("the registry", () => {
       capabilities: enabledCapabilities({}),
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "pass" }])),
     });
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "web_fetch"]);
-    const names = capabilityTools(enabledCapabilities({}), { db, chat: getChat(db, ownerChatId(db))!, turnId: turn.id, timeZone: "UTC", owner: {}, state: {} as never }).map((b) => b.serverName);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "web_fetch"]);
+    const names = capabilityTools(enabledCapabilities({}), { db, home: fixtureHome(), chat: getChat(db, ownerChatId(db))!, turnId: turn.id, timeZone: "UTC", owner: {}, state: {} as never }).map((b) => b.serverName);
     expect(names).toEqual(["shuvi", "web"]);
   });
 
@@ -108,7 +108,7 @@ describe("a capability added to the registry", () => {
   const registry = [...CAPABILITIES, probe];
 
   test("is off unless its own variable enables it", () => {
-    expect(enableCapabilities(registry, {}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules"]);
+    expect(enableCapabilities(registry, {}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks"]);
   });
 
   test("its tool reaches the turn after the others, and its section reaches the prompt in registry order", async () => {
@@ -125,7 +125,7 @@ describe("a capability added to the registry", () => {
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "probe" }, { token: "done" }])),
     });
     expect(outcome).toBe("done");
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "web_fetch", "probe"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "web_fetch", "probe"]);
     const result = adapter.toolResults[0]!.result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
     expect(result).toContain(`hello from turn ${turn.id}`);
 

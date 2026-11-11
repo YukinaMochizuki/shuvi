@@ -109,7 +109,7 @@ describe("POST /inbound/<source>", () => {
       home: HOME,
       timeZone: "UTC",
       ownerId: OWNER,
-      capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_WORKSTREAM_MCP_URL: "http://ws/mcp", SHUVI_WORKSTREAM_MCP_TOKEN: "t" }),
+      capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_WORKSTREAM_MCP_URL: "http://ws/mcp", SHUVI_WORKSTREAM_MCP_TOKEN: "t" }),
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "ask_workstream", args: { product: "hangar", message: "x" } }, { tool: "pass" }])),
     });
     expect(adapter.calls[0]!.prompt).toContain("⚙ inbound: backup-log]\n  backup ok");
