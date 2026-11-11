@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
@@ -21,9 +21,18 @@ import { MachineExecRequestSchema, MachineExecResponseSchema } from "../src/capa
  *     error. Stopping a container kills every process it started, detached ones (setsid) included, found by
  *     a marker in their environment.
  *
+ * The container's own filesystem, outside its home, is two local directories per container: its ROOT DISK
+ * (`rootfs(name)`, kept across stop and start, emptied when an apply changes the image, as Hangar rebuilds
+ * it) and its /run (`runDir(name)`, a tmpfs in the guest: emptied at every start). An exec's arguments have
+ * `/home/shuvi`, `/var/lib/shuvi` and `/run/shuvi` rewritten into those directories, so the framework's
+ * scripts that name them work here; nothing else outside home is.
+ *
  * `failNext(method, code)` makes the next call of a method fail with a Connect error (e.g.
- * resource_exhausted). `shims` puts stand-in `ffmpeg` / `ffprobe` and a `faster_whisper` module on the
- * commands' PATH and PYTHONPATH, so the media tools' scripts run without the real tools.
+ * resource_exhausted). `shims` puts stand-in `ffmpeg` / `ffprobe` and `apt-get` on the commands' PATH, so
+ * the media tools' scripts and an apply of ~/.computer.yaml run without the real tools. The `apt-get` stand-in
+ * "downloads" a package (prints `Get: <pkg>`) only when its .deb is not in the archives directory it is given
+ * (`-o Dir::Cache::Archives=`), "installs" it into the root disk (`<rootfs>/installed/<pkg>`), and fails like
+ * apt for a package whose name starts with `fake-missing`.
  */
 
 const HOME_IN_CONTAINER = "/home/shuvi";
@@ -41,6 +50,8 @@ export interface ExecRecord {
   container: string;
   command: string[];
   env: Record<string, string>;
+  /** As the exec asked ("" is the image's user, "0" root). */
+  user: string;
 }
 
 export class FakeHangar {
@@ -124,6 +135,28 @@ export class FakeHangar {
     return dir;
   }
 
+  /** The local directory standing in for a container's root disk (only what the framework writes there). */
+  rootfs(container: string): string {
+    const dir = join(this.root, "roots", container);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  /** The local directory standing in for a container's /run. */
+  runDir(container: string): string {
+    const dir = join(this.root, "runs", container);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  /** An exec's argument with the container's paths outside home made local. */
+  private localPaths(container: string, arg: string): string {
+    return arg
+      .replaceAll(HOME_IN_CONTAINER, this.home(container))
+      .replaceAll("/var/lib/shuvi", join(this.rootfs(container), "var/lib/shuvi"))
+      .replaceAll("/run/shuvi", join(this.runDir(container), "shuvi"));
+  }
+
   failNext(method: string, code: string, message = `fake ${code}`): void {
     this.failures.set(method, [...(this.failures.get(method) ?? []), { code, message }]);
   }
@@ -182,6 +215,9 @@ export class FakeHangar {
       if (method === "ApplyContainer") {
         const stopping = o.spec.runState === "CONTAINER_RUN_STATE_STOPPED";
         if (stopping || changed) this.killAll(name);
+        // A new image is a new root disk; any change of spec is a new boot, with an empty /run.
+        if (prev && prev.spec.image !== o.spec.image) rmSync(this.rootfs(name), { recursive: true, force: true });
+        if (changed) rmSync(this.runDir(name), { recursive: true, force: true });
         const settle = () => {
           const cur = this.containers.get(name);
           if (!cur || cur.metadata.generation !== generation) return;
@@ -217,23 +253,26 @@ export class FakeHangar {
       const s = m.value;
       const home = this.home(ws.data.container);
       const env: Record<string, string> = Object.fromEntries(s.env.map((e) => [e.name, e.value]));
-      this.execs.push({ container: ws.data.container, command: s.command, env });
+      this.execs.push({ container: ws.data.container, command: s.command, env, user: s.user });
       const cwd = !s.workingDir || s.workingDir === HOME_IN_CONTAINER ? home : s.workingDir.replace(HOME_IN_CONTAINER, home);
-      const proc = Bun.spawn(s.command, {
+      const proc = Bun.spawn(
+        s.command.map((a) => this.localPaths(ws.data.container, a)),
+        {
         cwd,
         env: {
           PATH: `${this.shimDir}:${process.env.PATH}`,
-          PYTHONPATH: this.shimDir,
           HOME: home,
           LANG: "C.UTF-8",
           ...env,
           FAKE_HANGAR_CT: ws.data.container,
+          FAKE_HANGAR_ROOTFS: this.rootfs(ws.data.container),
         },
         stdin: s.stdin ? "pipe" : "ignore",
         stdout: "pipe",
         stderr: "pipe",
         detached: true,
-      }) as Subprocess<"pipe" | "ignore", "pipe", "pipe">;
+        },
+      ) as Subprocess<"pipe" | "ignore", "pipe", "pipe">;
       ws.data.proc = proc;
       const pump = async (stream: ReadableStream<Uint8Array>, which: "stdout" | "stderr") => {
         for await (const chunk of stream) {
@@ -285,19 +324,16 @@ export class FakeHangar {
     sh("ffprobe", 'echo "12.000000"');
     // The last argument is the output file: write a tiny JPEG there.
     sh("ffmpeg", 'out="${@: -1}"; printf "\\xff\\xd8\\xff\\xe0fakejpeg\\xff\\xd9" > "$out"');
-    writeFileSync(
-      join(dir, "faster_whisper.py"),
+    sh(
+      "apt-get",
       [
-        "class _Seg:",
-        "    def __init__(self, t): self.text = t",
-        "class _Info:",
-        "    language = 'en'",
-        "    language_probability = 0.99",
-        "class WhisperModel:",
-        "    def __init__(self, *a, **k): pass",
-        "    def transcribe(self, path, **k):",
-        "        return iter([_Seg(' hello from the fake whisper'), _Seg(' second line')]), _Info()",
-        "",
+        'cache=""; cmd=""; pkgs=()',
+        'while [ $# -gt 0 ]; do case "$1" in -o) case "$2" in Dir::Cache::Archives=*) cache="${2#*=}";; esac; shift 2;; -*) shift;; update|install) cmd="$1"; shift;; *) pkgs+=("$1"); shift;; esac; done',
+        'echo "apt-get $cmd ${pkgs[*]}" >> "$FAKE_HANGAR_ROOTFS/apt.log"',
+        '[ "$cmd" = update ] && { echo "Reading package lists... Done"; exit 0; }',
+        'for p in "${pkgs[@]}"; do case "$p" in fake-missing*) echo "E: Unable to locate package $p" >&2; exit 100;; esac; done',
+        'mkdir -p "$cache" "$FAKE_HANGAR_ROOTFS/installed"',
+        'for p in "${pkgs[@]}"; do if [ -f "$cache/$p.deb" ]; then echo "Using cached $p"; else echo "Get: $p"; echo "download $p" >> "$FAKE_HANGAR_ROOTFS/apt.log"; echo "deb of $p" > "$cache/$p.deb"; fi; touch "$FAKE_HANGAR_ROOTFS/installed/$p"; echo "Setting up $p"; done',
       ].join("\n"),
     );
     return dir;

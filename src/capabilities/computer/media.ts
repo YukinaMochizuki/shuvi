@@ -8,8 +8,9 @@ import { resolvePath, shq } from "./exec.ts";
  *   video_frames(path, n)   n evenly spaced frames of the video (ffprobe for its length, then one ffmpeg seek
  *                           to the middle of each n-th of it), scaled to at most 768 px wide, written as
  *                           01.jpg… into `out`. Not keyframes: evenly spaced is what shows a video's course.
- *   transcribe(path)        faster-whisper on the CPU (int8), each segment's text printed as it comes and
- *                           written to `<path>.txt`. Run boosted (SHUVI_COMPUTER_TRANSCRIBE_CPU / _MEMORY).
+ *
+ * Transcription is not here: it is to come from a shared platform service (docs/design.md §11), not from
+ * something each computer installs and keeps up to date itself.
  */
 
 export const MAX_FRAMES = 16;
@@ -35,30 +36,5 @@ export function framesCommand(path: string, n: number, out: string): string {
     '  echo "frame $((i + 1)) at ${t}s"',
     "  i=$((i + 1))",
     "done",
-  ].join("\n");
-}
-
-const WHISPER = `import sys
-from faster_whisper import WhisperModel
-path, out, model = sys.argv[1], sys.argv[2], sys.argv[3]
-m = WhisperModel(model, device="cpu", compute_type="int8")
-segments, info = m.transcribe(path, vad_filter=True)
-print(f"[language: {info.language}, {info.language_probability:.2f}]", flush=True)
-with open(out, "w") as f:
-    for s in segments:
-        line = s.text.strip()
-        f.write(line + "\\n")
-        f.flush()
-        print(line, flush=True)
-`;
-
-/** The transcription script: `path` to `<path>.txt` with faster-whisper's `model`. */
-export function transcribeCommand(path: string, model: string): string {
-  return [
-    "set -e",
-    `p=${shq(path)}`,
-    resolvePath("p"),
-    `[ -f "$p" ] || { echo "no such file: $p" >&2; exit 2; }`,
-    `python3 -c ${shq(WHISPER)} "$p" "$p.txt" ${shq(model)}`,
   ].join("\n");
 }

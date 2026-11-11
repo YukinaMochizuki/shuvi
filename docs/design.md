@@ -294,11 +294,11 @@ fields.
 - **Sticker description cache**: a short description keyed by `file_unique_id`, for replay, retrieval
   and the sticker library; the model never sees it instead of the image.
 - **Video and large files** never block a turn: the assistant gets a thumbnail and metadata first and
-  decides whether to process them. Common processing (frames, transcription, compression) is a
-  framework tool that runs remotely and returns the result, so the assistant never assembles the commands
-  itself.
+  decides whether to process them. Common processing (frames, compression) is a framework tool that
+  runs remotely and returns the result, so the assistant never assembles the commands itself.
 - Heavy computation always runs remotely (on Hangar), never on shuvi's machine.
-- No speech-to-text in v1.
+- No speech-to-text in v1. Transcription is to come from a shared service the platform maintains (to be
+  designed), not from something each chat's computer installs, tunes and updates on its own (§15).
 
 ## 12. Sticker library
 
@@ -411,21 +411,27 @@ belongs to the chat:
   survive; files received in the chat land in `~/inbox/`. The volume is created on first use and capped.
 - **The computer runs only when needed.** The first `exec` starts a sandbox container with the volume as
   `$HOME`; it stops when idle. It holds no secrets.
-- **What lives outside home is declared, not mutated.** `~/.computer.yaml` lists apt and pip packages
-  and a setup script; the framework builds the chat's image from the base image plus that file and
-  caches it. An ad-hoc `apt install` works for the moment and is gone on the next start unless declared.
+- **What lives outside home is declared, not mutated.** `~/.computer.yaml` lists apt packages and a
+  setup script; the framework applies it on top of the shared base image when the computer starts, and
+  again whenever the image changes. User-level installs (`pip install --user`, npm into home,
+  `~/.local/bin`) need no declaring: they are in home. Anything else installed outside home is gone when
+  the image changes.
 - **One computer, three ways to run**, following workstream's box tools: `exec(cmd)` (synchronous,
   time-limited), `exec(cmd, background: true)` (asynchronous; the result returns to the chat as an
   event), and `boost: { cpu, memory }` (on a larger short-lived copy with the same home). Framework media
-  tools (evenly spaced frames, transcription) are prepared `exec` calls.
+  tools (evenly spaced frames) are prepared `exec` calls. Transcription is not one: it is to come from a
+  shared platform service (§11), which the computer does not install.
 - **Visibility follows §6**: the owner's DM may read other chats' homes; a group sees only its own. Only
   a turn the owner triggered gets `exec`.
 
-As built (v1, `src/capabilities/computer/`): the computer is a Hangar Container `ct-<chat>` with a Disk
-`home-<chat>` mounted at `/home/shuvi`, both made on the first exec, stopped after
+As built (v1, `src/capabilities/computer/`): the computer is a Hangar Container `shuvi-<chat>` (Hangar
+runs it as the Machine `ct-shuvi-<chat>`; computers made earlier keep their recorded name `ct-<chat>`)
+with a Disk `home-<chat>` mounted at `/home/shuvi`, both made on the first exec, stopped after
 `SHUVI_COMPUTER_IDLE_MINUTES` without an exec or a running job, never deleted; the store's `computers` row
-is what every process knows of it. All chats share one base image (`computer/Dockerfile`);
-`~/.computer.yaml` builds come later. `exec` follows workstream's box tools: a synchronous run with a
+is what every process knows of it. The home disk starts at 5Gi and grows by itself up to 50Gi. All chats
+share one base image (`computer/Dockerfile`), which holds only generic tools (python3 and pip, node,
+ffmpeg, git, curl, jq, sqlite3, GNU time) and the `shuvi` user; it is public, and what one chat needs is
+not. `exec` follows workstream's box tools: a synchronous run with a
 timeout, or a background job (an M6 `poll` job) whose end comes back as `job_done` with a usage line, and
 `read_job` / `cancel_job`. A boost resizes the same computer (stop, apply, start, then back), so it is
 refused while background jobs run. The owner's files are copied into `~/inbox/` when the computer next
@@ -433,6 +439,23 @@ runs (never starting it for that), photos only on `save_photo`; `send_file` and 
 computer. The tools are owner-only at call time. Reading another chat's home from the DM is not built yet.
 A stopped container still holds a Hangar machine, so the plan's machine limit (10) is the most chats that
 can have a computer.
+
+`~/.computer.yaml` as built (`declared.ts`) is applied at start, never built into an image: there is no
+build service and no registry for it, and nothing about it is public. It holds `apt:` (Debian package
+names) and `setup:` (a shell script, run with `bash -e`); any other key is an error the model sees.
+Before every command a computer tool runs, one short exec, as the user, reads the file and two markers:
+the sha256 of the file last applied, on the container's root disk (`/var/lib/shuvi/computer.applied`), and
+of one that failed, on the guest's `/run` (a tmpfs, so for this boot only). Hangar keeps a container's
+root disk across stop and start and rebuilds it only when the image changes (hangar
+`docs/decisions/machine-model.md`), so a matching hash means nothing runs, and a new image or an edited
+file is applied before the next command. The apply runs as root, under a lock, each step (apt, setup)
+limited by `SHUVI_COMPUTER_APPLY_STEP_SEC`; apt keeps its downloads in `~/.cache/computer/apt`, so
+applying after a new image does not download them again. A failure is reported in that command's result
+(the failing step and its output, trimmed and redacted; the command still runs) and as an alert, and
+the hash is not recorded, so the next start tries again; `apply_computer_config` (owner-only) applies it at
+once. Changing the file is owner-only because every computer tool is: only a computer tool can write it,
+and each follows `ownerAuthority` (src/agent/turn.ts), refused at call time in a turn with no message from
+the owner.
 
 **Secrets** are named profiles (e.g. `modal`: a set of env vars) kept in a host-side store outside
 `home/` and git; policy names them, never their values.
