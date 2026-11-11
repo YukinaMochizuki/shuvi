@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { and, inArray, sql } from "drizzle-orm";
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 /**
@@ -10,7 +10,10 @@ import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqli
  * (that is `turns`). Everything that must be exactly-once hangs off a unique key here:
  *   - an inbound update off `tg_update_id`, so a re-delivered update is not recorded twice;
  *   - an outbound message off `idem_key`, so a turn that writes the same message twice records it once;
- *   - an outbound message's delivery off `tg_message_id`, so a row that has one is never sent again.
+ *   - an outbound message's delivery off `tg_message_id`, so a row that has one is never sent again;
+ *   - a framework event off `idem_key` too: `job:<id>` (one `job_done` per job), `schedule:<id>:<due>`
+ *     (one `scheduled` per firing), `inbound:<source>:<key>` (an inbound POST retried with the same
+ *     Idempotency-Key).
  */
 
 export const chats = sqliteTable("chats", {
@@ -38,12 +41,22 @@ export const EVENT_KINDS = [
   "bot_reaction",
   /** The owner answered an approval card in the control bot (src/control/approvals.ts) that asked to wake this chat. */
   "approval",
+  /** A schedule came due (store/schedules.ts). Written by the framework, never someone speaking. */
+  "scheduled",
+  /** A job ended, failed or expired (store/jobs.ts); once per job, keyed `job:<id>`. */
+  "job_done",
+  /** An external system POSTed to `/inbound/<source>` (capabilities/jobs/inbound.ts). */
+  "external",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
 export const OUTBOUND_KINDS: EventKind[] = ["bot_message", "bot_reaction"];
-/** Kinds that, past the cursor, ask for a turn. */
-export const TRIGGER_KINDS: EventKind[] = ["message", "approval"];
+/**
+ * Kinds that, past the cursor, are a turn's input, and ask for a turn. One exception: an `external` event
+ * from a source declared with `trigger: false` is input for the next turn but does not start one
+ * (`asksForTurn` below, which the waker's check and the claim use).
+ */
+export const TRIGGER_KINDS: EventKind[] = ["message", "approval", "scheduled", "job_done", "external"];
 
 export const chatEvents = sqliteTable(
   "chat_events",
@@ -71,6 +84,10 @@ export const chatEvents = sqliteTable(
   },
   (t) => [index("chat_events_chat_seq").on(t.chatId, t.seq), index("chat_events_status").on(t.status)],
 );
+
+/** The events past the cursor that start a turn: TRIGGER_KINDS, minus quiet `external` ones. */
+export const asksForTurn = () =>
+  and(inArray(chatEvents.kind, TRIGGER_KINDS), sql`(${chatEvents.kind} <> 'external' OR coalesce(json_extract(${chatEvents.payload}, '$.trigger'), 1) = 1)`)!;
 
 export const turns = sqliteTable(
   "turns",
@@ -166,3 +183,78 @@ export const kv = sqliteTable("kv", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+
+/**
+ * Background work whose result comes later (docs/design.md §10). A job belongs to the chat and event it
+ * was started from, and its result goes back THERE, as one `job_done` event, whichever way it arrives
+ * (store/jobs.ts `finishJob`, which closes the row and writes the event in one transaction, the event
+ * keyed `job:<id>` so a second report writes nothing).
+ */
+export const jobs = sqliteTable(
+  "jobs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id),
+    /** The event the job was started for (the turn's newest input). */
+    originSeq: integer("origin_seq").notNull(),
+    /** What kind of work it is (`workstream`, …); the capability that owns the kind polls it. */
+    kind: text("kind").notNull(),
+    /** One line saying what was asked, shown with the result. */
+    title: text("title").notNull(),
+    state: text("state", { enum: ["running", "done", "failed", "expired"] }).notNull().default("running"),
+    /** How the result arrives: a process the framework runs exits, a POST to /jobs/<id>/report, or polling. */
+    report: text("report", { enum: ["exit", "callback", "poll"] }).notNull(),
+    /** Kind-specific (e.g. the workstream request id). */
+    spec: text("spec", { mode: "json" }).notNull().$type<Record<string, unknown>>(),
+    /** callback: sha256 of the per-job token (hex). The token itself is never stored. */
+    tokenHash: text("token_hash"),
+    result: text("result"),
+    deadline: text("deadline").notNull(),
+    /** poll: when the next poll is due. */
+    nextPollAt: text("next_poll_at"),
+    /** The last poll's error, if it failed (a failed poll is retried until the deadline). */
+    note: text("note"),
+    /**
+     * The job was started by a call the owner authorised (agent/turn.ts, owner-only tools). Only then does
+     * its `job_done` count as the owner's when a later turn decides whether owner-only tools may run.
+     */
+    ownerAuthorised: integer("owner_authorised", { mode: "boolean" }).notNull().default(false),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+    endedAt: text("ended_at"),
+  },
+  (t) => [index("jobs_state").on(t.state)],
+);
+
+/**
+ * Schedules (docs/design.md §10): a one-shot (`at`) or a cron expression, set in a chat. When `next_at`
+ * passes, store/schedules.ts writes one `scheduled` event into that chat and moves `next_at` past NOW (not
+ * past the missed time), in one transaction: a schedule missed during downtime fires once, not once per
+ * missed occurrence. The event is keyed `schedule:<id>:<next_at>`, so a firing is written once.
+ */
+export const schedules = sqliteTable(
+  "schedules",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id),
+    note: text("note").notNull(),
+    /** One-shot: the instant (ISO, UTC). */
+    at: text("at"),
+    /** Recurring: a cron expression, read in `time_zone`. */
+    cron: text("cron"),
+    timeZone: text("time_zone").notNull(),
+    /** active → done (a one-shot that fired) | cancelled. */
+    state: text("state", { enum: ["active", "done", "cancelled"] }).notNull().default("active"),
+    /** The next time it is due (ISO, UTC); null once done or cancelled. */
+    nextAt: text("next_at"),
+    lastFiredAt: text("last_fired_at"),
+    createdTurnId: integer("created_turn_id"),
+    /** Set by a call the owner authorised: only then does its `scheduled` event count as the owner's. */
+    ownerAuthorised: integer("owner_authorised", { mode: "boolean" }).notNull().default(false),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [index("schedules_due").on(t.state, t.nextAt)],
+);

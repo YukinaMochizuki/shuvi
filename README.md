@@ -27,6 +27,7 @@ bun run typecheck
 bun test
 bun scripts/e2e-fake.ts      # the whole path against a fake Telegram and a fake Anthropic API
 bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
+bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
 ```
 
 ```bash

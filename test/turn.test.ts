@@ -25,7 +25,8 @@ async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: 
     makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)),
     ...(opts.signal ? { signal: opts.signal } : {}),
     // The web capability is on when the test asks for it, off otherwise, through its own variables.
-    capabilities: enabledCapabilities(opts.web ? { ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) } : { SHUVI_WEB: "off" }),
+    // Schedules (always offered once on) are off here: these tests are about speech and web.
+    capabilities: enabledCapabilities(opts.web ? { SHUVI_SCHEDULES: "off", ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) } : { SHUVI_WEB: "off", SHUVI_SCHEDULES: "off" }),
   });
   return { outcome, adapter, turn: getTurn(db, turn.id)! };
 }
@@ -202,7 +203,7 @@ describe("runTurn: input and the cursor", () => {
     expect(typeof prompt).toBe("string");
     expect(adapter.calls[0]!.method).toBe("run");
     expect(prompt).toContain("we were just talking about headphones");
-    expect(prompt).toContain("· you] QC Ultra is good");
+    expect(prompt).toContain("· ⚙ you] QC Ultra is good");
     expect(prompt.indexOf("which colour then")).toBeGreaterThan(prompt.indexOf("(New messages:)"));
   });
 

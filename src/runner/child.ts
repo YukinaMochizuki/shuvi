@@ -40,6 +40,7 @@ const outcome = await runTurn({
   turnId,
   home: cfg.home,
   timeZone: cfg.timeZone,
+  ownerId: cfg.ownerId,
   ...(cfg.model ? { model: cfg.model } : {}),
   ...(cfg.ownerLanguage ? { ownerLanguage: cfg.ownerLanguage } : {}),
   capabilities: enabledCapabilities(),

@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, gt, inArray, lte, max } from "drizzle-orm";
 import type { Db } from "./db.ts";
-import { chatEvents, chats, kv, OUTBOUND_KINDS, TRIGGER_KINDS } from "./schema.ts";
+import { asksForTurn, chatEvents, chats, kv, OUTBOUND_KINDS, TRIGGER_KINDS } from "./schema.ts";
 
 /**
  * Reads and writes on `chat_events`, `chats` and `kv`. Every write that must happen once is an
@@ -83,6 +83,34 @@ export interface BotReactionPayload {
   emoji: string;
 }
 
+/** A schedule came due. */
+export interface ScheduledPayload {
+  scheduleId: number;
+  note: string;
+  /** When it was due (ISO). Later than this by much means it fired late, after downtime. */
+  dueAt: string;
+  /** Recurring: its cron expression. */
+  cron?: string;
+}
+
+/** A job's outcome, written back to the chat it was started from. */
+export interface JobDonePayload {
+  jobId: number;
+  kind: string;
+  /** What was asked. */
+  title: string;
+  state: "done" | "failed" | "expired";
+  result: string;
+}
+
+/** Something an external system POSTed to `/inbound/<source>`. */
+export interface ExternalPayload {
+  source: string;
+  text: string;
+  /** false: recorded for the next turn, but does not start one (inbound.yaml `trigger: false`). */
+  trigger: boolean;
+}
+
 export type ChatEvent = typeof chatEvents.$inferSelect;
 export type Chat = typeof chats.$inferSelect;
 
@@ -135,7 +163,10 @@ export function recordInbound(
   return inserted.length > 0;
 }
 
-/** Inbound events past `afterSeq` that ask for a turn, oldest first. */
+/**
+ * Inbound events past `afterSeq` that are a turn's input (TRIGGER_KINDS, quiet `external` ones included:
+ * they do not start a turn, but the next turn is shown them), oldest first.
+ */
 export function triggersAfter(db: Db, chatId: number, afterSeq: number): ChatEvent[] {
   return db
     .select()
@@ -150,7 +181,7 @@ export function lastTriggerSeq(db: Db, chatId: number): number {
   const row = db
     .select({ m: max(chatEvents.seq) })
     .from(chatEvents)
-    .where(and(eq(chatEvents.chatId, chatId), inArray(chatEvents.kind, TRIGGER_KINDS)))
+    .where(and(eq(chatEvents.chatId, chatId), asksForTurn()))
     .get();
   return row?.m ?? 0;
 }
@@ -209,6 +240,27 @@ export function recordApprovalEvent(db: Db, chatId: number, payload: ApprovalPay
     .values({ chatId, kind: "approval", payload: payload as unknown as Record<string, unknown>, idemKey: `approval:${payload.approvalId}` })
     .onConflictDoNothing()
     .run();
+}
+
+/**
+ * Record an event the FRAMEWORK perceived (a schedule come due, a job's result, an inbound POST). `idemKey`
+ * makes it exactly-once: a second write with the same key is dropped (an inbound POST without an
+ * Idempotency-Key has none). Returns its seq, or null when the key was already recorded.
+ */
+export function recordFrameworkEvent(
+  db: Db,
+  e:
+    | { chatId: number; kind: "scheduled"; payload: ScheduledPayload; idemKey: string }
+    | { chatId: number; kind: "job_done"; payload: JobDonePayload; idemKey: string }
+    | { chatId: number; kind: "external"; payload: ExternalPayload; idemKey: string | null },
+): number | null {
+  const rows = db
+    .insert(chatEvents)
+    .values({ chatId: e.chatId, kind: e.kind, payload: e.payload as unknown as Record<string, unknown>, idemKey: e.idemKey })
+    .onConflictDoNothing()
+    .returning({ seq: chatEvents.seq })
+    .all();
+  return rows[0]?.seq ?? null;
 }
 
 // ---- outbound ---------------------------------------------------------------------------------------

@@ -2,7 +2,7 @@ import { and, desc, eq, gt, inArray, isNull, lte, max } from "drizzle-orm";
 import type { TurnUsage } from "agent-runtime";
 import type { Db } from "./db.ts";
 import { raiseAlert } from "./control.ts";
-import { chatEvents, chats, TRIGGER_KINDS, turns } from "./schema.ts";
+import { asksForTurn, chatEvents, chats, TRIGGER_KINDS, turns } from "./schema.ts";
 
 /**
  * Turn bookkeeping, and the CURSOR rule that makes a turn's input exactly-once:
@@ -45,7 +45,10 @@ export const IMMEDIATE = { behavior: "immediate" } as const;
 export type Turn = typeof turns.$inferSelect;
 
 /**
- * Claim a turn for a chat, if it has inbound events past its cursor and no turn running. The cursor is
+ * Claim a turn for a chat, if it has events past its cursor that ask for one (a message, a schedule come
+ * due, a job's result, an external event: schema.ts `asksForTurn`) and no turn running. Every kind goes
+ * through this same claim and the same cursor, so a framework event is answered exactly once like a
+ * message is. The cursor is
  * read INSIDE the claiming transaction: read outside it, a turn that finished in between (moving the
  * cursor) would let the new turn start from the old cursor and answer the same messages twice. Returns
  * null when there is nothing to do or a turn is already running (the unique index is the lock).
@@ -58,7 +61,7 @@ export function claimTurn(db: Db, chatId: number): Turn | null {
       const pending = tx
         .select({ m: max(chatEvents.seq) })
         .from(chatEvents)
-        .where(and(eq(chatEvents.chatId, chatId), gt(chatEvents.seq, chat.cursorSeq), inArray(chatEvents.kind, TRIGGER_KINDS)))
+        .where(and(eq(chatEvents.chatId, chatId), gt(chatEvents.seq, chat.cursorSeq), asksForTurn()))
         .get();
       if (!pending?.m) return null;
       return tx.insert(turns).values({ chatId, status: "running", fromSeq: chat.cursorSeq, toSeq: pending.m }).returning().get();
@@ -188,10 +191,10 @@ export function finishTurn(
         // One alert per message, keyed on its seq and never rate-limited: an unanswered message must not
         // go unseen because another one in the same chat was reported a minute earlier.
         for (const e of lost) {
-          const p = e.payload as { text?: string; title?: string };
+          const p = e.payload as { text?: string; title?: string; note?: string };
           raiseAlert(tdb, {
             key: `unanswered:${e.seq}`,
-            text: `Unanswered in ${chatLabel(chat)}: "${excerpt(p.text ?? p.title ?? e.kind)}" (#${e.seq}). ${MAX_ATTEMPTS} turns failed on it, so it was skipped. Last error: ${excerpt(outcome.error ?? "unknown", 300)}`,
+            text: `Unanswered in ${chatLabel(chat)}: "${excerpt(p.text ?? p.title ?? p.note ?? e.kind)}" (#${e.seq}). ${MAX_ATTEMPTS} turns failed on it, so it was skipped. Last error: ${excerpt(outcome.error ?? "unknown", 300)}`,
           });
         }
       } else {

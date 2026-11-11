@@ -12,6 +12,7 @@ bun run typecheck
 bun test                    # fresh in-memory DB per test
 bun scripts/e2e-fake.ts     # server + runner child + real Claude Code CLI, fake Telegram and Anthropic
 bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
+bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
 bun run db:generate         # after any change to src/store/schema.ts
 ```
 
@@ -26,6 +27,11 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |
 | what a capability is, what it may touch | `src/capabilities/types.ts`, `src/capabilities/index.ts` |
+| who may call an owner-only tool, decided per call | `src/agent/turn.ts` (`ownerAuthority`, `turnBoundary`) |
+| how events read to the model; framework events that cannot be forged | `src/agent/render.ts` |
+| jobs: one result per job, back to its origin; deadlines | `src/store/jobs.ts`, `src/capabilities/jobs/watch.ts` |
+| schedules, and firing once after downtime | `src/store/schedules.ts` |
+| the hook endpoints and their tokens | `src/capabilities/jobs/hooks.ts`, `src/capabilities/jobs/inbound.ts` |
 | receiving updates and the Telegram offset | `src/server/poller.ts`, `src/telegram/inbound.ts` |
 | sending, 429s, long messages | `src/server/sender.ts`, `src/telegram/format.ts` |
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` |
@@ -38,15 +44,28 @@ A capability (speech, web, …) is one folder plus one line:
 
 1. Create `src/capabilities/<id>/index.ts` exporting a `Capability` (`defineCapability`, see
    `src/capabilities/types.ts`): its `id`, `enable(env)` (read your own `SHUVI_*` variables here and list
-   them in the module header; return `null` when off), and any of `tools`, `section`, `loops`, and for
-   what a message shows, `holds` (perception gating: hold a turn for a few seconds while it is not ready)
-   and `perceive` (image parts after the message's line). A loop gets a read-only file downloader
-   (`ServerContext.files`), never the bot API.
+   them in the module header; return `null` when off), and any of `tools`, `section`, `loops`, `jobKinds`,
+   `ownerOnly`, and for what a message shows, `holds` (perception gating: hold a turn for a few seconds
+   while it is not ready) and `perceive` (image parts after the message's line). A loop gets a read-only
+   file downloader (`ServerContext.files`), never the bot API.
 2. Append it to `CAPABILITIES` in `src/capabilities/index.ts`. Append, do not insert: registry order is
-   tool order and prompt-section order, and so part of the prompt-cache prefix. Speech stays first.
+   part of the prompt-cache prefix. Speech stays first.
+   - Prompt sections follow registry order.
+   - Tools are grouped by MCP server (`serverName`): servers in the order each first appears in the
+     registry, and within a server, tools in registry order. shuvi's own tools all use `shuvi`, so a later
+     capability's `shuvi` tools come before an earlier capability's `web` server. Two tools with the same
+     name are refused when the tools are assembled.
+3. A tool that acts for the owner (sets a schedule, asks workstream, edits memory) goes in `ownerOnly`.
+   Do not hide it in turns the owner did not start: it is always offered, and the turn's boundary refuses
+   the call unless everyone the turn has been shown is the owner (`ownerAuthority` in `src/agent/turn.ts`).
 
 Do not edit `src/agent/turn.ts`, `src/agent/prompt.ts`, `src/server/main.ts` or `src/env.ts` for it. A
 capability never talks to Telegram: its tools and loops queue rows, and the sender sends them.
+
+The line between the two: a change to a CORE concept (an event kind, who has authority, how framework
+events are rendered, the cursor) is a seam change and belongs in the core files (`src/store/`,
+`src/agent/`, `src/capabilities/types.ts`), made once for every capability. What one capability needs
+for itself does not go there.
 
 ## Migrations on parallel branches
 
