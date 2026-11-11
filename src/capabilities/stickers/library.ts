@@ -26,7 +26,7 @@ import { IMMEDIATE } from "../../store/turns.ts";
  *
  * The YAML files are the truth; `sticker_packs` / `sticker_library` / `sticker_fts` are an index of them,
  * refreshed by `syncLibrary` whenever a file's bytes change, however it changed (memory's `write_home` / `edit_home`,
- * scripts/import-stickers.ts, or a hand edit). It runs before every sticker tool reads the library and in a server
+ * the skeleton `add_sticker_pack` creates, or a hand edit). It runs before every sticker tool reads the library and in a server
  * loop, so no writer has to remember to re-index. A file that stops parsing keeps its last good stickers
  * indexed and records the error, so one typo does not take a pack away.
  *
