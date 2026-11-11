@@ -72,7 +72,7 @@ export class ScriptedAdapter implements BackendAdapter {
   }
 
   continueRun(input: Parameters<BackendAdapter["continueRun"]>[0], opts: AdapterRunOptions): Promise<AdapterRunResult> {
-    this.calls.push({ method: "continueRun", prompt: input.prompt, backendSessionId: input.backendSessionId, tools: input.tools.flatMap((b) => b.tools.map((t) => t.name)) });
+    this.calls.push({ method: "continueRun", prompt: input.prompt, ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}), backendSessionId: input.backendSessionId, tools: input.tools.flatMap((b) => b.tools.map((t) => t.name)) });
     return this.play(input.tools.flatMap((b) => b.tools as ToolDef[]), opts, input.backendSessionId);
   }
 

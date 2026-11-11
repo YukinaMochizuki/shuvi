@@ -240,7 +240,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const firstOwnerMessage = input.find((e) => e.kind === "message" && (deps.ownerId === undefined || (e.payload as unknown as MessagePayload).from.id === deps.ownerId));
   const ownerName = deps.ownerName ?? (firstOwnerMessage ? (firstOwnerMessage.payload as unknown as MessagePayload).from.name : undefined);
   const owner: OwnerInfo = { ...(ownerName ? { name: ownerName } : {}), ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
-  const tools = capabilityTools(deps.capabilities, { db, chat, turnId, timeZone: deps.timeZone, owner, state: s });
+  const tools = capabilityTools(deps.capabilities, { db, home: deps.home, chat, turnId, timeZone: deps.timeZone, owner, state: s });
   const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive) : renderTurnInput(input, deps.timeZone, perceive);
   let lastThinking = false;
   const opts = {
@@ -262,14 +262,18 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     ...(deps.signal ? { signal: deps.signal } : {}),
   };
 
-  const fresh = (p: Prompt) => adapter.run({ prompt: p, tools, systemPrompt: buildSystemPrompt(deps.home, chat, owner, deps.capabilities), ...(deps.model ? { model: deps.model } : {}) }, opts);
+  // Built fresh every turn and sent on a resume too, so an edit to home/ reaches the model from the next
+  // turn without `/new`. The driver decides whether a resume honours it: the runner's Claude driver does
+  // (`liveSystemPrompt`), and openai-compat always sends the prompt it is given.
+  const systemPrompt = buildSystemPrompt(deps.home, chat, owner, deps.capabilities);
+  const fresh = (p: Prompt) => adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
   try {
     let result;
     if (!chat.backendSessionId) result = await fresh(prompt);
     else {
       try {
         result = await adapter.continueRun(
-          { backendSessionId: chat.backendSessionId, prompt, tools, ...(deps.model ? { model: deps.model } : {}), ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
+          { backendSessionId: chat.backendSessionId, prompt, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}), ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
           opts,
         );
       } catch (e) {

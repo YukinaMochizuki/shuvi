@@ -44,7 +44,9 @@ const outcome = await runTurn({
   ...(cfg.model ? { model: cfg.model } : {}),
   ...(cfg.ownerLanguage ? { ownerLanguage: cfg.ownerLanguage } : {}),
   capabilities: enabledCapabilities(),
-  makeAdapter: (boundary) => new ClaudeBackend({ boundary, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
+  // liveSystemPrompt: each turn's system prompt replaces the one the conversation began with, so an edit
+  // to home/ is heard from the next turn (Claude Code otherwise replays the prompt it recorded).
+  makeAdapter: (boundary) => new ClaudeBackend({ boundary, liveSystemPrompt: true, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
   signal: ac.signal,
 });
 console.log(`turn ${turnId}: ${outcome}`);

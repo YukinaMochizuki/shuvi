@@ -25,8 +25,8 @@ async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: 
     makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)),
     ...(opts.signal ? { signal: opts.signal } : {}),
     // The web capability is on when the test asks for it, off otherwise, through its own variables.
-    // Schedules (always offered once on) are off here: these tests are about speech and web.
-    capabilities: enabledCapabilities(opts.web ? { SHUVI_SCHEDULES: "off", ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) } : { SHUVI_WEB: "off", SHUVI_SCHEDULES: "off" }),
+    // Schedules, memory, retrieval and playbooks are off here: these tests are about speech and web.
+    capabilities: enabledCapabilities(opts.web ? { SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) } : { SHUVI_WEB: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }),
   });
   return { outcome, adapter, turn: getTurn(db, turn.id)! };
 }
@@ -207,7 +207,7 @@ describe("runTurn: input and the cursor", () => {
     expect(prompt.indexOf("which colour then")).toBeGreaterThan(prompt.indexOf("(New messages:)"));
   });
 
-  test("the first turn starts a conversation with the system prompt; later turns continue it", async () => {
+  test("the first turn starts a conversation with the system prompt; later turns continue it with the prompt built afresh", async () => {
     const db = memDb();
     const home = mkdtempSync(join(tmpdir(), "shuvi-home-"));
     mkdirSync(join(home, "persona"));
@@ -227,8 +227,11 @@ describe("runTurn: input and the cursor", () => {
 
     ownerSays(db, "two");
     expect(sp).not.toContain("They speak"); // no language configured, none named
+    writeFileSync(join(home, "memory/private.md"), "EDITED MEMORY");
     const second = await turnWith(db, [{ token: "ok" }], { home });
     expect(second.adapter.calls[0]).toMatchObject({ method: "continueRun", backendSessionId: "fake-session" });
+    // A resumed conversation is handed this turn's prompt, so an edit to home/ is seen without `/new`.
+    expect(second.adapter.calls[0]!.systemPrompt).toBe(sp.replace("PRIVATE MEMORY", "EDITED MEMORY"));
   });
 });
 
