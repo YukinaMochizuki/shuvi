@@ -7,6 +7,7 @@ import { raiseAlert } from "../store/control.ts";
 import {
   enqueueOutbound,
   getChat,
+  previousEvent,
   recentHistory,
   resetConversation,
   triggersAfter,
@@ -23,7 +24,7 @@ import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
 import { chatLabel, extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
 import { buildPromptSections, joinSections } from "./prompt.ts";
-import { renderMidTurn, renderTurnInput, renderWithHistory, type InputOptions, type Perceive } from "./render.ts";
+import { renderMidTurn, renderTurnInput, renderWithHistory, timeNote, type InputOptions, type Perceive } from "./render.ts";
 import { recordingBoundary, TurnRecorder, type RecorderOptions } from "./transcript.ts";
 import { isTrigger, type BotIdentity } from "./triggers.ts";
 
@@ -31,6 +32,23 @@ import { isTrigger, type BotIdentity } from "./triggers.ts";
 export const HISTORY_ON_NEW = 10;
 /** In a group, how many unseen messages before the ones that woke the turn it opens with (design §7). */
 export const GROUP_CONTEXT = 10;
+/**
+ * A turn whose first input event comes more than this many minutes after the chat's previous event opens
+ * with the "It is now…" line (render.ts `timeNote`); a fresh conversation always does.
+ */
+export const GAP_NOTE_MINUTES = 60;
+
+/**
+ * The "It is now…" line for a turn whose input starts at `first`, or undefined when none is due: when the
+ * chat's previous event (store/events.ts `previousEvent`) is more than `GAP_NOTE_MINUTES` before `first`,
+ * when there is none, and always when the conversation is `fresh` (the first turn, `/new`, a lost session).
+ * `nowIso` is the turn's start. Mid-turn appends never get one.
+ */
+export function openingTimeNote(db: Db, chatId: number, first: ChatEvent, nowIso: string, timeZone: string, fresh: boolean): string | undefined {
+  const prev = previousEvent(db, chatId, first.seq);
+  const gap = !prev || Date.parse(first.at) - Date.parse(prev.at) > GAP_NOTE_MINUTES * 60_000;
+  return fresh || gap ? timeNote(nowIso, prev?.at, timeZone) : undefined;
+}
 
 /**
  * What the driver's error says when the conversation it was asked to continue no longer exists (the
@@ -87,6 +105,11 @@ export function isLostSession(e: unknown): boolean {
  * on the turn (`turns.trigger_seq`), which is how a follow-up is recognised. The earlier
  * unseen lines it opens with are CONTEXT: rendered under their own heading, and outside the turn's
  * authority (`ownerAuthority`).
+ *
+ * A SENSE OF TIME: every stamp carries the weekday (render.ts), and a turn that opens after a gap of more
+ * than `GAP_NOTE_MINUTES` since the chat's previous event, or as a fresh conversation, starts its input with
+ * one line saying what time it is (the turn's start) and how long it has been (`openingTimeNote`). It is in
+ * the input, never the system prompt, so the prompt cache is unaffected.
  *
  * A LOST conversation (`continueRun` fails with `LOST_SESSION_TEXT`) is not a failure of the turn: the
  * chat's conversation is reset and the same turn runs again at once, once, as a fresh conversation that
@@ -320,6 +343,11 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const called = group ? input.slice(context).filter((e) => isTrigger(db, e, chatPolicy, deps.bot)).map((e) => e.seq) : [];
   if (group && !called.length) called.push(s.wokenBy!);
   const renderOpts: InputOptions = { ...(s.markOwner !== undefined ? { owner: s.markOwner } : {}), ...(unread ? { unread } : {}), ...(context ? { context } : {}), ...(called.length ? { called } : {}) };
+  // The input opens with the "It is now…" line after a gap, and always in a fresh conversation.
+  const withNote = (fresh: boolean): InputOptions => {
+    const t = openingTimeNote(db, chat.id, input[0]!, turn.startedAt, deps.timeZone, fresh);
+    return t ? { ...renderOpts, timeNote: t } : renderOpts;
+  };
   deps.signal?.addEventListener("abort", () => (s.stopping = true), { once: true });
   extendTurn(db, turnId, s.toSeq);
 
@@ -350,7 +378,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     chatPolicy,
     ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}),
   });
-  const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive, renderOpts) : renderTurnInput(input, deps.timeZone, perceive, renderOpts);
+  const opening = withNote(!chat.backendSessionId);
+  const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive, opening) : renderTurnInput(input, deps.timeZone, perceive, opening);
   let lastThinking = false;
   const opts = {
     onToken: (text: string, thinking?: boolean) => {
@@ -407,7 +436,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         rec.discardOpen();
         rec.note(`The conversation ${chat.backendSessionId} was lost; the turn started over as a fresh conversation, opening with the last ${HISTORY_ON_NEW} messages.`);
         const lastSeen = recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW);
-        result = await fresh(lastSeen.length ? renderWithHistory(lastSeen, input, deps.timeZone, perceive, renderOpts) : renderTurnInput(input, deps.timeZone, perceive, renderOpts));
+        const restart = withNote(true);
+        result = await fresh(lastSeen.length ? renderWithHistory(lastSeen, input, deps.timeZone, perceive, restart) : renderTurnInput(input, deps.timeZone, perceive, restart));
       }
     }
     flush();

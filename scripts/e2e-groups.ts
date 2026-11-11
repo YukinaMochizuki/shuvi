@@ -216,7 +216,7 @@ await replied(GROUP.id, "Check the kitchen drawer.", "2. a mention starts a turn
 const m = seen.mention!;
 check(m.text.includes("Alice] morning all") && m.text.includes("Bob] anyone seen my keys?"), "2. it sees the earlier unseen messages, with their senders");
 check(m.text.includes('↳ replying to Alice: \\"morning all\\"'), "2. and their reply targets");
-check(/\d\d\/\d\d \d\d:\d\d · Alice\] @shuvi_test_bot where could my keys be/.test(m.text), "2. and their times");
+check(/\w{3} \d\d\/\d\d \d\d:\d\d · Alice\] @shuvi_test_bot where could my keys be/.test(m.text), "2. and their times");
 check(m.system.includes("PUBLIC PERSONA") && !m.system.includes("PRIVATE PERSONA"), "2. the group's prompt has the public persona only");
 check(m.system.includes("## In a group"), "2. and the group section");
 const reply = sent(GROUP.id).find((b) => b.text === "Check the kitchen drawer.")!;

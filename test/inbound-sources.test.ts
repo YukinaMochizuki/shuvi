@@ -83,7 +83,7 @@ describe("POST /inbound/<source>", () => {
     expect(JSON.parse(e!.payload)).toEqual({ source: "grafana", text: "disk 91% on vm-3", trigger: true });
     const turn = claimTurn(db, ownerChatId(db))!;
     expect(turn.toSeq).toBe(e!.seq);
-    expect(renderMessage(getEvent(db, e!.seq)!, "UTC")).toMatch(/^\[#\d+ · \d\d\/\d\d \d\d:\d\d · ⚙ inbound: grafana\]\n  disk 91% on vm-3$/);
+    expect(renderMessage(getEvent(db, e!.seq)!, "UTC")).toMatch(/^\[#\d+ · \w{3} \d\d\/\d\d \d\d:\d\d · ⚙ inbound: grafana\]\n  disk 91% on vm-3$/);
   });
 
   test("an Idempotency-Key makes a retried POST land once", async () => {

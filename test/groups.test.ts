@@ -510,6 +510,37 @@ describe("a group turn", () => {
     expect(out.replyToSeq).toBeUndefined();
   });
 
+  test("a sense of time: a gap before the group turn's first input event opens it with the 'It is now' line; chatter just before it does not", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    record(db, policy, groupUpdate("@shuvi_test_bot good night", ALICE));
+    await run(db, policy, [{ token: "Good night." }]);
+    const chat = groupChat(db);
+    db.$client.run("update chat_events set status = 'sent', at = '2026-11-10T22:00:00.000Z' where chat_id = ?", [chat.id]);
+    for (let i = 1; i <= 12; i++) record(db, policy, groupUpdate(`chatter ${i}`, i % 2 ? ALICE : BOB));
+    record(db, policy, groupUpdate("@shuvi_test_bot morning, what did I miss?", ALICE));
+    db.$client.run("update chat_events set at = '2026-11-13T01:00:00.000Z' where chat_id = ? and at > '2026-11-11'", [chat.id]);
+    const { adapter } = await run(db, policy, [{ token: "Not much." }]);
+    expect(adapter.calls[0]!.method).toBe("continueRun");
+    const prompt = String(adapter.calls[0]!.prompt);
+    // The first input event is chatter 3 (10 lines of context before the call); its previous event, chatter
+    // 2, came at the same time: no gap there, so no line.
+    expect(prompt).not.toContain("(It is now");
+
+    // A group that was quiet for two days, then called: the line, then what she answers.
+    const db2 = memDb();
+    record(db2, policy, groupUpdate("@shuvi_test_bot good night", ALICE));
+    await run(db2, policy, [{ token: "Good night." }]);
+    const chat2 = groupChat(db2);
+    db2.$client.run("update chat_events set status = 'sent', at = '2026-11-10T22:00:00.000Z' where chat_id = ?", [chat2.id]);
+    record(db2, policy, groupUpdate("morning all", BOB));
+    record(db2, policy, groupUpdate("@shuvi_test_bot morning, what did I miss?", ALICE));
+    db2.$client.run("update chat_events set at = '2026-11-13T01:00:00.000Z' where chat_id = ? and at > '2026-11-11'", [chat2.id]);
+    const b = await run(db2, policy, [{ token: "Not much." }]);
+    const p2 = String(b.adapter.calls[0]!.prompt);
+    expect(p2).toMatch(/^\(It is now [^\n]+\. The last message here was [^\n]+ ago\.\)\n\(Earlier, before you were called; context only:\)\n\[#\d+ · Fri 11\/13 01:00 · Bob Lee\] morning all/);
+  });
+
   test("B1: the person she answers writes again while she thinks, and the turn makes no tool call: the next turn answers it", async () => {
     const db = memDb();
     const policy = policyOf();

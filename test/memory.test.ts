@@ -443,7 +443,7 @@ describe("search_chats", () => {
     const r = await call("search_chats", { terms: ["ramen", "天氣"] });
     expect(r.isError).toBe(false);
     expect(r.text).toContain(`chat ${OWNER} (your DM with the owner):`);
-    expect(r.text).toMatch(new RegExp(`\\[#${s1} · \\d\\d/\\d\\d \\d\\d:\\d\\d · Owner\\] Let's try the ramen place`));
+    expect(r.text).toMatch(new RegExp(`\\[#${s1} · \\w{3} \\d\\d/\\d\\d \\d\\d:\\d\\d · Owner\\] Let's try the ramen place`));
     expect(r.text).toContain(`[#${s2} `);
     expect(r.text).toContain("· ⚙ you] The ramen there closes at nine.");
     expect(r.text).toContain(`[#${s3} `);
@@ -521,7 +521,7 @@ describe("read_chat", () => {
     const { call } = turnTools(db, dm, newHome());
     const around = await call("read_chat", { around: seqs[5], limit: 4 });
     expect(around.text.split("\n").filter((l) => l.startsWith("[#")).map((l) => /#(\d+)/.exec(l)![1]).map(Number)).toEqual(seqs.slice(4, 8));
-    expect(around.text).toMatch(new RegExp(`\\[#${seqs[4]} · \\d\\d/\\d\\d \\d\\d:\\d\\d · Owner\\] line 5`));
+    expect(around.text).toMatch(new RegExp(`\\[#${seqs[4]} · \\w{3} \\d\\d/\\d\\d \\d\\d:\\d\\d · Owner\\] line 5`));
     expect(around.text).toContain(`· ⚙ you] reply 6`); // the assistant's own lines, as agent/render.ts marks them
     expect(around.text).toContain(`(earlier: before=${seqs[4]}; later: after=${seqs[7]})`);
     const before = await call("read_chat", { before: seqs[2], limit: 5 });

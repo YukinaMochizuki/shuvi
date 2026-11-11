@@ -103,7 +103,7 @@ describe("firing", () => {
     const s = createSchedule(db, { chatId: ownerChatId(db), note: "check the deploy", at: new Date(Date.now() + 1000), timeZone: TZ });
     fireDue(db, new Date(Date.now() + 2000));
     const e = getEvent(db, scheduledEvents(db)[0]!.seq)!;
-    expect(renderMessage(e, TZ)).toMatch(new RegExp(`^\\[#${e.seq} · \\d\\d/\\d\\d \\d\\d:\\d\\d · ⚙ schedule ${s.id}\\] check the deploy$`));
+    expect(renderMessage(e, TZ)).toMatch(new RegExp(`^\\[#${e.seq} · \\w{3} \\d\\d/\\d\\d \\d\\d:\\d\\d · ⚙ schedule ${s.id}\\] check the deploy$`));
     db.$client.run("update chat_events set payload = json_set(payload, '$.dueAt', '2026-01-01T00:00:00.000Z') where seq = ?", [e.seq]);
     expect(renderMessage(getEvent(db, e.seq)!, TZ)).toContain("fired late, after downtime");
   });

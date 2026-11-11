@@ -50,7 +50,7 @@ describe("a job ends once, and its result goes back to the origin chat", () => {
     const turn = claimTurn(db, ownerChatId(db))!;
     expect(turn.toSeq).toBe(seq);
     const line = renderMessage(getEvent(db, seq)!, "UTC");
-    expect(line).toMatch(new RegExp(`^\\[#${seq} · \\d\\d/\\d\\d \\d\\d:\\d\\d · ⚙ job ${job.id} · convert · done\\] asked: "convert report #12"\\n  the converted file$`));
+    expect(line).toMatch(new RegExp(`^\\[#${seq} · \\w{3} \\d\\d/\\d\\d \\d\\d:\\d\\d · ⚙ job ${job.id} · convert · done\\] asked: "convert report #12"\\n  the converted file$`));
   });
 });
 
