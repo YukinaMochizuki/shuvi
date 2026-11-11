@@ -12,10 +12,12 @@
  * stopped turn says nothing more. Last, a photo: the server downloads it from the fake Bot API, and the
  * model receives it as an image block (on a resumed conversation). Then an edit to home/ (a git commit
  * by shuvi) is in the system prompt of the very next turn of the same conversation, without `/new`.
+ * Then stickers: a pack file in home/ is indexed and its set fetched by the server, a turn calls
+ * `find_sticker` then `sticker`, and the fake Bot API receives `sendSticker`.
  *
  *   bun scripts/e2e-fake.ts
  */
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/store/db.ts";
@@ -38,7 +40,7 @@ async function until(what: string, cond: () => boolean, ms = 60_000): Promise<vo
 }
 
 // ---- fake Anthropic: step 1 says something and calls `say`; step 2 (after the tool result) is SLOW ----
-type Block = { type: string; text?: string; source?: { type?: string; data?: string } };
+type Block = { type: string; text?: string; source?: { type?: string; data?: string }; tool_use_id?: string; content?: unknown };
 type Msg = { role: string; content: string | Block[] };
 // A valid 1x1 PNG: the photo the owner sends in step 4.
 const PHOTO = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
@@ -61,6 +63,8 @@ function stream(id: string, blocks: Array<{ type: "text"; text: string } | { typ
   out += ev("message_stop", {});
   return new Response(out, { headers: { "content-type": "text/event-stream" } });
 }
+let stickerFound = "";
+let stickerResult = "";
 let slowStepStarted = false;
 let longStepStarted = false;
 let modelRequests = 0;
@@ -91,6 +95,19 @@ const anthropic = Bun.serve({
     const lastMsg = body.messages?.at(-1);
     const lastBlocks = Array.isArray(lastMsg?.content) ? lastMsg!.content : [];
     const image = lastBlocks.find((b) => b.type === "image" && b.source?.type === "base64");
+    // Step 5: find a sticker, send it, then a word.
+    const toolResult = (id: string) => lastBlocks.find((b) => b.type === "tool_result" && b.tool_use_id === id);
+    if (toolResult("toolu_find")) {
+      stickerFound = JSON.stringify(toolResult("toolu_find")!.content);
+      return stream(`msg_${modelRequests}`, [{ type: "tool_use", id: "toolu_send", name: "mcp__shuvi__sticker", input: { id: "Cats/1" } }], "tool_use");
+    }
+    if (toolResult("toolu_send")) {
+      stickerResult = JSON.stringify(toolResult("toolu_send")!.content);
+      return stream(`msg_${modelRequests}`, [{ type: "text", text: "There you go." }], "end_turn");
+    }
+    if (lastMsg?.role === "user" && !lastBlocks.some((b) => b.type === "tool_result") && JSON.stringify(lastMsg.content).includes("send me a sticker")) {
+      return stream(`msg_${modelRequests}`, [{ type: "tool_use", id: "toolu_find", name: "mcp__shuvi__find_sticker", input: { terms: ["hello"] } }], "tool_use");
+    }
     if (lastMsg?.role === "user" && image) {
       imageSeen = { data: image.source!.data!, withText: JSON.stringify(lastBlocks.filter((b) => b.type === "text")), messages: body.messages!.length };
       return stream(`msg_${modelRequests}`, [{ type: "text", text: "A red square." }], "end_turn");
@@ -226,6 +243,34 @@ await until("the answer", () => texts().length > before);
 check(texts().at(-1) === "Green tea.", `the next turn's system prompt has the edit (${texts().at(-1)})`);
 const resumed = (db.$client.query("select backend_session_id from chats").get() as { backend_session_id: string }).backend_session_id;
 check(resumed === session, "and it was the same conversation, resumed");
+
+// ---- 6. stickers: the library is indexed, the set fetched, and find_sticker + sticker reach sendSticker --
+tg.files.set("cats-f1", Buffer.from(PHOTO, "base64"));
+tg.files.set("cats-f2", Buffer.from(PHOTO, "base64"));
+tg.stickerSets.set("Cats", {
+  name: "Cats",
+  title: "Cats",
+  sticker_type: "regular",
+  stickers: [1, 2].map((n) => ({ file_id: `cats-f${n}`, file_unique_id: `cats-u${n}`, type: "regular", width: 512, height: 512, is_animated: false, is_video: false, emoji: "👋", set_name: "Cats" })),
+} as never);
+mkdirSync(join(dataDir, "home", "stickers"), { recursive: true });
+writeFileSync(
+  join(dataDir, "home", "stickers", "Cats.yaml"),
+  "pack: Cats\nrole: avatar\nstickers:\n  - n: 1\n    file_unique_id: cats-u1\n    desc: a cat waving\n    use: hello, hi\n  - n: 2\n    file_unique_id: cats-u2\n    desc: a cat asleep\n    use: good night\n",
+);
+await until("the server to index the pack and fetch its set", () => {
+  const r = db.$client.query("select count(*) as n from sticker_meta where set_name = 'Cats'").get() as { n: number } | null;
+  return (r?.n ?? 0) === 2;
+});
+log("ok  the server indexed home/stickers/Cats.yaml and fetched the set (getStickerSet)");
+tg.updates.push(dmUpdate(8, "send me a sticker"));
+await until("the sticker to be sent", () => tg.sent("sendSticker").length >= 1);
+check(stickerFound.includes("Cats/1") && stickerFound.includes("a cat waving"), `find_sticker offered Cats/1 (${stickerFound.slice(0, 120)})`);
+check(stickerResult.includes("Sent Cats/1."), `sticker() accepted it (${stickerResult})`);
+check(tg.sent("sendSticker")[0]!.sticker === "cats-f1", "the fake Bot API received sendSticker with the sticker's file_id");
+await until("the text after it", () => texts().includes("There you go."));
+const stickerRow = db.$client.query("select status, tg_message_id from chat_events where kind = 'bot_sticker'").get() as { status: string; tg_message_id: number };
+check(stickerRow.status === "sent" && stickerRow.tg_message_id > 0, "the bot_sticker row is recorded as delivered, with its message id");
 
 log("PASS");
 cleanup();

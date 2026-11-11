@@ -38,6 +38,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` |
 | turn liveness, the wall-clock limit | `src/server/spawn.ts`, `src/server/waker.ts` |
 | telling the owner anything (alerts, /status, approvals) | `src/control/bot.ts`, `src/store/control.ts`, `src/control/approvals.ts` |
+| the sticker library: its format and index, ranking, the rules `sticker` enforces | `src/capabilities/stickers/` (`library.ts`, `find.ts`, `rules.ts`) |
 
 ## Adding a capability
 

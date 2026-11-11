@@ -1,4 +1,4 @@
-import type { Message, Update } from "grammy/types";
+import type { Message, Sticker, Update } from "grammy/types";
 import { MAIN_COMMANDS } from "../server/commands.ts";
 import type { CommandPayload, MessageMedia, MessagePayload, Speaker } from "../store/events.ts";
 
@@ -65,12 +65,17 @@ export function mediaOf(m: Message): MessageMedia | undefined {
   }
   const s = m.sticker;
   if (s?.file_id) {
-    const animated = s.is_animated || s.is_video;
-    const thumb = s.thumbnail;
-    const file = !animated ? { fileId: s.file_id, fileUniqueId: s.file_unique_id } : thumb ? { fileId: thumb.file_id, fileUniqueId: thumb.file_unique_id, thumbnail: true } : null;
+    const file = stickerShownFile(s);
     return { kind: "sticker", fileUniqueId: s.file_unique_id, file, state: file ? "pending" : "none" };
   }
   return undefined;
+}
+
+/** Which file shows a sticker to the model: a static one itself, an animated or video one its thumbnail (null: none). */
+export function stickerShownFile(s: Sticker): MessageMedia["file"] {
+  if (!s.is_animated && !s.is_video) return { fileId: s.file_id, fileUniqueId: s.file_unique_id };
+  const thumb = s.thumbnail;
+  return thumb ? { fileId: thumb.file_id, fileUniqueId: thumb.file_unique_id, thumbnail: true } : null;
 }
 
 function forwardedFrom(m: Message): string | undefined {

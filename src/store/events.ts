@@ -111,6 +111,17 @@ export interface ExternalPayload {
   trigger: boolean;
 }
 
+/** A sticker the assistant sends (src/capabilities/stickers/). */
+export interface BotStickerPayload {
+  /** What `sendSticker` takes. */
+  fileId: string;
+  /** The sticker's stable identity: what its recent uses are counted by. */
+  fileUniqueId: string;
+  /** Its library id (`<pack>/<n>`), for people reading the log. */
+  stickerId: string;
+  emoji?: string;
+}
+
 export type ChatEvent = typeof chatEvents.$inferSelect;
 export type Chat = typeof chats.$inferSelect;
 
@@ -273,7 +284,8 @@ export function enqueueOutbound(
   db: Db,
   e:
     | { chatId: number; kind: "bot_message"; payload: BotMessagePayload; idemKey: string; turnId?: number }
-    | { chatId: number; kind: "bot_reaction"; payload: BotReactionPayload; idemKey: string; turnId?: number },
+    | { chatId: number; kind: "bot_reaction"; payload: BotReactionPayload; idemKey: string; turnId?: number }
+    | { chatId: number; kind: "bot_sticker"; payload: BotStickerPayload; idemKey: string; turnId?: number },
 ): void {
   db.insert(chatEvents)
     .values({

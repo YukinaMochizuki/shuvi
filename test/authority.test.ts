@@ -26,7 +26,7 @@ const strangerSays = (db: Db, text: string) => ownerSays(db, text, { from: STRAN
 async function turnWith(db: Db, script: Step[]) {
   const turn = claimTurn(db, ownerChatId(db))!;
   let adapter!: ScriptedAdapter;
-  await runTurn({ db, turnId: turn.id, home, timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }), makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)) });
+  await runTurn({ db, turnId: turn.id, home, timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }), makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)) });
   return adapter;
 }
 const text = (a: ScriptedAdapter, i: number) => a.toolResults[i]!.result.content.map((c) => (c.type === "text" ? c.text : "")).join("");

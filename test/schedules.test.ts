@@ -26,7 +26,7 @@ async function turnWith(db: Db, script: Step[], ownerId: number | undefined = OW
     home,
     timeZone: TZ,
     ...(ownerId !== undefined ? { ownerId } : {}),
-    capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }),
+    capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }),
     makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)),
   });
   return { outcome, adapter, turn: getTurn(db, turn.id)! };
@@ -124,7 +124,7 @@ describe("firing", () => {
     const s = createSchedule(db, { chatId: ownerChatId(db), note: "n", cron: "0 8 * * *", timeZone: TZ });
     db.$client.run("update schedules set cron = 'no longer valid', next_at = '2000-01-01T00:00:00.000Z' where id = ?", [s.id]);
     const stop = new AbortController();
-    const files = { download: async () => new Uint8Array() };
+    const files = { download: async () => new Uint8Array(), stickerSet: async () => Promise.reject(new Error("unused")) };
     const loop = capabilityLoops(enabledCapabilities({ SHUVI_WEB: "off" }), { db, home, timeZone: TZ, ownerId: OWNER, files, signal: stop.signal }).find((l) => l.name === "schedules")!;
     await loop.run();
     stop.abort();
