@@ -22,11 +22,33 @@ Run typecheck, test and the e2e script before calling a change done.
 |---|---|
 | what is stored, and the exactly-once keys | `src/store/schema.ts` |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
-| how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` |
+| how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |
+| what a capability is, what it may touch | `src/capabilities/types.ts`, `src/capabilities/index.ts` |
 | receiving updates and the Telegram offset | `src/server/poller.ts`, `src/telegram/inbound.ts` |
 | sending, 429s, long messages | `src/server/sender.ts`, `src/telegram/format.ts` |
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` |
+
+## Adding a capability
+
+A capability (speech, web, …) is one folder plus one line:
+
+1. Create `src/capabilities/<id>/index.ts` exporting a `Capability` (`defineCapability`, see
+   `src/capabilities/types.ts`): its `id`, `enable(env)` (read your own `SHUVI_*` variables here and list
+   them in the module header; return `null` when off), and any of `tools`, `section`, `loops`.
+2. Append it to `CAPABILITIES` in `src/capabilities/index.ts`. Append, do not insert: registry order is
+   tool order and prompt-section order, and so part of the prompt-cache prefix. Speech stays first.
+
+Do not edit `src/agent/turn.ts`, `src/agent/prompt.ts`, `src/server/main.ts` or `src/env.ts` for it. A
+capability never talks to Telegram: its tools and loops queue rows, and the sender sends them.
+
+## Migrations on parallel branches
+
+A branch commits the migration `bun run db:generate` produced for it. Whoever rebases that branch onto a
+`main` that has gained other migrations since deletes the branch's own migration files (its
+`drizzle/NNNN_*.sql`, its `drizzle/meta/NNNN_snapshot.json`, and its entry in `drizzle/meta/_journal.json`)
+and re-runs `bun run db:generate` after the rebase, so migration numbers never collide and each snapshot
+builds on the one before it.
 
 ## Things that are easy to get wrong
 

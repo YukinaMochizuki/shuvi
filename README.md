@@ -23,10 +23,11 @@ bun scripts/e2e-fake.ts      # the whole path against a fake Telegram and a fake
 SHUVI_BOT_TOKEN=… SHUVI_OWNER_ID=… SHUVI_OWNER_LANGUAGE="Traditional Chinese (Taiwan)" bun run server
 ```
 
-Configuration is environment variables only; `src/env.ts` lists them. The code and its prompts are all
-English; `SHUVI_OWNER_LANGUAGE` is where the owner's own language is set, and the assistant replies in it.
-Turns run on the Claude login of the user the server runs as, unless `SHUVI_CLAUDE_CONFIG_DIR` names
-another.
+Configuration is environment variables only; `src/env.ts` lists the framework's, and each capability
+lists its own in the header of `src/capabilities/<id>/index.ts` (e.g. `SHUVI_WEB`). The code and its
+prompts are all English; `SHUVI_OWNER_LANGUAGE` is where the owner's own language is set, and the
+assistant replies in it. Turns run on the Claude login of the user the server runs as, unless
+`SHUVI_CLAUDE_CONFIG_DIR` names another.
 
 ## Data
 

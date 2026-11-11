@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildSystemPrompt } from "../src/agent/prompt.ts";
 import { runTurn } from "../src/agent/turn.ts";
+import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
 import { getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
 import { claimTurn, getTurn } from "../src/store/turns.ts";
@@ -21,7 +22,8 @@ async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: 
     timeZone: "UTC",
     makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)),
     ...(opts.signal ? { signal: opts.signal } : {}),
-    ...(opts.web ? { web: opts.web } : {}),
+    // The web capability is on when the test asks for it, off otherwise, through its own variables.
+    capabilities: enabledCapabilities(opts.web ? { ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) } : { SHUVI_WEB: "off" }),
   });
   return { outcome, adapter, turn: getTurn(db, turn.id)! };
 }

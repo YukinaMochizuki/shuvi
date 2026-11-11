@@ -1,11 +1,9 @@
-import { z } from "zod";
-import { err, ok, type BackendAdapter, type ToolBoundary, type ToolBundle, type ToolDef } from "agent-runtime";
-import { webTools, type WebToolsConfig } from "agent-runtime/tools/web";
+import type { BackendAdapter, ToolBoundary } from "agent-runtime";
+import { capabilityTools, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
 import type { Db } from "../store/db.ts";
-import { enqueueOutbound, getChat, getEvent, lastMessage, recentHistory, triggersAfter, type Chat, type MessagePayload } from "../store/events.ts";
+import { enqueueOutbound, getChat, recentHistory, triggersAfter, type Chat, type MessagePayload } from "../store/events.ts";
 import { extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
 import { buildSystemPrompt } from "./prompt.ts";
-import { normalizeReaction, REACTION_EMOJI } from "./reactions.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory } from "./render.ts";
 
 /** How many earlier events a fresh conversation opens with (docs/design.md §13, `/new`). */
@@ -20,7 +18,9 @@ export const HISTORY_ON_NEW = 10;
  *     arrives (`onTool`, which fires before the tool runs, so the text before a `say` is queued before the
  *     `say`), and when the turn ends. Thinking is never sent: on Opus 5.5 it carries reasoning summaries
  *     that cannot be told apart from progress notes.
- *   - `say` queues a message mid-turn, for progress the model wants the person to see.
+ *   - `say` queues a message mid-turn, for progress the model wants the person to see. The `say`, `react`
+ *     and `pass` tools live in src/capabilities/speech/; the rules they rely on (queueMessage, the
+ *     boundary) stay here.
  *   - `pass` ends the turn's speech: nothing written after it is sent, and every later tool call is
  *     refused with a note to stop.
  * Each queued message carries the idempotency key `turn:<id>:<n>`, numbered in the order the turn
@@ -29,6 +29,9 @@ export const HISTORY_ON_NEW = 10;
  * Messages that arrive WHILE the turn runs are appended to the next tool result (the runtime's tool
  * boundary), and the turn's `to_seq` widens to cover them, so the cursor rule in store/turns.ts counts
  * them as answered by this turn. One that arrives after the last tool call is left for the next turn.
+ *
+ * The turn's tools and the capability sections of its system prompt come from the enabled capabilities
+ * (src/capabilities/), in registry order; this module does not know which capabilities exist.
  */
 
 export interface TurnDeps {
@@ -40,8 +43,8 @@ export interface TurnDeps {
   /** The language the owner speaks (`SHUVI_OWNER_LANGUAGE`), named in the system prompt. */
   ownerLanguage?: string;
   model?: string;
-  /** The web capability (agent-runtime's shared web tools). Absent: the turn has no web access. */
-  web?: WebToolsConfig;
+  /** The capabilities enabled in this process, in registry order (capabilities/index.ts). */
+  capabilities: readonly EnabledCapability[];
   /** The driver for this turn, built around the boundary the turn supplies. */
   makeAdapter: (boundary: ToolBoundary) => BackendAdapter;
   signal?: AbortSignal;
@@ -59,59 +62,15 @@ export interface TurnState {
   toSeq: number;
 }
 
-function queueMessage(db: Db, s: TurnState, text: string): void {
+/** Queue one message of the turn. After `pass` nothing is queued: that is where `pass` closes speech. */
+export function queueMessage(db: Db, s: TurnState, text: string): void {
   const body = text.trim();
   if (!body || s.passed) return;
   enqueueOutbound(db, { chatId: s.chat.id, kind: "bot_message", payload: { text: body }, idemKey: `turn:${s.turnId}:${s.n++}`, turnId: s.turnId });
 }
 
-function queueReaction(db: Db, s: TurnState, targetSeq: number, emoji: string): void {
+export function queueReaction(db: Db, s: TurnState, targetSeq: number, emoji: string): void {
   enqueueOutbound(db, { chatId: s.chat.id, kind: "bot_reaction", payload: { targetSeq, emoji }, idemKey: `turn:${s.turnId}:${s.n++}`, turnId: s.turnId });
-}
-
-const emojiList = REACTION_EMOJI.join(" ");
-
-export function turnTools(db: Db, s: TurnState): ToolBundle {
-  const say: ToolDef<{ text: string }> = {
-    name: "say",
-    description: "Send a message partway through your work (progress, an early conclusion). Not for your final answer: write that as text.",
-    inputSchema: { text: z.string().min(1).describe("The message to send, in markdown") },
-    async handler({ text }) {
-      queueMessage(db, s, text);
-      return ok("Sent.");
-    },
-  };
-  const react: ToolDef<{ seq: number; emoji: string }> = {
-    name: "react",
-    description: `React to a message. seq is the #number shown before it. Allowed emoji: ${emojiList}`,
-    inputSchema: { seq: z.number().int().describe("The message's #number"), emoji: z.string().describe("One emoji") },
-    async handler({ seq, emoji }) {
-      const e = normalizeReaction(emoji);
-      if (!e) return err(`Telegram does not accept "${emoji}" as a reaction. Allowed: ${emojiList}`);
-      const target = getEvent(db, seq);
-      if (!target || target.chatId !== s.chat.id || (target.kind !== "message" && target.kind !== "bot_message")) {
-        return err(`#${seq} is not a message in this chat.`);
-      }
-      queueReaction(db, s, seq, e);
-      return ok("Reacted.");
-    },
-  };
-  const pass: ToolDef<{ reaction?: string }> = {
-    name: "pass",
-    description: "Do not reply; end this turn. Optionally react to the latest message. Nothing you write after this is sent.",
-    inputSchema: { reaction: z.string().optional().describe("An emoji to react with (optional)") },
-    async handler({ reaction }) {
-      if (reaction) {
-        const e = normalizeReaction(reaction);
-        if (!e) return err(`Telegram does not accept "${reaction}" as a reaction. Allowed: ${emojiList}`);
-        const last = lastMessage(db, s.chat.id, s.toSeq);
-        if (last) queueReaction(db, s, last.seq, e);
-      }
-      s.passed = true;
-      return ok("OK. This turn ends here; write nothing more.");
-    },
-  };
-  return { serverName: "shuvi", tools: [say, react, pass] as ToolDef[] };
 }
 
 /** The boundary around every tool call of the turn: refuse after `pass`, append what arrived meanwhile. */
@@ -164,7 +123,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   };
 
   const adapter = deps.makeAdapter(turnBoundary(db, s, deps.timeZone));
-  const tools = [turnTools(db, s), ...(deps.web ? [webTools(deps.web)] : [])];
+  const owner: OwnerInfo = { name: deps.ownerName ?? (input[0]!.payload as unknown as MessagePayload).from.name, ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
+  const tools = capabilityTools(deps.capabilities, { db, chat, turnId, timeZone: deps.timeZone, owner, state: s });
   const prompt = history.length ? renderWithHistory(history, input, deps.timeZone) : renderTurnInput(input, deps.timeZone);
   let lastThinking = false;
   const opts = {
@@ -192,7 +152,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
           { backendSessionId: chat.backendSessionId, prompt, tools, ...(deps.model ? { model: deps.model } : {}), ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
           opts,
         )
-      : await adapter.run({ prompt, tools, systemPrompt: buildSystemPrompt(deps.home, chat, { name: deps.ownerName ?? (input[0]!.payload as unknown as MessagePayload).from.name, ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) }, { web: !!deps.web }), ...(deps.model ? { model: deps.model } : {}) }, opts);
+      : await adapter.run({ prompt, tools, systemPrompt: buildSystemPrompt(deps.home, chat, owner, deps.capabilities), ...(deps.model ? { model: deps.model } : {}) }, opts);
     flush();
     const u = result.usage;
     finishTurn(db, turnId, { status: "done", usage: u, contextTokens: u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens + u.outputTokens });

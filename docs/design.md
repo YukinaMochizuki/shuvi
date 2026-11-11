@@ -335,7 +335,9 @@ Most tools are shuvi's own, because they act on its concepts: `say`, `react`, `p
 retrieval, policy. Tools that need no host state and that other hosts want too live in agent-runtime's
 shared layer (`agent-runtime/tools/*`) and are configured by shuvi, never copied: today that is the web
 tools (`web_search`, `web_fetch`; `web_scrape` once a Crawl4AI instance is available). shuvi groups its
-tools into capability groups (§6); `web` is one.
+tools into capability groups (§6); `web` is one. In the code each group is a capability, one folder
+under `src/capabilities/` listed in one registry (`src/capabilities/index.ts`), whose order is the order
+of the tools and of the prompt sections.
 
 ## 15. Each chat's computer (planned)
 
