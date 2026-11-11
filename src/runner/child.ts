@@ -41,6 +41,7 @@ const outcome = await runTurn({
   timeZone: cfg.timeZone,
   ...(cfg.model ? { model: cfg.model } : {}),
   ...(cfg.ownerLanguage ? { ownerLanguage: cfg.ownerLanguage } : {}),
+  ...(cfg.web ? { web: cfg.web } : {}),
   makeAdapter: (boundary) => new ClaudeBackend({ boundary, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
   signal: ac.signal,
 });

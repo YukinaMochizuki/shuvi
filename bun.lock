@@ -6,7 +6,7 @@
       "name": "shuvi",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.280",
-        "agent-runtime": "github:YukinaMochizuki/agent-runtime#0b848d7c494bb2fa669a1c570eee3b6348ac1677",
+        "agent-runtime": "github:YukinaMochizuki/agent-runtime#439fa6bc75f2bbd7079502ee2cde5c57d22959e7",
         "drizzle-orm": "^0.45.2",
         "grammy": "^1.46.0",
         "zod": "^4.4.3",
@@ -131,7 +131,7 @@
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
 
-    "agent-runtime": ["agent-runtime@github:YukinaMochizuki/agent-runtime#0b848d7", { "dependencies": { "@ai-sdk/openai-compatible": "^3.0.87", "ai": "^7.0.166" }, "peerDependencies": { "@anthropic-ai/claude-agent-sdk": ">=0.3.280", "zod": "^4.4.3" } }, "YukinaMochizuki-agent-runtime-0b848d7", "sha512-Cl5CFc0n5iymft4o+dAckIwucSlngIU/Ek4rEY7wkoTd9I8DI1tu/OkfWlgHlqtiFkRjuFz+ILHptFohx7DzCw=="],
+    "agent-runtime": ["agent-runtime@github:YukinaMochizuki/agent-runtime#439fa6b", { "dependencies": { "@ai-sdk/openai-compatible": "^3.0.87", "ai": "^7.0.166" }, "peerDependencies": { "@anthropic-ai/claude-agent-sdk": ">=0.3.280", "zod": "^4.4.3" } }, "YukinaMochizuki-agent-runtime-439fa6b", "sha512-9rCpQyYBH3y8m9tGypZeQ5S/+BQhiMqq9eQz7xdn3I32SxCzTduYjK9/8HehLK+FUGrsHzRLcGppJhgISgJKEw=="],
 
     "ai": ["ai@7.0.169", "", { "dependencies": { "@ai-sdk/gateway": "4.0.142", "@ai-sdk/provider": "4.0.37", "@ai-sdk/provider-utils": "5.0.79" }, "peerDependencies": { "zod": "^3.25.76 || ^4.1.8" } }, "sha512-p2GHNRXnIP7EE5/pV8pq2RrFDtXrSMSAZB6/CQHYXCaFXrKqspzDyXn89wSg5bv61V3KukjQQtguSOVkN5KI9w=="],
 

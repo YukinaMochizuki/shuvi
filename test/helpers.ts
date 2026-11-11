@@ -59,7 +59,7 @@ export type Step =
  */
 export class ScriptedAdapter implements BackendAdapter {
   readonly id = "scripted";
-  readonly calls: { method: "run" | "continueRun"; prompt: string; systemPrompt?: string; backendSessionId?: string }[] = [];
+  readonly calls: { method: "run" | "continueRun"; prompt: string; systemPrompt?: string; backendSessionId?: string; tools: string[] }[] = [];
   readonly toolResults: { name: string; result: ToolResult }[] = [];
   constructor(
     private readonly boundary: ToolBoundary,
@@ -67,12 +67,12 @@ export class ScriptedAdapter implements BackendAdapter {
   ) {}
 
   run(input: Parameters<BackendAdapter["run"]>[0], opts: AdapterRunOptions): Promise<AdapterRunResult> {
-    this.calls.push({ method: "run", prompt: input.prompt, ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}) });
+    this.calls.push({ method: "run", prompt: input.prompt, ...(input.systemPrompt ? { systemPrompt: input.systemPrompt } : {}), tools: input.tools.flatMap((b) => b.tools.map((t) => t.name)) });
     return this.play(input.tools.flatMap((b) => b.tools as ToolDef[]), opts, "fake-session");
   }
 
   continueRun(input: Parameters<BackendAdapter["continueRun"]>[0], opts: AdapterRunOptions): Promise<AdapterRunResult> {
-    this.calls.push({ method: "continueRun", prompt: input.prompt, backendSessionId: input.backendSessionId });
+    this.calls.push({ method: "continueRun", prompt: input.prompt, backendSessionId: input.backendSessionId, tools: input.tools.flatMap((b) => b.tools.map((t) => t.name)) });
     return this.play(input.tools.flatMap((b) => b.tools as ToolDef[]), opts, input.backendSessionId);
   }
 
