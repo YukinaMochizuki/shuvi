@@ -161,6 +161,8 @@ export class FakeTelegram {
             if (!bytes) return Response.json({ ok: false, error_code: 400, description: "Bad Request: invalid file_id" });
             return Response.json({ ok: true, result: { file_id: id, file_unique_id: `u-${id}`, file_size: bytes.length, file_path: `files/${encodeURIComponent(id)}` } });
           }
+          case "setMyCommands":
+            return Response.json({ ok: true, result: true });
           case "sendMessage":
             return Response.json({ ok: true, result: { message_id: this.nextMessageId++, date: 0, chat: { id: body.chat_id, type: "private" }, text: body.text } });
           default:

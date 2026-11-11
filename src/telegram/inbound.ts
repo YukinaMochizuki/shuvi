@@ -1,4 +1,5 @@
 import type { Message, Update } from "grammy/types";
+import { MAIN_COMMANDS } from "../server/commands.ts";
 import type { CommandPayload, MessageMedia, MessagePayload, Speaker } from "../store/events.ts";
 
 /**
@@ -19,7 +20,7 @@ export type Classified =
   | { kind: "command"; chat: { id: number; type: "private" }; tgMessageId: number; payload: CommandPayload }
   | { kind: "message"; chat: { id: number; type: "private" }; tgMessageId: number; payload: MessagePayload };
 
-const COMMANDS = new Set(["new", "stop"]);
+const COMMANDS = new Set<string>(MAIN_COMMANDS.map((c) => c.command));
 
 function speaker(m: Message): Speaker {
   const u = m.from;

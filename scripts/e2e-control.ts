@@ -124,6 +124,9 @@ await until("the /status reply", () => controlTexts().length >= 1);
 await Bun.sleep(500);
 check(controlTexts().length === 1, "only the owner gets an answer");
 check(controlTexts()[0]!.startsWith("shuvi, commit e2e1234") && controlTexts()[0]!.includes("Running turns: 0") && controlTexts()[0]!.includes("Outbound pending: 0"), `/status lists turns, outbound and the commit (${JSON.stringify(controlTexts()[0])})`);
+const menu = (bot: FakeTelegram) => bot.sent("setMyCommands").map((b) => `${JSON.stringify(b.scope)} ${(b.commands as { command: string }[]).map((c) => c.command).join(",")}`);
+const ownerScope = JSON.stringify({ type: "chat", chat_id: OWNER });
+check(menu(tg).join("|") === `${ownerScope} new,stop` && menu(control).join("|") === `${ownerScope} status,stop`, `each bot registered its commands for the owner's chat (${menu(tg)} / ${menu(control)})`);
 
 // ---- 2. a forced failure, retried to the cap ---------------------------------------------------------
 tg.updates.push(dmUpdate(1, "please fail"));
