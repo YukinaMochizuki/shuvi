@@ -1,6 +1,6 @@
 import type { Message, Sticker, Update } from "grammy/types";
 import { MAIN_COMMANDS } from "../server/commands.ts";
-import type { CommandPayload, MessageMedia, MessagePayload, Speaker } from "../store/events.ts";
+import type { CommandPayload, MessageAttachment, MessageMedia, MessagePayload, Speaker } from "../store/events.ts";
 
 /**
  * What an inbound Telegram update IS to shuvi, decided before anything is written. Pure, so the rules
@@ -78,6 +78,33 @@ export function stickerShownFile(s: Sticker): MessageMedia["file"] {
   return thumb ? { fileId: thumb.file_id, fileUniqueId: thumb.file_unique_id, thumbnail: true } : null;
 }
 
+/**
+ * The file a message carries, if any, for the chat's computer to keep in `~/inbox/`
+ * (src/capabilities/computer/): a document, the largest size of a photo, a video, audio, a voice note, a
+ * round video or a GIF. Recorded as a fact with no state: only the computer capability handles it.
+ */
+export function attachmentOf(m: Message): MessageAttachment | undefined {
+  const pick = (kind: MessageAttachment["kind"], f: { file_id: string; file_unique_id: string; file_size?: number; file_name?: string; mime_type?: string }, fallback: string): MessageAttachment => ({
+    kind,
+    fileId: f.file_id,
+    fileUniqueId: f.file_unique_id,
+    name: f.file_name || fallback,
+    ...(f.file_size ? { size: f.file_size } : {}),
+    ...(f.mime_type ? { mimeType: f.mime_type } : {}),
+  });
+  if (m.document) return pick("document", m.document, "file");
+  if (m.photo?.length) {
+    const largest = [...m.photo].sort((a, b) => a.width * a.height - b.width * b.height).at(-1)!;
+    return pick("photo", { ...largest, mime_type: "image/jpeg" }, "photo.jpg");
+  }
+  if (m.video) return pick("video", m.video, "video.mp4");
+  if (m.animation) return pick("animation", m.animation, "animation.mp4");
+  if (m.audio) return pick("audio", m.audio, "audio");
+  if (m.voice) return pick("voice", m.voice, "voice.ogg");
+  if (m.video_note) return pick("video_note", m.video_note, "round-video.mp4");
+  return undefined;
+}
+
 function forwardedFrom(m: Message): string | undefined {
   const o = m.forward_origin;
   if (!o) return undefined;
@@ -114,6 +141,9 @@ export function classify(update: Update, ownerId: number, botUsername?: string):
   if (stand) payload.placeholder = true;
   const media = mediaOf(m);
   if (media) payload.media = media;
+  // Only the owner's files are ever copied into a computer.
+  const attachment = m.from?.id === ownerId ? attachmentOf(m) : undefined;
+  if (attachment) payload.attachment = attachment;
   const fwd = forwardedFrom(m);
   if (fwd) payload.forwardedFrom = fwd;
   const r = m.reply_to_message;

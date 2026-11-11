@@ -282,7 +282,7 @@ fields.
 - **Sticker description cache**: a short description keyed by `file_unique_id`, for replay, retrieval
   and the sticker library; the model never sees it instead of the image.
 - **Video and large files** never block a turn: the assistant gets a thumbnail and metadata first and
-  decides whether to process them. Common processing (keyframes, transcription, compression) is a
+  decides whether to process them. Common processing (frames, transcription, compression) is a
   framework tool that runs remotely and returns the result, so the assistant never assembles the commands
   itself.
 - Heavy computation always runs remotely (on Hangar), never on shuvi's machine.
@@ -385,7 +385,7 @@ tools into capability groups (§6); `web` is one. In the code each group is a ca
 under `src/capabilities/` listed in one registry (`src/capabilities/index.ts`), whose order is the order
 of the tools and of the prompt sections.
 
-## 15. Each chat's computer (planned)
+## 15. Each chat's computer
 
 Work that needs a shell (processing a file, running a CLI, a long job) happens on a computer that
 belongs to the chat:
@@ -400,9 +400,22 @@ belongs to the chat:
 - **One computer, three ways to run**, following workstream's box tools: `exec(cmd)` (synchronous,
   time-limited), `exec(cmd, background: true)` (asynchronous; the result returns to the chat as an
   event), and `boost: { cpu, memory }` (on a larger short-lived copy with the same home). Framework media
-  tools (keyframes, transcription) are prepared `exec` calls.
+  tools (evenly spaced frames, transcription) are prepared `exec` calls.
 - **Visibility follows §6**: the owner's DM may read other chats' homes; a group sees only its own. Only
   a turn the owner triggered gets `exec`.
+
+As built (v1, `src/capabilities/computer/`): the computer is a Hangar Container `ct-<chat>` with a Disk
+`home-<chat>` mounted at `/home/shuvi`, both made on the first exec, stopped after
+`SHUVI_COMPUTER_IDLE_MINUTES` without an exec or a running job, never deleted; the store's `computers` row
+is what every process knows of it. All chats share one base image (`computer/Dockerfile`);
+`~/.computer.yaml` builds come later. `exec` follows workstream's box tools: a synchronous run with a
+timeout, or a background job (an M6 `poll` job) whose end comes back as `job_done` with a usage line, and
+`read_job` / `cancel_job`. A boost resizes the same computer (stop, apply, start, then back), so it is
+refused while background jobs run. The owner's files are copied into `~/inbox/` when the computer next
+runs (never starting it for that), photos only on `save_photo`; `send_file` and `send_photo` send from the
+computer. The tools are owner-only at call time. Reading another chat's home from the DM is not built yet.
+A stopped container still holds a Hangar machine, so the plan's machine limit (10) is the most chats that
+can have a computer.
 
 **Secrets** are named profiles (e.g. `modal`: a set of env vars) kept in a host-side store outside
 `home/` and git; policy names them, never their values.
@@ -413,6 +426,10 @@ belongs to the chat:
 - Known secret values are replaced with `[REDACTED:<profile>]` in any output before the model or the
   chat sees it.
 - Only a turn the owner triggered can use one.
+- As built: profiles live in `/etc/shuvi.secrets.yaml` (mode 600); `request_secret` puts an approval card
+  (§13) naming the variables to the owner; a grant puts a "Revoke now" card beside it. Every value in the
+  file, and every value it ever held (kept beside it, mode 600), is redacted, also where output is cut at a
+  byte offset; a file holding one is not sent; with nothing to redact by, output is withheld.
 
 ## 16. Deployment assumptions
 

@@ -50,7 +50,7 @@ describe("the owner's DM system prompt is byte-identical to before the capabilit
 
 describe("the registry", () => {
   test("speech is first and always on; web, vision and schedules follow their variables", () => {
-    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks", "stickers"]);
+    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks", "stickers", "computer"]);
     expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks", "stickers"]);
     expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_STICKERS: "off" }).map((e) => e.capability.id)).toEqual(["speech", "jobs"]);
   });

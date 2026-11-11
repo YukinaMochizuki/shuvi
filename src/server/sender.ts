@@ -1,4 +1,5 @@
-import { GrammyError, HttpError, type Api } from "grammy";
+import { existsSync, rmSync } from "node:fs";
+import { GrammyError, HttpError, InputFile, type Api } from "grammy";
 import type { Db } from "../store/db.ts";
 import {
   getChat,
@@ -7,6 +8,7 @@ import {
   markSent,
   pendingOutbound,
   recordPartSent,
+  type BotFilePayload,
   type BotMessagePayload,
   type BotReactionPayload,
   type BotStickerPayload,
@@ -88,6 +90,24 @@ async function sendSticker(db: Db, api: Api, row: ChatEvent, tgChatId: number): 
   markSent(db, row.seq, msg.message_id);
 }
 
+/**
+ * A file or photo from the chat's computer (capabilities/computer/). Its bytes wait in the outbox until
+ * delivered, and are deleted once the row is marked sent. A file that is gone (a crash after it was
+ * deleted, before the row was marked) fails the row rather than sending nothing.
+ */
+async function sendFile(db: Db, api: Api, row: ChatEvent, tgChatId: number): Promise<void> {
+  const p = row.payload as unknown as BotFilePayload;
+  if (!existsSync(p.file)) {
+    markFailed(db, row.seq, `the file to send is gone from ${p.file}`);
+    return;
+  }
+  const input = new InputFile(p.file, p.name);
+  const caption = p.caption ? { caption: p.caption } : {};
+  const msg = p.as === "photo" ? await api.sendPhoto(tgChatId, input, caption) : await api.sendDocument(tgChatId, input, caption);
+  markSent(db, row.seq, msg.message_id);
+  rmSync(p.file, { force: true });
+}
+
 class Pending extends Error {}
 
 /** One pass over the queue. Stops at the first row that must wait, so a chat's order is never broken. */
@@ -103,6 +123,7 @@ export async function sendPass(db: Db, api: Api): Promise<SendResult> {
     try {
       if (row.kind === "bot_message") await sendMessage(db, api, row, chat.tgChatId);
       else if (row.kind === "bot_sticker") await sendSticker(db, api, row, chat.tgChatId);
+      else if (row.kind === "bot_file") await sendFile(db, api, row, chat.tgChatId);
       else await sendReaction(db, api, row, chat.tgChatId);
       res.sent++;
     } catch (e) {
@@ -113,6 +134,8 @@ export async function sendPass(db: Db, api: Api): Promise<SendResult> {
       }
       if (e instanceof GrammyError && e.error_code >= 400 && e.error_code < 500) {
         markFailed(db, row.seq, `${e.error_code} ${e.description}`);
+        // A file Telegram refused is never sent again: its bytes are not kept in the outbox.
+        if (row.kind === "bot_file") rmSync((row.payload as unknown as BotFilePayload).file, { force: true });
         res.failed++;
         continue;
       }

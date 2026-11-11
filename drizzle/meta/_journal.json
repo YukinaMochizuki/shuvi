@@ -43,6 +43,13 @@
       "when": 1794402796176,
       "tag": "0005_mean_valkyrie",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794404879790,
+      "tag": "0006_strong_maria_hill",
+      "breakpoints": true
     }
   ]
 }

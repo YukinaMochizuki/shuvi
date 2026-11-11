@@ -33,7 +33,7 @@ export interface WatchDeps {
 }
 
 /** Poll one job, bounded by its kind's timeout whether or not `poll` honours the signal. Never throws. */
-async function pollJob(kind: JobKind, job: Job, signal: AbortSignal): Promise<JobPoll | { error: string }> {
+async function pollJob(kind: JobKind, job: Job, signal: AbortSignal, db: Db): Promise<JobPoll | { error: string }> {
   const ms = kind.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS;
   const timeout = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -44,7 +44,7 @@ async function pollJob(kind: JobKind, job: Job, signal: AbortSignal): Promise<Jo
     }, ms);
   });
   try {
-    return await Promise.race([kind.poll!(job, AbortSignal.any([signal, timeout.signal])), timedOut]);
+    return await Promise.race([kind.poll!(job, AbortSignal.any([signal, timeout.signal]), db), timedOut]);
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
   } finally {
@@ -71,7 +71,7 @@ export async function jobWatchPass(deps: WatchDeps): Promise<{ finished: number[
       let note: string | null = null;
       if (kind?.poll) {
         if (signal.aborted) return; // shutting down: not polled, nothing decided
-        const r = await pollJob(kind, job, signal);
+        const r = await pollJob(kind, job, signal, deps.db);
         if ("error" in r) note = `poll failed: ${r.error}`;
         else if (r.state !== "running") {
           if (finishJob(deps.db, job.id, { state: r.state, result: r.result }) != null) finished.push(job.id);
