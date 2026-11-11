@@ -75,7 +75,7 @@ describe("the registry", () => {
       capabilities: enabledCapabilities({}),
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "pass" }])),
     });
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "view_stickers", "sticker", "add_sticker_pack", "web_fetch"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "view_stickers", "sticker", "add_sticker_pack", "web_fetch"]);
     const names = capabilityTools(enabledCapabilities({}), { db, home: fixtureHome(), chat: getChat(db, ownerChatId(db))!, turnId: turn.id, timeZone: "UTC", owner: {}, state: {} as never }).map((b) => b.serverName);
     expect(names).toEqual(["shuvi", "web"]);
   });
@@ -125,7 +125,7 @@ describe("a capability added to the registry", () => {
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "probe" }, { token: "done" }])),
     });
     expect(outcome).toBe("done");
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "view_stickers", "sticker", "add_sticker_pack", "web_fetch", "probe"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "view_stickers", "sticker", "add_sticker_pack", "web_fetch", "probe"]);
     const result = adapter.toolResults[0]!.result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
     expect(result).toContain(`hello from turn ${turn.id}`);
 
