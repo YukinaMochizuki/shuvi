@@ -26,6 +26,7 @@ import type { TelegramFiles } from "../telegram/files.ts";
  *     cached prefix holds), and the boundary decides at CALL time whether this call may run: only if the
  *     owner himself is in the turn so far (agent/turn.ts `ownerAuthority`). A capability
  *     does not check authority itself, and does not hide its tools to get the same effect.
+ *   - Its prompt `section` only reads (PromptContext): building the prompt never changes anything.
  *
  * PER-CHAT POLICY (home/policy.yaml, src/policy/, design §8) sits in front of all this: a turn uses only
  * the capabilities its chat's policy enables (`chatCapabilities`), so only those give it tools, prompt
@@ -59,13 +60,19 @@ export interface OwnerInfo {
   language?: string;
 }
 
-/** What the system prompt hands a capability's section. */
+/**
+ * What the system prompt hands a capability's section. A section only READS: it is built for every turn and
+ * is part of the prompt-cache prefix, so it never writes (not to `db`, not to home/), and the same state
+ * must always give the same bytes (a stable order, ties included).
+ */
 export interface PromptContext {
   home: string;
   chat: Chat;
   owner: OwnerInfo;
   /** This chat's policy (src/policy/). Absent in a bare call: the chat's default. */
   chatPolicy?: ChatPolicy;
+  /** The store, to read from only. Absent when the prompt is built without one (a bare call, a test). */
+  db?: Db;
 }
 
 /** What the server hands a capability's loops. No Telegram API: only the sender talks to Telegram. */

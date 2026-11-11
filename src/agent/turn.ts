@@ -358,7 +358,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   // Built fresh every turn and sent on a resume too, so an edit to home/ reaches the model from the next
   // turn without `/new`. The driver decides whether a resume honours it: the runner's Claude driver does
   // (`liveSystemPrompt`), and openai-compat always sends the prompt it is given.
-  const systemPrompt = buildSystemPrompt(deps.home, chat, owner, capabilities, chatPolicy);
+  const systemPrompt = buildSystemPrompt(deps.home, chat, owner, capabilities, chatPolicy, db);
   const fresh = (p: Prompt) => adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
   try {
     let result;

@@ -11,8 +11,9 @@ import { defaultFormats, defaultPlugins } from "jimp";
 import { buildSystemPrompt } from "../src/agent/prompt.ts";
 import { runTurn } from "../src/agent/turn.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
-import { fetchPass, setStickers } from "../src/capabilities/stickers/fetch.ts";
-import { findStickers, getSticker, MATCH_USE, ROLE_WEIGHT, TIER_WEIGHT, USE_PENALTY } from "../src/capabilities/stickers/find.ts";
+import { commitHomeEdit } from "../src/capabilities/memory/home.ts";
+import { fetchPass, getSet, setStickers } from "../src/capabilities/stickers/fetch.ts";
+import { findStickers, getSticker, LIST_PAGE, listStickers, MATCH_USE, ROLE_WEIGHT, TIER_WEIGHT, USE_PENALTY, VOCABULARY_CAP, vocabulary } from "../src/capabilities/stickers/find.ts";
 import { parsePack, syncLibrary } from "../src/capabilities/stickers/library.ts";
 import { refusal } from "../src/capabilities/stickers/rules.ts";
 import { cellBox, decode, PER_PAGE, renderContactSheet } from "../src/capabilities/stickers/sheet.ts";
@@ -506,6 +507,288 @@ describe("the contact sheet", () => {
     requestSet(w.db, "Nope");
     for (let i = 0; i < MAX_ATTEMPTS; i++) await fetchPass(w.db, w.files, w.dataDir);
     expect(getSet(w.db, "Nope")).toMatchObject({ state: "failed", error: expect.stringContaining("STICKERSET_INVALID") });
+  });
+});
+
+// ---- remove_sticker_pack ------------------------------------------------------------------------------
+
+describe("remove_sticker_pack", () => {
+  /** A pack file committed in home/, as add_sticker_pack and write_home leave it. */
+  const commitPack = (w: World, pack: string, role: string, entries: Entry[]) => commitHomeEdit(w.home, `stickers/${pack}.yaml`, packYaml(pack, role, entries), `Describe ${pack}`);
+  const git = (w: World, ...args: string[]) => Bun.spawnSync(["git", "-C", w.home, ...args]).stdout.toString().trim();
+
+  /** Run the server's fetch loop beside `body`, as in production. */
+  async function withLoop<T>(w: World, body: () => Promise<T>): Promise<T> {
+    let running = true;
+    const loop = (async () => {
+      while (running) {
+        await fetchPass(w.db, w.files, w.dataDir);
+        await Bun.sleep(20);
+      }
+    })();
+    try {
+      return await body();
+    } finally {
+      running = false;
+      await loop;
+    }
+  }
+
+  test("deletes the pack's file as one commit with why; the index drops it at once; the Telegram cache and past uses stay", async () => {
+    const w = world();
+    await serveSet(w, "ExamplePack", 2);
+    await serveSet(w, "OtherPack", 1);
+    commitPack(w, "ExamplePack", "common", [{ n: 1, desc: "a wave", use: "hello" }, { n: 2, desc: "a nod", use: "hello" }]);
+    commitPack(w, "OtherPack", "meme", [{ n: 1, desc: "a wave", use: "hello" }]);
+    await ready(w);
+    await turn(w, [{ tool: "sticker", args: { id: "ExamplePack/1" } }]);
+    const usesBefore = outbound(w.db);
+    expect(usesBefore.map((o) => JSON.parse(o.payload).stickerId)).toEqual(["ExamplePack/1"]);
+
+    const a = await turn(w, [
+      { tool: "remove_sticker_pack", args: { name: "ExamplePack", why: "The owner no longer wants ExamplePack" } },
+      { tool: "find_sticker", args: { terms: ["hello", "ExamplePack/2"] } },
+      { tool: "view_stickers", args: { ids: ["ExamplePack/2"] } },
+      { tool: "sticker", args: { id: "ExamplePack/2" } },
+    ]);
+    const [removed, find, view, send] = a.toolResults.map((r) => r.result);
+    expect(removed!.isError).toBeFalsy();
+    const commit = git(w, "rev-parse", "--short", "HEAD");
+    expect(textOf(removed!)).toBe(
+      `Removed ExamplePack from the library (commit ${commit}): its 2 sticker(s) are no longer offered or sent. What stickers/ExamplePack.yaml said stays in home/'s git history (the file as it was before commit ${commit}); add_sticker_pack("ExamplePack") would start again from a fresh skeleton.`,
+    );
+
+    // One commit, by shuvi, with why as its message, deleting only that file.
+    expect(existsSync(join(w.home, "stickers", "ExamplePack.yaml"))).toBe(false);
+    expect(git(w, "log", "-1", "--format=%an|%s")).toBe("shuvi|The owner no longer wants ExamplePack");
+    expect(git(w, "show", "--name-status", "--format=", "HEAD")).toBe("D\tstickers/ExamplePack.yaml");
+    expect(git(w, "show", "HEAD^:stickers/ExamplePack.yaml")).toContain("a wave");
+    expect(git(w, "status", "--porcelain")).toBe("");
+
+    // No sticker tool offers or accepts its stickers from that call on, in the same turn.
+    expect(textOf(find!)).toContain("OtherPack/1");
+    expect(textOf(find!)).not.toContain("ExamplePack");
+    expect(textOf(view!)).toBe("ExamplePack/2: no such sticker in the library.");
+    expect(send!.isError).toBe(true);
+    expect(textOf(send!)).toBe("ExamplePack/2 is not in the sticker library. Use an id that find_sticker gave you.");
+    expect(ids(w, ["hello"])).toEqual(["OtherPack/1"]);
+    expect(w.db.$client.query("select count(*) as n from sticker_library where pack = 'ExamplePack'").get()).toEqual({ n: 0 });
+    expect(w.db.$client.query("select count(*) as n from sticker_fts where sticker_fts match 'nod'").get()).toEqual({ n: 0 });
+
+    // The cache of what Telegram said, and the pictures, stay; so does her history of using it.
+    expect(getSet(w.db, "ExamplePack")).toMatchObject({ state: "ready" });
+    const metas = setStickers(w.db, "ExamplePack");
+    expect(metas).toHaveLength(2);
+    for (const m of metas) expect(existsSync(join(w.dataDir, m.path!))).toBe(true);
+    expect(outbound(w.db)).toEqual(usesBefore);
+  });
+
+  test("refuses a pack that is not in the library, naming the ones that are; refuses a file home/ never committed", async () => {
+    const w = world();
+    const empty = await turn(w, [{ tool: "remove_sticker_pack", args: { name: "NoSuchPack", why: "w" } }]);
+    expect(textOf(empty.toolResults[0]!.result)).toBe("NoSuchPack is not in the sticker library. The library has no packs.");
+
+    commitPack(w, "OtherPack", "common", [{ n: 1, desc: "a wave" }]);
+    commitPack(w, "ExamplePack", "common", [{ n: 1, desc: "a wave" }]);
+    // Dropped in by hand, never committed: removing it could not be undone.
+    writePack(w, "HandPack", "common", [{ n: 1, desc: "a wave" }]);
+    const head = git(w, "rev-parse", "HEAD");
+    const a = await turn(w, [
+      { tool: "remove_sticker_pack", args: { name: "NoSuchPack", why: "w" } },
+      { tool: "remove_sticker_pack", args: { name: "HandPack", why: "w" } },
+    ]);
+    const [unknown, hand] = a.toolResults.map((r) => r.result);
+    expect(unknown!.isError).toBe(true);
+    expect(textOf(unknown!)).toBe("NoSuchPack is not in the sticker library. The packs in it: ExamplePack, HandPack, OtherPack.");
+    expect(hand!.isError).toBe(true);
+    expect(textOf(hand!)).toContain("was never committed in home/");
+    expect(existsSync(join(w.home, "stickers", "HandPack.yaml"))).toBe(true);
+    expect(git(w, "rev-parse", "HEAD")).toBe(head);
+    expect(getSticker(w.db, "HandPack/1")).toMatchObject({ desc: "a wave" });
+  });
+
+  test("is owner-only: a group turn is refused and the pack stays", async () => {
+    const w = world();
+    await serveSet(w, "ExamplePack", 1);
+    commitPack(w, "ExamplePack", "common", [{ n: 1, desc: "a wave", use: "hello" }]);
+    await ready(w);
+    const head = git(w, "rev-parse", "HEAD");
+    const g = await groupTurn(w, [{ tool: "remove_sticker_pack", args: { name: "ExamplePack", why: "Someone asked" } }, { tool: "find_sticker", args: { terms: ["hello"] } }]);
+    const [remove, find] = g.toolResults.map((r) => r.result);
+    expect(remove!.isError).toBe(true);
+    expect(textOf(remove!)).not.toContain("Removed");
+    expect(existsSync(join(w.home, "stickers", "ExamplePack.yaml"))).toBe(true);
+    expect(git(w, "rev-parse", "HEAD")).toBe(head);
+    expect(textOf(find!)).toContain("ExamplePack/1");
+  });
+
+  test("then add_sticker_pack again: a fresh skeleton, saying where the old descriptions are", async () => {
+    const w = world();
+    await serveSet(w, "ExamplePack", 2);
+    commitPack(w, "ExamplePack", "avatar", [{ n: 1, desc: "a wave", use: "hello", tier: "go-to" }, { n: 2, desc: "a nod", use: "ok" }]);
+    await ready(w);
+    const fetchesBefore = w.tg.calls.filter((c) => c.method === "getFile").length;
+    const a = await withLoop(w, () =>
+      turn(w, [
+        { tool: "remove_sticker_pack", args: { name: "ExamplePack", why: "Drop ExamplePack" } },
+        { tool: "add_sticker_pack", args: { name: "ExamplePack" } },
+      ]),
+    );
+    const [removed, added] = a.toolResults.map((r) => r.result);
+    expect(removed!.isError).toBeFalsy();
+    expect(added!.isError).toBeFalsy();
+    const removal = git(w, "log", "-1", "--diff-filter=D", "--format=%h");
+    const text = textOf(added!);
+    expect(text).toContain("created it as this skeleton (commit ");
+    expect(text).toContain(`ExamplePack was removed from the library before (commit ${removal}), so this is a fresh skeleton. What its old file said is still in home/'s git history (stickers/ExamplePack.yaml as it was before commit ${removal})`);
+
+    // Fresh: nothing of the old file is carried over; the role is the default.
+    const file = parsePack(readFileSync(join(w.home, "stickers", "ExamplePack.yaml"), "utf8"));
+    expect(file.role).toBe("common");
+    expect(file.stickers.map((s) => [s.n, s.desc, s.use, s.tier ?? null])).toEqual([[1, "", "", null], [2, "", "", null]]);
+    expect(git(w, "log", "--format=%s").split("\n")).toEqual(["stickers: skeleton for ExamplePack", "Drop ExamplePack", "Describe ExamplePack"]);
+    expect(git(w, "show", `${removal}^:stickers/ExamplePack.yaml`)).toContain("a wave");
+    // The cached pictures were reused, not downloaded again.
+    expect(w.tg.calls.filter((c) => c.method === "getFile").length).toBe(fetchesBefore);
+    // Back in the index, undescribed.
+    expect(getSticker(w.db, "ExamplePack/1")).toMatchObject({ desc: "" });
+  });
+});
+
+// ---- search help: the vocabulary, list_stickers, the small-result hint ----------------------------------
+
+describe("search help", () => {
+  /**
+   * ExamplePack: 1 "hello, hi" · 2 "hello、你好" · 3 "ok, OK, hello" · 4 "bye" (never) · 5 "tiny" (narrow) ·
+   * 6 "secret, hello" (dm_only). OtherPack (never fetched from Telegram): 1 "unfetched".
+   */
+  async function library(w: World) {
+    await serveSet(w, "ExamplePack", 6, { narrow: [5] });
+    writePack(w, "ExamplePack", "common", [
+      { n: 1, desc: "a wave", use: "hello, hi" },
+      { n: 2, desc: "a bow", use: "hello、你好" },
+      { n: 3, desc: "a thumbs up", use: "ok, OK, hello" },
+      { n: 4, desc: "a door", use: "bye", tier: "never" },
+      { n: 5, desc: "a strip", use: "tiny" },
+      { n: 6, desc: "a wink", use: "secret, hello", dm_only: true },
+    ]);
+    writePack(w, "OtherPack", "common", [{ n: 1, desc: "a cat", use: "unfetched" }]);
+    await ready(w);
+  }
+
+  test("the vocabulary: use labels by how many stickers carry them, ties in code-point order; only what find_sticker could offer; capped", async () => {
+    const w = world();
+    await library(w);
+    // "OK" and "ok" on one sticker count once; never, narrow and unfetched stickers do not count.
+    expect(vocabulary(w.db, true)).toEqual([
+      { label: "hello", count: 4 },
+      { label: "hi", count: 1 },
+      { label: "ok", count: 1 },
+      { label: "secret", count: 1 },
+      { label: "你好", count: 1 },
+    ]);
+    // Outside the DM, dm_only stickers do not count.
+    expect(vocabulary(w.db, false).map((v) => [v.label, v.count])).toEqual([["hello", 3], ["hi", 1], ["ok", 1], ["你好", 1]]);
+    expect(vocabulary(w.db, true, 2).map((v) => v.label)).toEqual(["hello", "hi"]);
+
+    // The default cap.
+    const many = Array.from({ length: VOCABULARY_CAP + 20 }, (_, i) => `w${String(i).padStart(3, "0")}`);
+    writePack(w, "ExamplePack", "common", [{ n: 1, desc: "a wave", use: many.join(", ") }]);
+    syncLibrary(w.db, w.home);
+    const capped = vocabulary(w.db, true);
+    expect(capped).toHaveLength(VOCABULARY_CAP);
+    expect(capped.map((v) => v.label)).toEqual(many.slice(0, VOCABULARY_CAP));
+  });
+
+  test("the prompt section lists the vocabulary after preferences.md; the same library gives the same bytes; a group sees no dm_only labels", async () => {
+    const w = world();
+    await library(w);
+    writeFileSync(join(w.home, "stickers", "preferences.md"), "Prefer short replies.\n");
+    ownerSays(w.db, "hi");
+    const dm = getChat(w.db, ownerChatId(w.db))!;
+    const group = ensureChat(w.db, { id: -100555, kind: "group", title: "G" });
+    const caps = capsFor(w);
+    const prompt = buildSystemPrompt(w.home, dm, {}, caps, undefined, w.db);
+    expect(prompt).toContain(
+      "## Stickers\n\nPrefer short replies.\n\nWords the sticker library uses for when to send a sticker, most common first; find_sticker matches text, so search with these: hello, hi, ok, secret, 你好",
+    );
+    syncLibrary(w.db, w.home);
+    expect(buildSystemPrompt(w.home, dm, {}, caps, undefined, w.db)).toBe(prompt);
+    expect(buildSystemPrompt(w.home, getChat(w.db, group.id)!, {}, caps, undefined, w.db)).toContain("search with these: hello, hi, ok, 你好");
+    // Without a store (a bare call), no vocabulary; with no preferences either, no section at all.
+    expect(buildSystemPrompt(w.home, dm, {}, caps)).not.toContain("Words the sticker library uses");
+    rmSync(join(w.home, "stickers", "preferences.md"));
+    expect(buildSystemPrompt(w.home, dm, {}, caps, undefined, w.db)).toContain("## Stickers\n\nWords the sticker library uses");
+    expect(buildSystemPrompt(w.home, dm, {}, caps)).not.toContain("## Stickers");
+
+    // A turn's prompt carries it.
+    const a = await turn(w, [{ tool: "pass" }]);
+    expect(a.calls[0]!.systemPrompt).toContain("search with these: hello, hi, ok, secret, 你好");
+  });
+
+  test("list_stickers: pack and number order, paged, filtered by pack, use and tier, under find_sticker's rules", async () => {
+    const w = world();
+    await library(w);
+    await serveSet(w, "BigPack", LIST_PAGE + 3);
+    writePack(
+      w,
+      "BigPack",
+      "meme",
+      Array.from({ length: LIST_PAGE + 3 }, (_, i) => ({ n: i + 1, desc: `pose ${i + 1}`, use: i % 2 ? "wave" : "cheer", ...(i === 0 ? { tier: "go-to" } : {}) })),
+    );
+    await ready(w);
+
+    const all = listStickers(w.db, { inDm: true });
+    expect(all).toMatchObject({ total: LIST_PAGE + 3 + 4, page: 1, pages: 2, unfetched: 1 });
+    expect(all.stickers.map((s) => s.id).slice(0, 3)).toEqual(["BigPack/1", "BigPack/2", "BigPack/3"]);
+    expect(listStickers(w.db, { inDm: true, page: 2 }).stickers.map((s) => s.id)).toEqual(["BigPack/31", "BigPack/32", "BigPack/33", "ExamplePack/1", "ExamplePack/2", "ExamplePack/3", "ExamplePack/6"]);
+    expect(listStickers(w.db, { inDm: false, pack: "ExamplePack" }).stickers.map((s) => s.id)).toEqual(["ExamplePack/1", "ExamplePack/2", "ExamplePack/3"]);
+    expect(listStickers(w.db, { inDm: true, use: "HELLO" }).stickers.map((s) => s.id)).toEqual(["ExamplePack/1", "ExamplePack/2", "ExamplePack/3", "ExamplePack/6"]);
+    expect(listStickers(w.db, { inDm: true, tier: "go-to" }).stickers.map((s) => s.id)).toEqual(["BigPack/1"]);
+    expect(listStickers(w.db, { inDm: true, page: 99 }).page).toBe(2);
+
+    const a = await turn(w, [
+      { tool: "list_stickers", args: {} },
+      { tool: "list_stickers", args: { page: 2 } },
+      { tool: "list_stickers", args: { pack: "ExamplePack", use: "你好" } },
+      { tool: "list_stickers", args: { use: "nothing like this" } },
+    ]);
+    const [first, second, one, none] = a.toolResults.map((r) => textOf(r.result));
+    expect(first).toStartWith(`Stickers 1–${LIST_PAGE} of ${LIST_PAGE + 7} (page 1/2). For more, call list_stickers again with page 2.`);
+    expect(first).toContain("- BigPack/1 🙂 · go-to\n  shows: pose 1\n  use: cheer");
+    expect(first).toContain("1 more are in packs not fetched from Telegram yet.");
+    expect(second).toStartWith(`Stickers ${LIST_PAGE + 1}–${LIST_PAGE + 7} of ${LIST_PAGE + 7} (page 2/2). Send one`);
+    expect(second).not.toContain("ExamplePack/4");
+    expect(second).not.toContain("ExamplePack/5");
+    expect(one).toContain("- ExamplePack/2 🙂 · normal\n  shows: a bow\n  use: hello、你好");
+    expect(one).toStartWith("Stickers 1–1 of 1 (page 1/1).");
+    expect(none).toStartWith("No sticker in the library fits that.");
+
+    // A group sees no dm_only stickers.
+    const g = await groupTurn(w, [{ tool: "list_stickers", args: { pack: "ExamplePack" } }]);
+    expect(textOf(g.toolResults[0]!.result)).not.toContain("ExamplePack/6");
+  });
+
+  test("find_sticker with fewer than 3 candidates adds the vocabulary and points at list_stickers", async () => {
+    const w = world();
+    await library(w);
+    const a = await turn(w, [
+      { tool: "find_sticker", args: { terms: ["微笑"] } },
+      { tool: "find_sticker", args: { terms: ["你好"] } },
+      { tool: "find_sticker", args: { terms: ["hello"] } },
+    ]);
+    const [none, one, many] = a.toolResults.map((r) => textOf(r.result));
+    const hint = "The library describes when to send a sticker with these words: hello, hi, ok, secret, 你好. Try another of them, or browse with list_stickers.";
+    expect(none).toBe(`No sticker matches.\n${hint}`);
+    expect(one).toStartWith("1 candidate(s)");
+    expect(one).toContain(hint);
+    expect(many).toStartWith("4 candidate(s)");
+    expect(many).not.toContain("list_stickers");
+
+    // An empty library still says what to try.
+    const e = world();
+    const b = await turn(e, [{ tool: "find_sticker", args: { terms: ["hello"] } }]);
+    expect(textOf(b.toolResults[0]!.result)).toBe("No sticker matches.\nTry other words (what it shows, or when you would send it), or browse with list_stickers.");
   });
 });
 
