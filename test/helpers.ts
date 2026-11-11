@@ -42,6 +42,33 @@ export function dmUpdate(updateId: number, text: string, from = OWNER, extra: Re
   } as unknown as Update;
 }
 
+export interface Person {
+  id: number;
+  first: string;
+  username?: string;
+  isBot?: boolean;
+}
+
+/**
+ * A Telegram update carrying a message in a group (a supergroup, as Telegram has most of them). Each
+ * `@name` in the text gets a `mention` entity, as Telegram adds one.
+ */
+export function groupUpdate(updateId: number, chat: { id: number; title: string }, from: Person, text: string, extra: Record<string, unknown> = {}): Update {
+  const entities = [...text.matchAll(/@\w+/g)].map((m) => ({ type: "mention", offset: m.index!, length: m[0].length }));
+  return {
+    update_id: updateId,
+    message: {
+      message_id: 700 + updateId,
+      date: 0,
+      chat: { id: chat.id, type: "supergroup", title: chat.title },
+      from: { id: from.id, is_bot: !!from.isBot, first_name: from.first, ...(from.username ? { username: from.username } : {}) },
+      text,
+      ...(entities.length ? { entities } : {}),
+      ...extra,
+    },
+  } as unknown as Update;
+}
+
 // ---- a scripted driver ------------------------------------------------------------------------------
 
 export type Step =

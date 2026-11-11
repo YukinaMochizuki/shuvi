@@ -1,7 +1,10 @@
 import type { Api } from "grammy";
 import type { Update } from "grammy/types";
+import { entryToDoc, proposedGroupEntry, type Policy } from "../policy/policy.ts";
+import { requestPolicyChange } from "../policy/write.ts";
+import { raiseAlert } from "../store/control.ts";
 import type { Db } from "../store/db.ts";
-import { ensureChat, kvGet, kvSet, recordInbound } from "../store/events.ts";
+import { ensureChat, kvGet, kvSet, recordInbound, type Speaker } from "../store/events.ts";
 import { classify } from "../telegram/inbound.ts";
 import { IMMEDIATE } from "../store/turns.ts";
 
@@ -18,21 +21,70 @@ import { IMMEDIATE } from "../store/turns.ts";
  */
 
 export const OFFSET_KEY = "telegram_offset";
+/** `unknown_chat:<tg chat id>`: the owner was already asked about this group. */
+export const UNKNOWN_CHAT_PREFIX = "unknown_chat:";
+
+/** What the poller needs besides the updates: who the bot is, the policy in effect, where home/ is. */
+export interface InboundContext {
+  botUsername?: string;
+  policy?: Policy;
+  /** For the diff on the unknown-group card. */
+  home?: string;
+}
+
+const who = (s: Speaker) => `${s.name}${s.username ? ` (@${s.username})` : ""}, user id ${s.id}`;
+
+/**
+ * What is not recorded is still not lost on the owner (docs/design.md §7, §13):
+ *   - a private message from someone else: an alert, at most one per sender per (UTC) day;
+ *   - the first message from a group policy does not list: one approval card offering to add the group,
+ *     with the entry it would get (policy/write.ts). Asked once per group, ever (`unknown_chat:<id>` in
+ *     kv): if the owner says no, the group stays unlisted and silent. Approving writes the entry; the
+ *     messages before that were never recorded.
+ * Both are written in the batch's transaction, so they are raised once, like the batch is recorded once.
+ */
+function tellOwner(db: Db, c: ReturnType<typeof classify>, ownerId: number, ctx: InboundContext, now: number): void {
+  if (c.kind === "ignore" && c.stranger) {
+    const day = new Date(now).toISOString().slice(0, 10);
+    raiseAlert(db, { key: `stranger:${c.stranger.id}:${day}`, text: `${who(c.stranger)} wrote to the bot in a private chat. Only the owner is answered there, so it was ignored and not recorded.` }, now);
+  }
+  if (c.kind === "unknown_chat") {
+    const key = `${UNKNOWN_CHAT_PREFIX}${c.chat.id}`;
+    if (kvGet(db, key)) return;
+    kvSet(db, key, new Date(now).toISOString());
+    const name = c.chat.title ? `"${c.chat.title}"` : "an untitled group";
+    const r = requestPolicyChange(
+      db,
+      ctx.home,
+      ownerId,
+      { chat: String(c.chat.id), entry: entryToDoc(proposedGroupEntry(c.chat.title ?? undefined)) },
+      {
+        title: `Add the group ${name} (${c.chat.id})?`,
+        why: `${who(c.from)} wrote in ${name}, which home/policy.yaml does not list. Nothing said there is recorded or answered until it is. Add it with this entry? (You can edit it in the file later.)`,
+        approveLabel: "Add it",
+        rejectLabel: "Ignore it",
+      },
+    );
+    // policy.yaml is broken (and alerted as such): say so rather than ask for something that cannot be written.
+    if ("error" in r) raiseAlert(db, { key: key, text: `${who(c.from)} wrote in ${name} (${c.chat.id}), which home/policy.yaml does not list; it cannot be added for now: ${r.error}.` }, now);
+  }
+}
 
 /** Record one batch of updates and advance the offset past it, atomically. */
-export function recordBatch(db: Db, updates: Update[], ownerId: number, botUsername?: string): { recorded: number; ignored: number } {
+export function recordBatch(db: Db, updates: Update[], ownerId: number, ctx: InboundContext = {}, now = Date.now()): { recorded: number; ignored: number } {
   let recorded = 0;
   let ignored = 0;
   if (!updates.length) return { recorded, ignored };
   db.transaction((tx) => {
     const tdb = tx as unknown as Db;
     for (const u of updates) {
-      const c = classify(u, ownerId, botUsername);
-      if (c.kind === "ignore") {
+      const c = classify(u, ownerId, ctx.botUsername, ctx.policy);
+      if (c.kind === "ignore" || c.kind === "unknown_chat") {
+        tellOwner(tdb, c, ownerId, ctx, now);
         ignored++;
         continue;
       }
-      const chat = ensureChat(tdb, { id: c.chat.id, kind: "private" });
+      const chat = ensureChat(tdb, c.chat.type === "private" ? { id: c.chat.id, kind: "private" } : { id: c.chat.id, kind: "group", title: c.chat.title });
       const base = { chatId: chat.id, tgUpdateId: u.update_id, tgMessageId: c.tgMessageId };
       const fresh = c.kind === "command" ? recordInbound(tdb, { ...base, kind: "command", payload: c.payload }) : recordInbound(tdb, { ...base, kind: "message", payload: c.payload });
       if (fresh) recorded++;
@@ -48,9 +100,10 @@ export function currentOffset(db: Db): number | undefined {
 }
 
 /** One long-poll round: fetch, record, advance. */
-export async function pollOnce(db: Db, api: Api, ownerId: number, botUsername: string | undefined, timeoutSec = 25, signal?: AbortSignal): Promise<number> {
+export async function pollOnce(db: Db, api: Api, ownerId: number, ctx: InboundContext | (() => InboundContext) = {}, timeoutSec = 25, signal?: AbortSignal): Promise<number> {
   const offset = currentOffset(db);
   const updates = await api.getUpdates({ ...(offset !== undefined ? { offset } : {}), timeout: timeoutSec, allowed_updates: ["message"] }, signal as never); // grammY types its own AbortSignal shim
-  recordBatch(db, updates, ownerId, botUsername);
+  // The policy is read after the long poll returns, so an edit made while it waited applies to this batch.
+  recordBatch(db, updates, ownerId, typeof ctx === "function" ? ctx() : ctx);
   return updates.length;
 }

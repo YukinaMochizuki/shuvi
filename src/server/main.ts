@@ -8,6 +8,8 @@
  *   commands  /stop, /new (commands.ts)
  *   sender    deliver what turns queued (sender.ts)
  *   typing    show "typing…" in chats with a running turn
+ *   policy    reload home/policy.yaml when it changes; write the policy changes the owner approved
+ *             (src/policy/)
  *   scan      alert on outbound rows that are not getting through; expire approvals (control/)
  *   backup    a daily copy of shuvi.db and home/ (control/backup.ts)
  *   control   when `SHUVI_CONTROL_BOT_TOKEN` is set, the control bot's poller and sender (control/bot.ts)
@@ -21,12 +23,15 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Api } from "grammy";
+import { saveBotIdentity, TriggerScan } from "../agent/triggers.ts";
 import { expireApprovals } from "../control/approvals.ts";
 import { backupPass } from "../control/backup.ts";
 import { CONTROL_COMMANDS, controlPollOnce, controlSendPass, deployedCommit, outboundAlertPass } from "../control/bot.ts";
 import { enabledCapabilities } from "../capabilities/index.ts";
 import { capabilityLoops } from "../capabilities/types.ts";
 import { loadConfig } from "../env.ts";
+import { PolicyWatch } from "../policy/load.ts";
+import { applyPolicyApprovals } from "../policy/write.ts";
 import { openDb } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
 import { runningTurns } from "../store/turns.ts";
@@ -44,6 +49,11 @@ const api = new Api(cfg.botToken, cfg.telegramApiRoot ? { apiRoot: cfg.telegramA
 const capabilities = enabledCapabilities();
 const me = await api.getMe();
 console.log(`shuvi server: @${me.username}, data in ${cfg.dataDir}`);
+// Who she is, for mentions and replies in groups; the runner children read it from the store.
+const bot = { id: me.id, ...(me.username ? { username: me.username } : {}) };
+saveBotIdentity(db, bot);
+const policies = new PolicyWatch(db, cfg.home, cfg.ownerId);
+const triggers = new TriggerScan();
 // The owner's `/` menu. Best effort and not awaited: a failure is logged and the server carries on.
 void registerCommands(api, cfg.ownerId, MAIN_COMMANDS, "main bot");
 
@@ -51,14 +61,22 @@ const stop = new AbortController();
 const loop = (name: string, body: () => Promise<number | void>, everyMs: number) => runLoop(name, body, everyMs, stop.signal);
 
 // The poller's own long poll is its wait; it loops straight back.
-void loop("poller", async () => void (await pollOnce(db, api, cfg.ownerId, me.username, 25, stop.signal)), 0);
+void loop("poller", async () => void (await pollOnce(db, api, cfg.ownerId, () => ({ botUsername: me.username, policy: policies.current(), home: cfg.home }), 25, stop.signal)), 0);
 void loop(
   "waker",
   async () => {
     commandPass(db);
-    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs });
+    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers });
   },
   300,
+);
+void loop(
+  "policy",
+  async () => {
+    if (applyPolicyApprovals(db, cfg.home, cfg.ownerId)) console.log("policy: wrote an approved change");
+    if (policies.refresh()) console.log(`policy: loaded home/policy.yaml (${Object.keys(policies.current().chats).join(", ") || "no chats listed"})`);
+  },
+  1000,
 );
 void loop("sender", async () => (await sendPass(db, api)).backoffMs, 300);
 void loop(

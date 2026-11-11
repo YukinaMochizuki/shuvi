@@ -31,9 +31,15 @@ const { loadConfig } = await import("../env.ts");
 const { openDb } = await import("../store/db.ts");
 const { runTurn } = await import("../agent/turn.ts");
 const { enabledCapabilities } = await import("../capabilities/index.ts");
+const { loadPolicy } = await import("../policy/load.ts");
+const { botIdentity } = await import("../agent/triggers.ts");
 
 const cfg = loadConfig({ needToken: false });
 const db = openDb(cfg.dbPath);
+// The same home/policy.yaml the server reads, the same way (a broken one: the last good, from the store);
+// and who the bot is, which the server recorded at startup (a child has no token to ask Telegram).
+const policy = loadPolicy(db, cfg.home, cfg.ownerId);
+const bot = botIdentity(db);
 
 const outcome = await runTurn({
   db,
@@ -44,6 +50,8 @@ const outcome = await runTurn({
   ...(cfg.model ? { model: cfg.model } : {}),
   ...(cfg.ownerLanguage ? { ownerLanguage: cfg.ownerLanguage } : {}),
   capabilities: enabledCapabilities(),
+  policy,
+  ...(bot ? { bot } : {}),
   // liveSystemPrompt: each turn's system prompt replaces the one the conversation began with, so an edit
   // to home/ is heard from the next turn (Claude Code otherwise replays the prompt it recorded).
   makeAdapter: (boundary) => new ClaudeBackend({ boundary, liveSystemPrompt: true, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),

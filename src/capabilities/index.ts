@@ -1,4 +1,5 @@
 import { computer } from "./computer/index.ts";
+import { groups } from "./groups/index.ts";
 import { jobs } from "./jobs/index.ts";
 import { memory } from "./memory/index.ts";
 import { playbooks } from "./playbooks/index.ts";
@@ -32,6 +33,7 @@ export const CAPABILITIES: readonly Capability<any>[] = [
   playbooks,
   stickers,
   computer,
+  groups,
 ];
 
 /** The capabilities enabled in this process, in registry order. */

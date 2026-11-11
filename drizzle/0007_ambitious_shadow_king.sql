@@ -1,0 +1,1 @@
+ALTER TABLE `turns` ADD `trigger_seq` integer;

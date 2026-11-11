@@ -1,4 +1,6 @@
+import { TriggerScan, type BotIdentity } from "../agent/triggers.ts";
 import { capabilityHolds, type EnabledCapability } from "../capabilities/types.ts";
+import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
 import { allChats, getChat, lastTriggerSeq, triggersAfter } from "../store/events.ts";
@@ -19,14 +21,19 @@ import { isAlive, processStart, signalTurn, type SignalTurn, type SpawnTurn } fr
  *      committed together before the SIGTERM, which is repeated on each pass during the grace, so the
  *      limit survives a server restart at any point. The closed turn's error names the limit
  *      (store/turns.ts `WALL_CLOCK_STOP`), which tells it apart from an owner /stop.
- *   3. Wake: for each chat with inbound events past its cursor and no running turn, claim a turn (the
- *      unique index makes the claim the lock) and start a child for it. A chat whose last turns failed
+ *   3. Wake: for each chat with inbound events past its cursor that START a turn there and no running
+ *      turn, claim a turn (the unique index makes the claim the lock) and start a child for it. What
+ *      starts a turn is the chat's policy (src/policy/): in the owner's DM every message; in a group a
+ *      mention, a reply to her or a follow-up (agent/triggers.ts), the other messages waiting past the
+ *      cursor to be shown with the next turn; a chat policy does not list gets none. A chat whose last turns failed
  *      waits out its backoff first (store/turns.ts `retryDelayMs`). A chat with a message a capability
  *      still holds (a picture still downloading: PERCEPTION GATING, `Capability.holds`) waits too; a hold
  *      lasts a few seconds at most, then the turn opens anyway.
  *
  * It holds no state between passes: every answer is in the store, so a restarted server picks up exactly
- * where the last one was, including turns that are still running in children it did not start.
+ * where the last one was, including turns that are still running in children it did not start. (The one
+ * exception is `triggers`, a memo of how far each group's backlog has been judged; a new one judges it
+ * again, to the same answers.)
  */
 
 export const SPAWN_GRACE_MS = 30_000;
@@ -48,6 +55,14 @@ export interface WakerDeps {
   capabilities?: readonly EnabledCapability[];
   /** A turn's wall-clock limit (default `DEFAULT_TURN_MAX_MS`). */
   maxTurnMs?: number;
+  /** The policy in effect (default: the owner's DM only). */
+  policy?: Policy;
+  /** The owner's id: a private chat with anyone else gets no turn. */
+  ownerId?: number;
+  /** Who the bot is, for mentions and replies to her. */
+  bot?: BotIdentity;
+  /** Kept by the caller from pass to pass (see the header). */
+  triggers?: TriggerScan;
 }
 
 export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[]; limited: number[] } {
@@ -107,13 +122,24 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
     }
   }
 
+  const policy = deps.policy ?? defaultPolicy();
+  const scan = deps.triggers ?? new TriggerScan();
   for (const chat of allChats(db)) {
     // A cheap pre-check; the claim re-checks against the cursor inside its own transaction.
     if (lastTriggerSeq(db, chat.id) <= chat.cursorSeq) continue;
+    const cp = resolveChat(policy, chat, deps.ownerId);
+    if (!cp) continue;
+    // In a group, the newest event that starts a turn; recording alone does not.
+    let trigger: number | undefined;
+    if (cp.trigger !== "all") {
+      const t = scan.newestTrigger(db, chat, cp, deps.bot, policy);
+      if (t === null) continue;
+      trigger = t;
+    }
     if (retryDelayMs(db, chat.id, now()) > 0) continue;
     const caps = deps.capabilities ?? [];
     if (caps.length && triggersAfter(db, chat.id, chat.cursorSeq).some((e) => capabilityHolds(caps, e, now()))) continue;
-    const turn = claimTurn(db, chat.id);
+    const turn = claimTurn(db, chat.id, trigger);
     if (!turn) continue;
     let pid: number;
     try {

@@ -12,14 +12,21 @@ import { asksForTurn, chatEvents, chats, kv, OUTBOUND_KINDS, TRIGGER_KINDS } fro
 
 export interface Speaker {
   id: number;
+  /** Their display name (first and last name), as people see it. */
   name: string;
+  /** Their @username, if they have one (without the @). */
+  username?: string;
+  /** Another bot. */
+  isBot?: boolean;
 }
 
 export interface MessagePayload {
   from: Speaker;
   text: string;
-  /** The message replied to, as Telegram gave it (it may predate anything recorded here). */
-  replyTo?: { tgMessageId: number; fromName?: string; text?: string };
+  /** The message replied to, as Telegram gave it (it may predate anything recorded here). `fromId`: its sender's user id. */
+  replyTo?: { tgMessageId: number; fromName?: string; fromId?: number; text?: string };
+  /** Who the message names: @usernames (lower case, without the @) and text mentions (user ids). */
+  mentions?: { usernames: string[]; userIds: number[] };
   /** True when `text` stands in for content this slice cannot read yet (a sticker, a photo). */
   placeholder?: boolean;
   /** Where a forwarded message came from. */

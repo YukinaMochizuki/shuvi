@@ -48,13 +48,13 @@ describe("the desk client", () => {
 describe("ask_workstream as a job", () => {
   test("asks the desk with wait 0, records a poll job with the request id, and the answer comes back as one job_done", async () => {
     const db = memDb();
-    const origin = ownerSays(db, "is the hangar boost PR merged?");
-    const adapter = await turnWith(db, [{ tool: "ask_workstream", args: { product: "hangar", message: "is the boost PR merged?" } }]);
+    const origin = ownerSays(db, "is the widgetry login PR merged?");
+    const adapter = await turnWith(db, [{ tool: "ask_workstream", args: { product: "widgetry", message: "is the login PR merged?" } }]);
     expect(adapter.calls[0]!.tools).toContain("ask_workstream");
     expect(adapter.calls[0]!.systemPrompt).toContain("## Workstream");
-    expect(desk.calls.at(-1)).toEqual({ tool: "tell_desk", args: { product: "hangar", message: "is the boost PR merged?", wait: 0 } });
+    expect(desk.calls.at(-1)).toEqual({ tool: "tell_desk", args: { product: "widgetry", message: "is the login PR merged?", wait: 0 } });
     const [job] = runningJobs(db);
-    expect(job).toMatchObject({ kind: "workstream", report: "poll", chatId: ownerChatId(db), originSeq: origin, title: "hangar: is the boost PR merged?" });
+    expect(job).toMatchObject({ kind: "workstream", report: "poll", chatId: ownerChatId(db), originSeq: origin, title: "widgetry: is the login PR merged?" });
     const request = String(job!.spec.request);
     expect(resultText(adapter)).toContain(`This is job ${job!.id}`);
 
@@ -105,7 +105,7 @@ describe("ask_workstream as a job", () => {
   test("a desk that cannot be reached leaves the job running with a note, until the deadline", async () => {
     const db = memDb();
     ownerSays(db, "ask");
-    await turnWith(db, [{ tool: "ask_workstream", args: { product: "hangar", message: "q" } }]);
+    await turnWith(db, [{ tool: "ask_workstream", args: { product: "widgetry", message: "q" } }]);
     const job = runningJobs(db)[0]!;
     await jobWatchPass({ db, kinds: [deskJobKind({ ...cfg, token: "wrong" })], now: () => Date.now() + 10_000 });
     expect(getJob(db, job.id)!.state).toBe("running");
@@ -118,7 +118,7 @@ describe("ask_workstream as a job", () => {
     const turn = claimTurn(db, ownerChatId(db))!;
     let adapter!: ScriptedAdapter;
     const asked = desk.calls.length;
-    await runTurn({ db, turnId: turn.id, home, timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities(env), makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "ask_workstream", args: { product: "hangar", message: "q" } }])) });
+    await runTurn({ db, turnId: turn.id, home, timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities(env), makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "ask_workstream", args: { product: "widgetry", message: "q" } }])) });
     expect(adapter.calls[0]!.tools).toContain("ask_workstream");
     expect(adapter.toolResults[0]!.result.isError).toBe(true);
     expect(resultText(adapter)).toContain("from Someone, not the owner");

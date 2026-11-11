@@ -26,7 +26,7 @@ async function turnWith(db: Db, script: Step[], ownerId: number | undefined = OW
     home,
     timeZone: TZ,
     ...(ownerId !== undefined ? { ownerId } : {}),
-    capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }),
+    capabilities: enabledCapabilities({ SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_GROUPS: "off" }),
     makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)),
   });
   return { outcome, adapter, turn: getTurn(db, turn.id)! };

@@ -18,7 +18,11 @@ import { callDesk, parseDeskReply, type DeskConfig } from "./desk.ts";
  * `waiting-approval` (a card on the owner's phone) keeps it running; the deadline then decides.
  *
  * The tool is `ownerOnly` (a desk request acts for the owner): always offered, refused at call time unless
- * the owner is the only one the turn has heard from (agent/turn.ts `ownerAuthority`).
+ * the owner himself is in the turn (agent/turn.ts `ownerAuthority`).
+ *
+ * POLICY can narrow it per chat (home/policy.yaml, src/policy/): `workstream: { products: [widgetry] }` (or
+ * the design's name for it, `workstream-read`) lets that chat ask only those products' desks, and the
+ * tool's description and the section name them.
  *
  *   SHUVI_WORKSTREAM_MCP_URL       the desk's MCP endpoint, e.g. http://workstream:7400/mcp (unset: off)
  *   SHUVI_WORKSTREAM_MCP_TOKEN     the trusted-source token `workstream source add` printed
@@ -30,6 +34,8 @@ import { callDesk, parseDeskReply, type DeskConfig } from "./desk.ts";
 export interface WorkstreamConfig extends DeskConfig {
   pollEveryMs: number;
   deadlineMs: number;
+  /** Only these products (by id or name), from the chat's policy. Absent: any. */
+  products?: string[];
 }
 
 export const WORKSTREAM_KIND = "workstream";
@@ -71,17 +77,27 @@ export const workstream = defineCapability<WorkstreamConfig>({
         }
       : null,
   ownerOnly: ["ask_workstream"],
+  configure(cfg, params) {
+    const products = params.products;
+    if (products === undefined) return cfg;
+    // A list that cannot be read allows nothing rather than everything.
+    const list = Array.isArray(products) ? products.map(String) : [];
+    return { ...cfg, products: cfg.products ? cfg.products.filter((p) => list.includes(p)) : list };
+  },
   tools({ db, chat, state }, cfg) {
+    const only = cfg.products;
     const ask: ToolDef<{ product: string; message: string }> = {
       name: "ask_workstream",
       description:
         "Bring a request to the desk of one workstream product: a question about the work, something to look into, or something to have done. " +
-        "Returns a job id at once; the desk's answer comes back to this chat later as a job event. End your turn after asking.",
+        "Returns a job id at once; the desk's answer comes back to this chat later as a job event. End your turn after asking." +
+        (only ? ` From this chat, only these products: ${only.join(", ") || "none"}.` : ""),
       inputSchema: {
         product: z.string().min(1).describe("The product, by id or name"),
         message: z.string().min(1).describe("The request, in the owner's words where you have them"),
       },
       async handler({ product, message }) {
+        if (only && !only.includes(product)) return err(`From this chat you can ask only ${only.length ? only.join(", ") : "no product"}'s desk${only.length === 1 ? "" : "s"}, not ${product}.`);
         let reply;
         try {
           // wait: 0 returns the request id at once; the answer is polled for (see the header).
@@ -108,6 +124,6 @@ export const workstream = defineCapability<WorkstreamConfig>({
     };
     return [{ serverName: "shuvi", tools: [ask] as ToolDef[] }];
   },
-  section: () => WORKSTREAM,
+  section: (_ctx, cfg) => (cfg.products ? `${WORKSTREAM}\n\nFrom this chat you can ask only these products: ${cfg.products.join(", ") || "none"}.` : WORKSTREAM),
   jobKinds: (cfg) => [deskJobKind(cfg)],
 });

@@ -14,6 +14,7 @@ bun scripts/e2e-fake.ts     # server + runner child + real Claude Code CLI, fake
 bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
 bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
+bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, an unknown group approved
 bun run db:generate         # after any change to src/store/schema.ts
 ```
 
@@ -41,6 +42,9 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | telling the owner anything (alerts, /status, approvals) | `src/control/bot.ts`, `src/store/control.ts`, `src/control/approvals.ts` |
 | the sticker library: its format and index, ranking, the rules `sticker` enforces | `src/capabilities/stickers/` (`library.ts`, `find.ts`, `rules.ts`) |
 | each chat's computer (Hangar), exec, secrets, files | `src/capabilities/computer/index.ts`, then `state.ts` (who may touch it when) and `secrets.ts` |
+| what each chat may do (policy.yaml), and changing it only by approval | `src/policy/policy.ts`, `src/policy/load.ts`, `src/policy/write.ts` |
+| which group messages start a turn (mention, reply, follow-up) | `src/agent/triggers.ts`, `src/server/waker.ts` |
+| what a chat may see or send to | `src/capabilities/access.ts` |
 
 ## Adding a capability
 
@@ -59,9 +63,12 @@ A capability (speech, web, …) is one folder plus one line:
      registry, and within a server, tools in registry order. shuvi's own tools all use `shuvi`, so a later
      capability's `shuvi` tools come before an earlier capability's `web` server. Two tools with the same
      name are refused when the tools are assembled.
+   - Per chat, only the capabilities its policy enables are used (`chatCapabilities`); a capability that
+     takes parameters from policy (`workstream: { products: [...] }`) narrows its config in `configure`.
+     Mark it `always` only if no chat can do without it (speech).
 3. A tool that acts for the owner (sets a schedule, asks workstream, edits memory) goes in `ownerOnly`.
    Do not hide it in turns the owner did not start: it is always offered, and the turn's boundary refuses
-   the call unless everyone the turn has been shown is the owner (`ownerAuthority` in `src/agent/turn.ts`).
+   the call unless the owner himself is in the turn (`ownerAuthority` in `src/agent/turn.ts`).
 
 Do not edit `src/agent/turn.ts`, `src/agent/prompt.ts`, `src/server/main.ts` or `src/env.ts` for it. A
 capability never talks to Telegram: its tools and loops queue rows, and the sender sends them.

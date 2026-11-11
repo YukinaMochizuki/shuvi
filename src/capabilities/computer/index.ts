@@ -25,8 +25,9 @@ import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, relea
  *
  *   tools     exec, read_job, cancel_job (exec.ts, after workstream's box tools); request_secret
  *             (secrets.ts); send_file, send_photo (files.ts); video_frames, transcribe (media.ts). All act
- *             for the owner (`ownerOnly`): the turn's boundary refuses them unless only the owner has
- *             spoken in it.
+ *             for the owner (`ownerOnly`), under the one rule every owner-only tool shares
+ *             (`ownerAuthority` in src/agent/turn.ts): the turn's boundary refuses them unless the owner
+ *             is in the turn; other people's messages beside his neither grant nor block.
  *   jobs      the `computer` job kind: background execs, polled by the jobs watcher (exec.ts).
  *   loops     `computer-maintain`: stop a computer idle for SHUVI_COMPUTER_IDLE_MINUTES (no exec, no job
  *             running), put a boosted one back at its size once its job (or exec) is over, and turn

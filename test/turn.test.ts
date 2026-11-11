@@ -26,7 +26,7 @@ async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: 
     ...(opts.signal ? { signal: opts.signal } : {}),
     // The web capability is on when the test asks for it, off otherwise, through its own variables.
     // Schedules, memory, retrieval and playbooks are off here: these tests are about speech and web.
-    capabilities: enabledCapabilities(opts.web ? { SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) } : { SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }),
+    capabilities: enabledCapabilities(opts.web ? { SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_GROUPS: "off", ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) } : { SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_GROUPS: "off" }),
   });
   return { outcome, adapter, turn: getTurn(db, turn.id)! };
 }
