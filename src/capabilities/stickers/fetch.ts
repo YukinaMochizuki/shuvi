@@ -6,7 +6,8 @@ import type { Db } from "../../store/db.ts";
 import { stickerMeta, stickerSets } from "../../store/schema.ts";
 import type { TelegramFiles } from "../../telegram/files.ts";
 import { stickerShownFile } from "../../telegram/inbound.ts";
-import { MAX_BYTES, mediaPath, sniffImage } from "../vision/download.ts";
+import { sniffImage } from "../../store/media.ts";
+import { MAX_BYTES, mediaPath } from "../vision/download.ts";
 import { libraryPacks } from "./library.ts";
 
 /**

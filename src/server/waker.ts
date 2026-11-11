@@ -105,6 +105,7 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
           tdb,
           {
             key: `turn-limit:${t.id}`,
+            turnId: t.id,
             topic: `turn-limit:${t.chatId}`,
             text: `Turn ${t.id} in ${chat ? chatLabel(chat) : `chat ${t.chatId}`} ran past the wall-clock limit (${limitText(maxTurnMs)}) and is being stopped. Its messages will not be retried.`,
           },

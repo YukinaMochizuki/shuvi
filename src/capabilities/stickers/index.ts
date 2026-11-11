@@ -4,6 +4,7 @@ import { z } from "zod";
 import { err, ok, type ToolContent, type ToolDef } from "agent-runtime";
 import { dataDirFrom } from "../../env.ts";
 import { enqueueOutbound } from "../../store/events.ts";
+import { imageFromFile } from "../../store/media.ts";
 import { isOwnerDm, ownerIdFrom } from "../access.ts";
 import { commitHomeEdit, lastRemoval } from "../memory/home.ts";
 import { defineCapability } from "../types.ts";
@@ -165,7 +166,7 @@ export const stickers = defineCapability<StickersConfig>({
           let image: ToolContent | null = null;
           if (path && st.meta?.mimeType) {
             try {
-              image = { type: "image", data: readFileSync(join(dataDir, path)).toString("base64"), mimeType: st.meta.mimeType };
+              image = imageFromFile(dataDir, path, st.meta.mimeType);
             } catch {}
           }
           content.push({ type: "text", text: image ? head : `${head} (no picture available)` });

@@ -14,6 +14,7 @@ import { allChats, getChat, kvGet, kvSet, type Speaker } from "../store/events.t
 import { approvals, chatEvents, OUTBOUND_KINDS, turns } from "../store/schema.ts";
 import { chatLabel, IMMEDIATE, runningTurns } from "../store/turns.ts";
 import { answerApproval, cardKeyboard, getApproval, parseCallback } from "./approvals.ts";
+import { turnSummary } from "./turn-summary.ts";
 
 /**
  * The control bot (docs/design.md §13): a second Telegram bot, `SHUVI_CONTROL_BOT_TOKEN`, that is the
@@ -26,6 +27,7 @@ import { answerApproval, cardKeyboard, getApproval, parseCallback } from "./appr
  *   /policy [chat]   the policy in effect, in words (policy/view.ts): every chat, or one in detail with
  *                    what is off; <chat> is the number /policy shows, or the Telegram id. Telegram HTML,
  *                    queued as `reply_html` rows, one per message
+ *   /turn <id>       one paragraph on that turn, and its link in the console (turn-summary.ts)
  *   approval buttons recorded through approvals.ts
  *
  * `CONTROL_COMMANDS` is the one list of the commands: /help is built from it, and the server registers it
@@ -72,6 +74,7 @@ export const CONTROL_COMMANDS = [
   { command: "status", description: "Running turns, recent failures, pending outbound, commit" },
   { command: "stop", description: "Stop a chat's turn: /stop <chat> (the number from /status)" },
   { command: "policy", description: "What each chat may do; /policy <chat> for one in detail" },
+  { command: "turn", description: "One turn in a paragraph, with its console link: /turn <id>" },
 ] as const satisfies readonly BotCommand[];
 
 const HELP = ["Commands:", ...CONTROL_COMMANDS.map((c) => `/${c.command}: ${c.description}`)].join("\n");
@@ -206,6 +209,7 @@ function handleUpdate(db: Db, u: Update, deps: ControlDeps, out: Handled): void 
     const stopped = stopTurn(db, chat.id, currentSeq(db), (pid, start) => out.signals.push({ pid, start }));
     return queueReply(db, key, stopped ? `Stopping turn ${stopped.id} in ${chatLabel(chat)}.` : `No turn is running in ${chatLabel(chat)}.`);
   }
+  if (name === "turn") return queueReply(db, key, /^\d+$/.test(arg) ? turnSummary(db, Number(arg), deps.timeZone) : "Usage: /turn <id>");
   queueReply(db, key, HELP);
 }
 

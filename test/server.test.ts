@@ -154,7 +154,7 @@ describe("commands", () => {
     expect(await registerCommands(api, OWNER, CONTROL_COMMANDS, "control bot")).toBe(true);
     const scope = { type: "chat", chat_id: OWNER };
     const main = { scope, commands: [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }] };
-    const control = { scope, commands: [{ command: "status", description: expect.any(String) }, { command: "stop", description: expect.stringContaining("<chat>") }, { command: "policy", description: expect.stringContaining("<chat>") }] };
+    const control = { scope, commands: [{ command: "status", description: expect.any(String) }, { command: "stop", description: expect.stringContaining("<chat>") }, { command: "policy", description: expect.stringContaining("<chat>") }, { command: "turn", description: expect.stringContaining("<id>") }] };
     expect(tg!.sent("setMyCommands")).toEqual([main, main, control]);
   });
 

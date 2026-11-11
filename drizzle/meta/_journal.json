@@ -57,6 +57,13 @@
       "when": 1794408623727,
       "tag": "0007_ambitious_shadow_king",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794412268794,
+      "tag": "0008_milky_iceman",
+      "breakpoints": true
     }
   ]
 }

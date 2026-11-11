@@ -1,4 +1,4 @@
-import { dataDirFrom } from "../../env.ts";
+import { DEFAULT_SECRETS_FILE, dataDirFrom } from "../../env.ts";
 import type { Env } from "../types.ts";
 import type { HangarConfig } from "./hangar/client.ts";
 
@@ -80,7 +80,7 @@ export function computerConfig(env: Env): ComputerConfig | null {
     jobMaxSec: 24 * 3600,
     readyMs: positive(env.SHUVI_COMPUTER_READY_SEC, 180) * 1000,
     pollEveryMs: positive(env.SHUVI_COMPUTER_POLL_SEC, 5) * 1000,
-    secretsFile: env.SHUVI_SECRETS_FILE || "/etc/shuvi.secrets.yaml",
+    secretsFile: env.SHUVI_SECRETS_FILE || DEFAULT_SECRETS_FILE,
     applyStepSec: positive(env.SHUVI_COMPUTER_APPLY_STEP_SEC, 900),
     inboxWaitMs: positive(env.SHUVI_COMPUTER_INBOX_WAIT_SEC, 30) * 1000,
   };

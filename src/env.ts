@@ -22,6 +22,17 @@ import { join, resolve } from "node:path";
  *   SHUVI_TURN_MAX_MINUTES    a turn's wall-clock limit; past it the turn is stopped (default 15)
  *   SHUVI_ALERT_OUTBOUND_MINUTES  alert when an outbound message is still pending after this long (default 10)
  *   SHUVI_COMMIT              the deployed commit /status shows (default: `git describe` of the checkout)
+ *   SHUVI_TRANSCRIPT_DAYS     how long a turn's transcript is kept after the turn ended (default 30)
+ *   SHUVI_SECRETS_FILE        the secret profiles (default /etc/shuvi.secrets.yaml): every value in it is
+ *                             redacted from turn transcripts, and from a chat computer's output
+ *   SHUVI_CONSOLE_LISTEN      where the console listens, LOOPBACK ONLY (default 127.0.0.1:8787); anything
+ *                             else is refused at startup. Publish it with `tailscale serve` (docs/console.md)
+ *   SHUVI_CONSOLE_USERS       the tailnet logins let into the console (comma-separated), by the
+ *                             `Tailscale-User-Login` header `tailscale serve` sets
+ *   SHUVI_CONSOLE_TOKEN       the console's fallback when SHUVI_CONSOLE_USERS is unset: a token exchanged at
+ *                             /login for a session cookie. With neither set, the console is off
+ *   SHUVI_CONSOLE_URL         the console as the owner opens it (https://<host>.<tailnet>.ts.net): links to a
+ *                             turn in the control bot, and the one non-loopback Host the console answers
  *
  * These are the framework's own variables. A capability reads its own (e.g. SHUVI_WEB,
  * SHUVI_TAVILY_API_KEY) in its own module, src/capabilities/<id>/, which lists them in its header.
@@ -42,7 +53,13 @@ export interface Config {
   controlApiRoot?: string;
   turnMaxMs: number;
   outboundAlertMs: number;
+  transcriptDays: number;
+  secretsFile: string;
+  console: { listen: string; users?: string[]; token?: string; url?: string };
 }
+
+export const DEFAULT_CONSOLE_LISTEN = "127.0.0.1:8787";
+export const DEFAULT_SECRETS_FILE = "/etc/shuvi.secrets.yaml";
 
 function minutes(name: string, fallback: number): number {
   const v = process.env[name];
@@ -84,5 +101,30 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
       : {}),
     turnMaxMs: minutes("SHUVI_TURN_MAX_MINUTES", 15),
     outboundAlertMs: minutes("SHUVI_ALERT_OUTBOUND_MINUTES", 10),
+    transcriptDays: days("SHUVI_TRANSCRIPT_DAYS", 30),
+    secretsFile: process.env.SHUVI_SECRETS_FILE || DEFAULT_SECRETS_FILE,
+    console: consoleFromEnv(process.env),
+  };
+}
+
+function days(name: string, fallback: number): number {
+  const v = process.env[name];
+  if (!v) return fallback;
+  const n = Number(v);
+  if (!(n > 0)) throw new Error(`${name} must be a positive number of days`);
+  return n;
+}
+
+/** The console's settings (src/console/), from the environment. Checked by the server at startup. */
+export function consoleFromEnv(env: Record<string, string | undefined>): Config["console"] {
+  const users = (env.SHUVI_CONSOLE_USERS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return {
+    listen: env.SHUVI_CONSOLE_LISTEN?.trim() || DEFAULT_CONSOLE_LISTEN,
+    ...(users.length ? { users } : {}),
+    ...(env.SHUVI_CONSOLE_TOKEN ? { token: env.SHUVI_CONSOLE_TOKEN } : {}),
+    ...(env.SHUVI_CONSOLE_URL?.trim() ? { url: env.SHUVI_CONSOLE_URL.trim() } : {}),
   };
 }

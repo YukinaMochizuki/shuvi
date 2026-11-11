@@ -13,6 +13,8 @@
  *   5. A lost Claude session: the chat's conversation id is one Claude Code has never seen. The real CLI
  *      refuses to resume it, and the turn recovers at once as a fresh conversation opening with the last
  *      messages, with no failure attempt used and one alert. This pins the driver's real error text.
+ *   6. The console's links: a failed turn's alert links to its page, `/turn <id>` answers a paragraph and
+ *      the link, and the page itself opens with the token fallback (a session cookie from /login).
  *
  *   bun scripts/e2e-control.ts
  */
@@ -23,7 +25,7 @@ import type { Update } from "grammy/types";
 import { getApproval, requestApproval } from "../src/control/approvals.ts";
 import { openDb } from "../src/store/db.ts";
 import { WALL_CLOCK_STOP } from "../src/store/turns.ts";
-import { dmUpdate, FakeTelegram, OWNER } from "../test/helpers.ts";
+import { consolePortIn, dmUpdate, FakeTelegram, OWNER, tapLines } from "../test/helpers.ts";
 
 const t0 = Date.now();
 const log = (m: string) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`);
@@ -87,6 +89,9 @@ const dataDir = mkdtempSync(join(tmpdir(), "shuvi-e2e-control-"));
 // One fake group, for /policy.
 mkdirSync(join(dataDir, "home"), { recursive: true });
 writeFileSync(join(dataDir, "home", "policy.yaml"), `chats:\n  "-1009999999999":\n    title: Fake Hiking Club\n    tools: { web: {}, stickers: {} }\n`);
+// The console binds any free port (0); the server's log says which (`tapLines`).
+let consolePort = 0;
+const CONSOLE_URL = "https://example-host.example-tailnet.ts.net";
 const env = {
   ...process.env,
   SHUVI_DATA_DIR: dataDir,
@@ -99,10 +104,14 @@ const env = {
   SHUVI_TURN_MAX_MINUTES: "0.15", // 9 s
   SHUVI_MODEL: "claude-sonnet-4-5",
   SHUVI_TZ: "Asia/Taipei",
+  SHUVI_CONSOLE_LISTEN: "127.0.0.1:0",
+  SHUVI_CONSOLE_TOKEN: "example-console-token",
+  SHUVI_CONSOLE_URL: CONSOLE_URL,
   ANTHROPIC_BASE_URL: `http://localhost:${anthropic.port}`,
   ANTHROPIC_API_KEY: "sk-ant-fake",
 };
-const server = Bun.spawn([process.execPath, "src/server/main.ts"], { env, stdout: "inherit", stderr: "inherit", detached: true });
+const server = Bun.spawn([process.execPath, "src/server/main.ts"], { env, stdout: "pipe", stderr: "inherit", detached: true });
+tapLines(server.stdout, (line) => (consolePort = consolePortIn(line) ?? consolePort));
 function cleanup() {
   try {
     process.kill(-server.pid, "SIGKILL");
@@ -130,7 +139,7 @@ check(controlTexts().length === 1, "only the owner gets an answer");
 check(controlTexts()[0]!.startsWith("shuvi, commit e2e1234") && controlTexts()[0]!.includes("Running turns: 0") && controlTexts()[0]!.includes("Outbound pending: 0"), `/status lists turns, outbound and the commit (${JSON.stringify(controlTexts()[0])})`);
 const menu = (bot: FakeTelegram) => bot.sent("setMyCommands").map((b) => `${JSON.stringify(b.scope)} ${(b.commands as { command: string }[]).map((c) => c.command).join(",")}`);
 const ownerScope = JSON.stringify({ type: "chat", chat_id: OWNER });
-check(menu(tg).join("|") === `${ownerScope} new,stop` && menu(control).join("|") === `${ownerScope} status,stop,policy`, `each bot registered its commands for the owner's chat (${menu(tg)} / ${menu(control)})`);
+check(menu(tg).join("|") === `${ownerScope} new,stop` && menu(control).join("|") === `${ownerScope} status,stop,policy,turn`, `each bot registered its commands for the owner's chat (${menu(tg)} / ${menu(control)})`);
 
 // ---- 1b. /policy -------------------------------------------------------------------------------------
 control.updates.push(dmUpdate(3, "/policy"), dmUpdate(4, "/policy 2"));
@@ -145,7 +154,7 @@ check(detail!.includes("<b>2. Fake Hiking Club</b>") && detail!.includes("<b>Off
 // ---- 2. a forced failure, retried to the cap ---------------------------------------------------------
 tg.updates.push(dmUpdate(1, "please fail"));
 await until("the failure alert", () => controlTexts().some((t) => t.includes("failed in chat")));
-check(controlTexts().some((t) => /^Turn \d+ failed in chat 1 \(tg 1001\): .*It will be retried\.$/s.test(t)), "a failed turn is alerted");
+check(controlTexts().some((t) => /^Turn \d+ failed in chat 1 \(tg 1001\): .*It will be retried\.\nhttps:\/\/example-host\.example-tailnet\.ts\.net\/turns\/\d+$/s.test(t)), "a failed turn is alerted, with its console link");
 await until("the retry cap to give up", () => controlTexts().some((t) => t.startsWith("Unanswered")), 60_000);
 const gaveUp = controlTexts().find((t) => t.startsWith("Unanswered"))!;
 check(gaveUp.includes('"please fail" (#1)') && gaveUp.includes("3 turns failed on it"), `the alert says which message went unanswered (${JSON.stringify(gaveUp)})`);
@@ -199,6 +208,24 @@ check(!!session && session !== unknown, "the chat has a fresh conversation");
 check(freshPrompt.includes("(A new conversation.") && freshPrompt.includes("hang"), "which opened with the chat's last messages");
 await until("the lost-session alert", () => controlTexts().some((t) => t.includes("was lost")));
 check(controlTexts().filter((t) => t.includes(`was lost (${unknown})`)).length === 1, "and one alert says the conversation was lost");
+
+// ---- 6. the console's links, and the token fallback ------------------------------------------------------
+const failedTurn = db.$client.query("select id, error from turns where status = 'failed' order by id limit 1").get() as { id: number; error: string };
+const lastFailed = (db.$client.query("select max(id) as id from turns where status = 'failed'").get() as { id: number }).id;
+check(controlTexts().some((t) => t.startsWith("Unanswered") && t.endsWith(`/turns/${lastFailed}`)), "the given-up alert links to the turn that gave up");
+control.updates.push(dmUpdate(7, `/turn ${failedTurn.id}`));
+await until("the /turn reply", () => controlTexts().some((t) => t.startsWith(`Turn ${failedTurn.id} in`)));
+const summary = controlTexts().find((t) => t.startsWith(`Turn ${failedTurn.id} in`))!;
+check(summary.includes(": failed after") && summary.endsWith(`\n${CONSOLE_URL}/turns/${failedTurn.id}`), `/turn answers a paragraph and the link (${JSON.stringify(summary)})`);
+await until("the console to be listening", () => consolePort > 0);
+const consoleBase = `http://127.0.0.1:${consolePort}`;
+check((await fetch(`${consoleBase}/turns/${failedTurn.id}`)).status === 401, "the console wants the token");
+const login = await fetch(`${consoleBase}/login`, { method: "POST", body: new URLSearchParams({ token: "example-console-token" }), redirect: "manual" });
+const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0]!;
+check(login.status === 303 && cookie.startsWith("shuvi_console="), "the token buys a session cookie");
+const failedPage = await fetch(`${consoleBase}/turns/${failedTurn.id}`, { headers: { cookie } });
+const failedHtml = await failedPage.text();
+check(failedPage.status === 200 && failedHtml.includes("Why it ended that way") && failedHtml.includes("System prompt"), "and with it the failed turn's page opens, saying why it failed");
 
 log("PASS");
 cleanup();

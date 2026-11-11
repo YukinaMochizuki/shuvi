@@ -22,10 +22,23 @@ import { controlMessages } from "./schema.ts";
 
 export const ALERT_REPEAT_MS = 30 * 60_000;
 
+/**
+ * The console's page for turn `turnId` (src/capabilities/console/), when `SHUVI_CONSOLE_URL` says where the
+ * owner opens the console; null otherwise. Read from the environment at call time, so a runner child (which
+ * inherits the server's) links the same way.
+ */
+export function consoleTurnUrl(turnId: number, env: Record<string, string | undefined> = process.env): string | null {
+  const base = env.SHUVI_CONSOLE_URL?.trim();
+  return base ? `${base.replace(/\/+$/, "")}/turns/${turnId}` : null;
+}
+
 export type ControlMessage = typeof controlMessages.$inferSelect;
 
-/** Queue an alert for the owner. Returns what became of it (`null`: this key was already raised). */
-export function raiseAlert(db: Db, a: { key: string; topic?: string; text: string }, now = Date.now()): "pending" | "suppressed" | null {
+/**
+ * Queue an alert for the owner. Returns what became of it (`null`: this key was already raised). An alert
+ * about a turn names it (`turnId`), and carries a link to it in the console when one is configured.
+ */
+export function raiseAlert(db: Db, a: { key: string; topic?: string; text: string; turnId?: number }, now = Date.now()): "pending" | "suppressed" | null {
   if (db.select({ id: controlMessages.id }).from(controlMessages).where(eq(controlMessages.idemKey, a.key)).get()) return null;
   let status: "pending" | "suppressed" = "pending";
   let text = a.text;
@@ -54,6 +67,8 @@ export function raiseAlert(db: Db, a: { key: string; topic?: string; text: strin
       if (n) text += ` And ${n} more like it since the last alert.`;
     }
   }
+  const link = a.turnId !== undefined ? consoleTurnUrl(a.turnId) : null;
+  if (link) text += `\n${link}`;
   if (status === "pending") console.error(`alert: ${text}`);
   const rows = db
     .insert(controlMessages)

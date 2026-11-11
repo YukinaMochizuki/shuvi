@@ -21,6 +21,11 @@ wall-clock limit `SHUVI_TURN_MAX_MINUTES`, messages that are not getting through
 carries approval cards with buttons (`src/control/approvals.ts`). It answers only `SHUVI_OWNER_ID`.
 Without its token, alerts are only logged and queued. See docs/design.md §13.
 
+Every turn is recorded as the model saw it (its system prompt, input, thinking, text, tool calls and what
+arrived mid-turn), and the **console** shows it: a private, read-only web page published to the owner's
+tailnet with `tailscale serve`. `/turn <id>` in the control bot, and every alert about a turn, link to it.
+See [docs/console.md](docs/console.md).
+
 ## Groups and policy
 
 `home/policy.yaml` says which chats she serves and what each may do (docs/design.md §6–§8; the format is
@@ -53,6 +58,7 @@ bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock 
 bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
 bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
 bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
+bun scripts/console-fixture.ts  # the console over made-up fixture data, on 127.0.0.1:8787, to look at
 ```
 
 ```bash
@@ -68,7 +74,8 @@ assistant replies in it. Turns run on the Claude login of the user the server ru
 ## Data
 
 `SHUVI_DATA_DIR` (default `./data`) holds `shuvi.db`, `home/` (the assistant's persona, directives and
-memory as markdown, and `policy.yaml`) and `media/` (the photos and stickers it was sent, by `file_unique_id`). All of it is
+memory as markdown, and `policy.yaml`) and `media/` (the photos and stickers it was sent, by `file_unique_id`;
+`media/transcript/` holds the other images turn transcripts refer to, pruned with them). All of it is
 private: it lives outside this repository and is never committed or pushed. Note that Claude Code also
 keeps a copy of each image a turn is shown, next to its session files.
 

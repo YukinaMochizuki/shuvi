@@ -13,7 +13,9 @@
  * model receives it as an image block (on a resumed conversation). Then an edit to home/ (a git commit
  * by shuvi) is in the system prompt of the very next turn of the same conversation, without `/new`.
  * Then stickers: a pack file in home/ is indexed and its set fetched by the server, a turn calls
- * `find_sticker` then `sticker`, and the fake Bot API receives `sendSticker`.
+ * `find_sticker` then `sticker`, and the fake Bot API receives `sendSticker`. Last, the console: that
+ * turn's page, fetched as a tailnet user would (the `Tailscale-User-Login` header `tailscale serve` sets),
+ * shows its system prompt, its tool calls and its usage; a login not on the list gets 403.
  *
  *   bun scripts/e2e-fake.ts
  */
@@ -21,7 +23,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/store/db.ts";
-import { dmUpdate, FakeTelegram, OWNER } from "../test/helpers.ts";
+import { consolePortIn, dmUpdate, FakeTelegram, OWNER, tapLines } from "../test/helpers.ts";
 
 const t0 = Date.now();
 const log = (m: string) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`);
@@ -131,6 +133,8 @@ const anthropic = Bun.serve({
 // ---- the world ---------------------------------------------------------------------------------------
 const tg = new FakeTelegram();
 const dataDir = mkdtempSync(join(tmpdir(), "shuvi-e2e-"));
+// The console binds any free port (0); the server's log says which (`tapLines`).
+let consolePort = 0;
 const env = {
   ...process.env,
   SHUVI_DATA_DIR: dataDir,
@@ -139,13 +143,16 @@ const env = {
   SHUVI_TELEGRAM_API_ROOT: tg.apiRoot,
   SHUVI_MODEL: "claude-sonnet-4-5",
   SHUVI_TZ: "Asia/Taipei",
+  SHUVI_CONSOLE_LISTEN: "127.0.0.1:0",
+  SHUVI_CONSOLE_USERS: "owner@example.com",
   ANTHROPIC_BASE_URL: `http://localhost:${anthropic.port}`,
   ANTHROPIC_API_KEY: "sk-ant-fake",
 };
 let server: ReturnType<typeof Bun.spawn> | null = null;
 const startServer = () => {
   // Its own process group, so it can be killed as a group, the way a terminal or systemd kills it.
-  server = Bun.spawn([process.execPath, "src/server/main.ts"], { env, stdout: "inherit", stderr: "inherit", detached: true });
+  server = Bun.spawn([process.execPath, "src/server/main.ts"], { env, stdout: "pipe", stderr: "inherit", detached: true });
+  tapLines(server.stdout, (line) => (consolePort = consolePortIn(line) ?? consolePort));
 };
 function cleanup() {
   try {
@@ -271,6 +278,23 @@ check(tg.sent("sendSticker")[0]!.sticker === "cats-f1", "the fake Bot API receiv
 await until("the text after it", () => texts().includes("There you go."));
 const stickerRow = db.$client.query("select status, tg_message_id from chat_events where kind = 'bot_sticker'").get() as { status: string; tg_message_id: number };
 check(stickerRow.status === "sent" && stickerRow.tg_message_id > 0, "the bot_sticker row is recorded as delivered, with its message id");
+
+// ---- 7. the console: the sticker turn as the model saw it -------------------------------------------------
+await until("the sticker turn to close", () => (db.$client.query("select status from turns order by id desc limit 1").get() as { status: string }).status !== "running", 15_000);
+const last = db.$client.query("select id, input_tokens, output_tokens from turns order by id desc limit 1").get() as { id: number; input_tokens: number; output_tokens: number };
+await until("the console to be listening", () => consolePort > 0);
+const consoleGet = (path: string, login?: string) => fetch(`http://127.0.0.1:${consolePort}${path}`, { headers: login ? { "Tailscale-User-Login": login } : {} });
+const turnPage = await consoleGet(`/turns/${last.id}`, "owner@example.com");
+const turnHtml = await turnPage.text();
+check(turnPage.status === 200, `the console serves turn ${last.id} to a tailnet user on the list`);
+const promptHtml = await (await consoleGet(`/turns/${last.id}?tab=prompt`, "owner@example.com")).text();
+check(promptHtml.includes('<span class="lbl">capability: speech</span>') && promptHtml.includes('<span class="lbl">capability: stickers</span>'), "its system prompt tab shows the prompt, by section");
+check(turnHtml.includes('<span class="name">find_sticker</span>') && turnHtml.includes("&quot;hello&quot;") && turnHtml.includes("Sent Cats/1."), "its conversation shows the tool calls, with their arguments and results");
+check(turnHtml.includes(`<b>${last.input_tokens.toLocaleString("en-US")}</b> in / <b>${last.output_tokens.toLocaleString("en-US")}</b> out`) && turnHtml.includes("cache <b>"), `and the usage (${last.input_tokens} in / ${last.output_tokens} out)`);
+check(turnHtml.includes("send me a sticker"), "and the input");
+check((await consoleGet(`/turns/${last.id}`, "someone@example.com")).status === 403 && (await consoleGet(`/turns/${last.id}`)).status === 403, "a login not on the list, or none, gets 403");
+const listHtml = await (await consoleGet("/turns?tool=sticker", "owner@example.com")).text();
+check(listHtml.includes(`href="/turns/${last.id}?tool=sticker"`) && listHtml.includes("1 turn in 1 chat"), "the grouped list finds it by the tool it used");
 
 log("PASS");
 cleanup();
