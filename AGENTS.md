@@ -43,6 +43,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | the sticker library: its format and index, ranking, the rules `sticker` enforces | `src/capabilities/stickers/` (`library.ts`, `find.ts`, `rules.ts`) |
 | each chat's computer (Hangar), exec, secrets, files | `src/capabilities/computer/index.ts`, then `state.ts` (who may touch it when) and `secrets.ts` |
 | what each chat may do (policy.yaml), and changing it only by approval | `src/policy/policy.ts`, `src/policy/load.ts`, `src/policy/write.ts` |
+| how policy is described: the owner's `/policy`, the model's `explain_policy` and the check on a proposal | `src/policy/view.ts`, `src/policy/explain.ts` |
 | which group messages start a turn (mention, reply, follow-up) | `src/agent/triggers.ts`, `src/server/waker.ts` |
 | what a chat may see or send to | `src/capabilities/access.ts` |
 
@@ -51,7 +52,8 @@ Run typecheck, test and the e2e scripts before calling a change done.
 A capability (speech, web, …) is one folder plus one line:
 
 1. Create `src/capabilities/<id>/index.ts` exporting a `Capability` (`defineCapability`, see
-   `src/capabilities/types.ts`): its `id`, `enable(env)` (read your own `SHUVI_*` variables here and list
+   `src/capabilities/types.ts`): its `id`, its `label` and `gives` (how /policy and explain_policy name and
+   describe it), its policy `params` if `configure` reads any, `enable(env)` (read your own `SHUVI_*` variables here and list
    them in the module header; return `null` when off), and any of `tools`, `section`, `loops`, `jobKinds`,
    `ownerOnly`, and for what a message shows, `holds` (perception gating: hold a turn for a few seconds
    while it is not ready) and `perceive` (image parts after the message's line). A loop gets a read-only

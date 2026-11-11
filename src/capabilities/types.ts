@@ -99,12 +99,39 @@ export interface ServerLoop {
   run: () => Promise<number | void>;
 }
 
+/**
+ * A parameter policy may pass a capability (`workstream: { products: [widgetry] }`). Declared so that the
+ * owner's view (/policy), the model's catalogue (read_policy) and the check on a proposed entry
+ * (propose_policy) all read the same list (src/policy/view.ts, src/policy/explain.ts).
+ */
+export interface PolicyParam {
+  type: "string" | "string[]" | "number" | "boolean";
+  /** What it means, in one line. */
+  meaning: string;
+  /** What leaving it out means ("any product"). */
+  default: string;
+  /** A value to show in an example entry (explain_policy). */
+  example: unknown;
+}
+
 /** The environment a capability reads its configuration from (`process.env` in production). */
 export type Env = Record<string, string | undefined>;
 
 export interface Capability<C = unknown> {
   /** Also the folder name: `src/capabilities/<id>/`. */
   readonly id: string;
+  /**
+   * What the owner calls it, in a few plain words, as /policy shows it ("web lookups"). Say "(owner only)"
+   * when every tool it gives acts for the owner.
+   */
+  readonly label: string;
+  /** What it gives a chat, in one line (read_policy's catalogue, /policy <chat>). */
+  readonly gives: string;
+  /**
+   * The parameters policy may pass it (see `configure`), by name. Absent: none, and a proposed entry
+   * passing any is refused (propose_policy).
+   */
+  readonly params?: Readonly<Record<string, PolicyParam>>;
   /** Read this capability's configuration from `env`. `null`: it is off in this process. */
   enable(env: Env): C | null;
   /** On in every chat, whatever the chat's policy enables (speech: without it nothing can be said). */

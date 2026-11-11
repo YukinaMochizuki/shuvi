@@ -3,7 +3,8 @@
  * The control bot end to end: a real server and real runner children with the real Claude Code CLI,
  * against TWO fake Bot APIs (the assistant's bot and the control bot) and a fake Anthropic API.
  *
- *   1. /status in the control bot answers the owner (and nobody else) with the deployed commit.
+ *   1. /status in the control bot answers the owner (and nobody else) with the deployed commit. /policy
+ *      lists home/policy.yaml's chats in words, as HTML (a fake group); /policy 2 shows that one in detail.
  *   2. A message whose every turn fails: an alert for the failure, then one saying which message went
  *      unanswered once the retry cap gives up. Nothing of it appears in the assistant's chat.
  *   3. A turn that hangs past the wall-clock limit is stopped, closes as `stopped`, and is alerted.
@@ -15,7 +16,7 @@
  *
  *   bun scripts/e2e-control.ts
  */
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Update } from "grammy/types";
@@ -83,6 +84,9 @@ const anthropic = Bun.serve({
 const tg = new FakeTelegram();
 const control = new FakeTelegram();
 const dataDir = mkdtempSync(join(tmpdir(), "shuvi-e2e-control-"));
+// One fake group, for /policy.
+mkdirSync(join(dataDir, "home"), { recursive: true });
+writeFileSync(join(dataDir, "home", "policy.yaml"), `chats:\n  "-1009999999999":\n    title: Fake Hiking Club\n    tools: { web: {}, stickers: {} }\n`);
 const env = {
   ...process.env,
   SHUVI_DATA_DIR: dataDir,
@@ -126,7 +130,17 @@ check(controlTexts().length === 1, "only the owner gets an answer");
 check(controlTexts()[0]!.startsWith("shuvi, commit e2e1234") && controlTexts()[0]!.includes("Running turns: 0") && controlTexts()[0]!.includes("Outbound pending: 0"), `/status lists turns, outbound and the commit (${JSON.stringify(controlTexts()[0])})`);
 const menu = (bot: FakeTelegram) => bot.sent("setMyCommands").map((b) => `${JSON.stringify(b.scope)} ${(b.commands as { command: string }[]).map((c) => c.command).join(",")}`);
 const ownerScope = JSON.stringify({ type: "chat", chat_id: OWNER });
-check(menu(tg).join("|") === `${ownerScope} new,stop` && menu(control).join("|") === `${ownerScope} status,stop`, `each bot registered its commands for the owner's chat (${menu(tg)} / ${menu(control)})`);
+check(menu(tg).join("|") === `${ownerScope} new,stop` && menu(control).join("|") === `${ownerScope} status,stop,policy`, `each bot registered its commands for the owner's chat (${menu(tg)} / ${menu(control)})`);
+
+// ---- 1b. /policy -------------------------------------------------------------------------------------
+control.updates.push(dmUpdate(3, "/policy"), dmUpdate(4, "/policy 2"));
+await until("the /policy replies", () => control.sent().filter((b) => b.parse_mode === "HTML").length >= 2);
+const [overview, detail] = control.sent().filter((b) => b.parse_mode === "HTML").map((b) => String(b.text));
+check(
+  overview!.includes("<b>1. Your DM</b>") && overview!.includes("<b>2. Fake Hiking Club</b>  <i>-1009999999999</i>") && overview!.includes("• web lookups\n• stickers") && overview!.includes("<b>Unknown groups:</b>") && !overview!.includes("tools:"),
+  `/policy lists the DM and the group in words, as HTML (${JSON.stringify(overview)})`,
+);
+check(detail!.includes("<b>2. Fake Hiking Club</b>") && detail!.includes("<b>Off:</b>") && detail!.includes("• schedules (owner only)"), `/policy 2 shows the group with what is off (${JSON.stringify(detail)})`);
 
 // ---- 2. a forced failure, retried to the cap ---------------------------------------------------------
 tg.updates.push(dmUpdate(1, "please fail"));
@@ -141,7 +155,7 @@ check(chatTexts().length === 0, "and nothing was said in the assistant's chat");
 // ---- 3. the wall-clock limit -------------------------------------------------------------------------
 tg.updates.push(dmUpdate(2, "hang"));
 await until("the hanging turn to start", () => (db.$client.query("select count(*) as n from turns where status = 'running' and pid is not null").get() as { n: number }).n === 1, 40_000);
-control.updates.push(dmUpdate(4, "/status"));
+control.updates.push(dmUpdate(5, "/status"));
 await until("the second /status reply", () => controlTexts().filter((t) => t.startsWith("shuvi, commit")).length >= 2);
 const status = controlTexts().filter((t) => t.startsWith("shuvi, commit")).at(-1)!;
 check(/Running turns: 1\n- chat 1 \(tg 1001\): turn 4, running \d+s, pid \d+/.test(status) && status.includes("Failed turns, last 24h: 3") && status.includes("API Error: 400"), `/status shows the running turn and the recent failures (${JSON.stringify(status)})`);
@@ -160,7 +174,7 @@ await until("the approval card", () => controlTexts().some((t) => t.includes("Al
 const card = control.calls.find((c) => c.method === "sendMessage" && String(c.body.text).includes("Allow the e2e?"))!.body;
 const keyboard = (card.reply_markup as { inline_keyboard: { callback_data: string; text: string }[][] }).inline_keyboard;
 check(keyboard.map((r) => r[0]!.text).join("|") === "Yes|No", "the card carries one button per option");
-control.updates.push({ update_id: 5, callback_query: { id: "cq1", from: { id: OWNER, is_bot: false, first_name: "Owner" }, chat_instance: "x", data: keyboard[0]![0]!.callback_data } } as unknown as Update);
+control.updates.push({ update_id: 6, callback_query: { id: "cq1", from: { id: OWNER, is_bot: false, first_name: "Owner" }, chat_instance: "x", data: keyboard[0]![0]!.callback_data } } as unknown as Update);
 await until("the answer to be recorded", () => getApproval(db, id)!.status !== "pending");
 check(getApproval(db, id)!.answer === "yes", "the owner's press is recorded");
 await until("the card to be edited", () => control.sent("editMessageText").length >= 1);

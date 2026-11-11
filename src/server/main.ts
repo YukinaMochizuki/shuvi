@@ -101,7 +101,7 @@ void loop("backup", async () => void backupPass({ db, dataDir: cfg.dataDir, home
 
 if (cfg.controlBotToken) {
   const control = new Api(cfg.controlBotToken, cfg.controlApiRoot ? { apiRoot: cfg.controlApiRoot } : undefined);
-  const deps = { ownerId: cfg.ownerId, commit: deployedCommit(join(dirname(fileURLToPath(import.meta.url)), "../..")), timeZone: cfg.timeZone, signal: signalTurn };
+  const deps = { ownerId: cfg.ownerId, commit: deployedCommit(join(dirname(fileURLToPath(import.meta.url)), "../..")), timeZone: cfg.timeZone, signal: signalTurn, policy: () => policies.current(), enabled: new Set(capabilities.map((c) => c.capability.id)) };
   void registerCommands(control, cfg.ownerId, CONTROL_COMMANDS, "control bot");
   void loop("control-poller", async () => void (await controlPollOnce(db, control, deps, 25, stop.signal)), 0);
   void loop("control-sender", async () => (await controlSendPass(db, control, cfg.ownerId)).backoffMs, 500);

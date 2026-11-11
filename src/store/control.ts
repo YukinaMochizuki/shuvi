@@ -69,6 +69,19 @@ export function queueReply(db: Db, key: string, text: string): void {
   db.insert(controlMessages).values({ kind: "reply", text, idemKey: key, status: "pending" }).onConflictDoNothing().run();
 }
 
+/**
+ * Queue a reply in Telegram HTML, as one message per part, in order (`key` for the first, `key:2`, … after
+ * it). The caller escapes what it puts in and keeps each part under Telegram's limit.
+ */
+export function queueHtmlReply(db: Db, key: string, parts: readonly string[]): void {
+  parts.forEach((text, i) => {
+    db.insert(controlMessages)
+      .values({ kind: "reply_html", text, idemKey: i ? `${key}:${i + 1}` : key, status: "pending" })
+      .onConflictDoNothing()
+      .run();
+  });
+}
+
 export function queueControl(db: Db, m: { kind: "approval" | "approval_closed"; text: string; key: string; approvalId: number }): void {
   db.insert(controlMessages).values({ ...m, idemKey: m.key, status: "pending" }).onConflictDoNothing().run();
 }

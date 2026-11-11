@@ -223,6 +223,8 @@ describe("the tool merge", () => {
     ownerSays(db, "x");
     const dup = defineCapability<true>({
       id: "dup",
+      label: "dup",
+      gives: "a tool named like speech's.",
       enable: () => true,
       tools: () => [{ serverName: "other", tools: [{ name: "say", description: "", inputSchema: {}, handler: async () => ok("") }] as ToolDef[] }],
     });

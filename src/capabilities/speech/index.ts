@@ -31,6 +31,8 @@ const emojiList = REACTION_EMOJI.join(" ");
 
 export const speech = defineCapability<true>({
   id: "speech",
+  label: "talking",
+  gives: "say, react and pass: how anything she writes reaches the chat. Always on.",
   enable: () => true,
   always: true,
   tools({ db, state: s }) {

@@ -37,6 +37,8 @@ export function jobReportUrl(env: Env, jobId: number): string | null {
 
 export const jobs = defineCapability<JobsConfig>({
   id: "jobs",
+  label: "background jobs",
+  gives: "the watcher and hooks under background work; no tools of its own.",
   enable: (env) => ({ ...(env.SHUVI_HOOK_LISTEN ? { listen: env.SHUVI_HOOK_LISTEN } : {}), inboundTokens: inboundTokens(env) }),
   loops(ctx, config) {
     const loops: ServerLoop[] = [
