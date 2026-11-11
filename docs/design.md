@@ -1,0 +1,344 @@
+# shuvi architecture
+
+shuvi is a personal assistant that serves one person (the *owner*), with first-party Telegram support.
+The agent itself runs on [agent-runtime](https://github.com/YukinaMochizuki/agent-runtime); shuvi is
+everything around it: receiving and sending messages, deciding when to think, assembling the context,
+memory, background work, and each chat's permissions.
+
+This document records the shape of the architecture and the reasons behind it. It is not a feature list:
+features (stickers, media, work capabilities) are details built on this shape.
+
+## 1. Invariants
+
+The whole design is derived from these five. Before changing any component, check that it breaks none
+of them.
+
+1. **Nothing perceived is lost.** Everything that happens outside (a message, a schedule coming due, a
+   background job finishing, an external notification) is written to the DB before it is handled.
+2. **Nothing said is lost, or said twice.** A message is in one of two states: delivered to Telegram with
+   a message id, or waiting to be sent. There is no "not sure whether it went out".
+3. **Thinking is not interrupted by the body restarting.** A deploy or restart lets a running turn finish.
+4. **A chat is ordered.** One chat has at most one turn at a time, and events are handled in order.
+5. **Only the assistant speaks.** The framework never produces a message in the assistant's voice.
+   Anything the framework has to tell the owner goes to the control bot (§13).
+
+## 2. Components and flow
+
+```
+ Telegram ─poller─┐  schedules ─┐  jobs (exit/callback/poll) ─┐  /inbound/<source> ─┐
+                  ▼             ▼                             ▼                    ▼
+            ┌──────────────── chat_events (one log per chat, with a cursor) ───────────┐
+            └──────────────┬──────────────────────────────────────────────────────────┘
+                           ▼ waker: new events past the cursor that match the chat's trigger
+                     runner child (one turn; survives a server restart)
+                       ├ a text block → one message
+                       ├ react / sticker / send_* / edit / send(chat) / pass()
+                       ├ start_job → the turn ends now, the result comes back to the origin later
+                       └ edits home/ (git commit) / propose_policy (waits for the owner)
+                           ▼
+                     sender → Telegram (idempotent; the message id is recorded once delivered)
+```
+
+The **shuvi server** (an always-on Bun process) runs:
+
+- **telegram poller**: long polling for updates. Updates are written to `chat_events` before the offset
+  is committed, and deduplicated by `update_id`. Long polling rather than a webhook, because it needs no
+  public endpoint.
+- **waker**: decides which chat needs a turn now: new events past its cursor, matching the chat's
+  trigger, and no turn already running there. It then spawns a runner child.
+- **sender**: delivers queued messages to Telegram and records the message id. A message with an id is
+  never sent again. 429 backoff, splitting past 4096 characters and markdown-to-Telegram-HTML all live
+  here and nowhere else.
+  - Invariant 2 has two gaps that cannot be fully closed:
+    - Telegram accepted a part but we never learned so: a crash before the id is recorded, or a network
+      error (a timeout, a lost response) on a request Telegram carried out. Either way that part is sent
+      once more. The Bot API has no idempotency key to close this.
+    - A runner child that crashes mid-turn has its turn re-run (see `src/store/turns.ts`), which may say
+      again, in other words, what it already said. This is accepted because the alternative, never
+      re-running, loses the reply entirely.
+- **job watcher**: watches background jobs and writes an event back to the origin chat when one ends.
+- **hook endpoints**: `/jobs/<id>/report` and `/inbound/<source>`, on the tailnet only.
+
+**runner child**: one process per turn; it runs one turn through agent-runtime and exits. It is detached
+and outlives the server, which is what makes invariant 3 hold.
+
+## 3. Data
+
+Everything is in one SQLite file (WAL mode).
+
+- **`chat_events`**: an append-only log per chat, holding only what actually happened in that chat:
+  messages, stickers, reactions, edits, forwards, `scheduled`, `job_done`, `external`. A message the
+  assistant sends is an event too, with an idempotency key and the message id recorded once delivered.
+- **cursor**: per chat, "the last event the assistant has seen". The waker only looks past it.
+- **turns**: each turn's start, end, usage and cost. This is bookkeeping and is kept out of
+  `chat_events`.
+- **jobs**, **schedules**: see §10.
+- **The conversation the model sees** is kept by agent-runtime itself (a Claude Code session for the
+  Claude driver, the `ConversationStore` for openai-compat), not rebuilt from `chat_events`.
+  `chat_events` is "what actually happened", for people and for retrieval tools.
+
+`home/` is a second data directory, next to the SQLite file and outside the code repository:
+
+```
+home/                     a local-only git repo, no remote
+  persona/public.md       persona: the side every chat sees
+  persona/private.md      persona: the side shown only in the owner's DM
+  directives.md           the owner's rules (Always / Never, with the date observed)
+  memory/private.md       standing memory, loaded only in the owner's DM
+  chats/<id>.md           per-chat notes
+  playbooks/<name>.md     how to do a particular thing, in full
+  stickers/<pack>.yaml    the sticker library
+  stickers/preferences.md principles that apply across stickers
+  policy.yaml             each chat's permissions
+```
+
+`home/` is highly private. It never enters this repository and is never pushed anywhere. Its history
+lives only in the local git repo, and it is backed up with the machine.
+
+## 4. The speech model
+
+The starting point is to follow the model's own habits: the final answer is written as ordinary text,
+rather than requiring every sentence to go through a send tool, which is easy to forget during long work.
+
+One constraint shapes this. Models of the Opus 5.5 generation write what they say between tool calls as
+progress-update `thinking` blocks, not `text`, and under the summarized display those cannot be told apart
+from reasoning summaries (see agent-runtime's `src/claude/stream.ts`). So thinking is never sent, and
+anything worth saying mid-turn is said through an explicit tool.
+
+- **One text block is one message.** A text block is sent when it is complete, not streamed token by
+  token; in practice it is usually the final answer. Whether to stream a long final answer is a later
+  decision and does not change this shape.
+- **Mid-turn remarks use `say(text)`**, e.g. "sent it off to run in the background, about three
+  minutes". A tool's arguments always arrive whole and are never rewritten into a summary.
+- **Thinking is never sent**; it stays in the turn's record.
+- **Every other kind of expression is a tool.**
+
+  | tool | purpose |
+  |---|---|
+  | `say(text)` | say something partway through a turn |
+  | `react(event, emoji)` | react to a message |
+  | `sticker(id)` | send a sticker |
+  | `send_photo` / `send_file` / `send_voice` | images, files, voice messages |
+  | `reply_to(event)` | make the next text a reply to that message |
+  | `edit` / `delete` | change or remove one of its own messages |
+  | `send(chat, …)` | send to another chat (owner's DM only) |
+  | `pass(reaction?)` | say nothing, and end the turn |
+
+- **Silence is `pass()`.** It ends the turn; no text produced after it is sent. A turn that only reacts
+  or sends a sticker, with no text, is a complete answer. There is no sentinel string (like `NO_REPLY`):
+  in a model that sends text block by block, a sentinel mixed into ordinary text leaks out.
+- **What the framework does:**
+  - sends "typing…" while a turn runs;
+  - converts the assistant's markdown to Telegram HTML in the sender;
+  - in a group, if someone else has spoken since the message that triggered the turn, makes the first
+    text a reply to that message; otherwise sends it plainly. In a DM, no reply by default.
+- **Idempotency keys** are `(turn, block number)` or the tool call id. When a turn is picked up after a
+  restart, what was already sent is skipped.
+
+## 5. Concurrency
+
+- Turns in different chats run in parallel.
+- A chat has one turn at a time. Events arriving while it runs are appended to it at the next tool call,
+  through agent-runtime's tool-boundary append; if the turn will make no more tool calls, the next turn
+  starts as soon as it ends.
+- **Long work always goes to the background.** The tool returns a job id and the turn ends, so the chat
+  is never blocked. When the job ends, its result comes back to the origin chat as an event and starts a
+  new turn.
+- **Waiting is background work too.** "Check again in five minutes" is a scheduled event, not a turn
+  idling.
+- Interrupting a running turn takes an explicit command (`/stop`); it is not the default.
+
+## 6. Context and visibility
+
+Each chat is one long conversation, kept in bounds by agent-runtime's compaction: no daily reset, no
+splitting by topic. System events enter the conversation as events and never pose as the user speaking.
+
+The system prompt is ordered by stability (the most stable first, so the prompt cache keeps the longest
+prefix):
+
+1. persona: the persona layers this chat may see
+2. directives: global rules; taught once in any chat, they apply everywhere
+3. this chat: who is here, a summary of its policy, its notes
+4. capability groups: every group the policy enables, with its tools and a short "when to use"
+5. playbook index: one line per playbook, its name and when it is needed; `read_playbook(name)` reads
+   one in full
+6. private memory: the owner's DM only
+
+Preferences used in almost every turn (such as how to pick stickers) go in the capability group's
+description; the details of "how to do X" go in a playbook.
+
+**Visibility is one-way.** The owner's DM can read any chat's log through a tool and send to any chat; a
+group sees only itself. The privacy boundary is structural: a group turn's context does not contain the
+DM-only persona or private memory at all, so nothing can slip out, and no prompt instruction is relied on
+to hold it back.
+
+## 7. Groups
+
+- **Recording and triggering are separate.** The poller records every message in a group (this needs
+  BotFather's privacy mode off, or the bot as an admin), but recording a message does not trigger a turn.
+- **Triggers** are set by policy. The usual ones: a mention, a reply to the assistant, and a follow-up
+  in the thread the assistant just spoke in. Follow-ups are judged at the routing layer; a wrong call is
+  cheap, since the assistant can `pass()`.
+- **Context**: a turn opens with up to 10 of the messages past the cursor that the assistant has not
+  seen, each with its sender, time and reply target, plus the count of unread messages since the last
+  trigger. Anything older is reached with `read_chat`.
+
+## 8. Policy and permissions
+
+`home/policy.yaml` sets each chat's trigger, persona layers, memory layers and the capability groups it
+enables. A capability group can take parameters, e.g. a group allowed to query one workstream product
+only:
+
+```yaml
+owner: <telegram user id>
+chats:
+  dm:
+    persona: [public, private]
+    memory:  [private, chat]
+    tools:   all
+  "<group id>":
+    trigger: [mention, reply, followup]
+    persona: [public]
+    tools:
+      chat: {}
+      web: {}
+      stickers: {}
+      workstream-read: { products: [hangar] }
+unknown_chat: ignore      # a group not listed: no response, and the owner is told via the control bot
+```
+
+- **Data scope follows the chat.** Everyone in a group reads the answer, so what may be said depends on
+  the chat's audience, not on who asked.
+- **Authority follows the sender.** Running commands, assigning work and changing settings are the
+  owner's alone. The framework checks the sender's Telegram user id; the model's judgement is not relied
+  on.
+- **Policy changes are proposed by the assistant and approved by the owner.** `propose_policy` produces
+  a diff; the framework writes and commits it only when the owner's user id agrees (or presses the inline
+  button).
+
+The other files in `home/` (persona, directives, memory, playbooks, stickers) are edited by the assistant
+directly when the owner asks, with a commit per edit and a one-line note in the chat. The owner can ask
+for a revert or use git directly. Requests from anyone else in a group can at most be written into that
+chat's notes.
+
+## 9. Memory and retrieval
+
+Memory solves two different problems:
+
+- **What should be known without looking it up** goes in standing files (`memory/private.md`,
+  `chats/<id>.md`). The assistant curates them, writing when it judges in conversation that something
+  will matter later.
+- **What only needs to be findable** gets no separate summary: `chat_events` is the complete raw record,
+  and it is searched directly.
+
+There are no daily summaries and no background consolidation or "dreaming". An LLM's memory needs are not
+a person's; forcing a human memory model onto it only produces one more summary that can be wrong.
+
+The retrieval tools follow workstream's code-search and transcript-reading tools:
+
+- `search_chats(terms[], chat?, sender?, since?, until?)`: several terms, OR-combined. Every hit carries
+  its seq; when there are too many, the distribution of hits per chat is returned instead.
+- `read_chat(chat, around | before | after seq, limit)`: paged reading by seq.
+
+## 10. Background work, schedules and external events
+
+A **job** is anything whose result appears later: transcription or frame extraction on Hangar, a remote
+download, a workstream desk request, a local command.
+
+```
+jobs: id, origin(chat, event seq), kind, state(running/done/failed/expired),
+      result, deadline, report(exit | callback | poll)
+```
+
+- `exit`: work the framework runs itself; the job watcher waits for it to end.
+- `callback`: every job has its own URL and token (`/jobs/<id>/report`). An external system only POSTs
+  there; it knows nothing of chats or origins.
+- `poll`: the framework checks the status periodically.
+- Past its deadline with no result, a job is polled once; still nothing, it is marked `expired` and that
+  is written back to the origin, so nothing vanishes silently. Repeat reports are deduplicated by job id.
+- Whichever way, the result becomes a `job_done` event in the origin chat.
+
+A **schedule** is set by the owner, or proposed by the assistant and set once the owner agrees. When it
+comes due, the framework writes a `scheduled` event into the target chat, and the turn runs in that
+chat's conversation with its context. The assistant may `pass()` each time. There is no background
+patrol (heartbeat) and no unprompted speaking: every wake-up has a stated purpose.
+
+An **inbound source** carries external events the assistant did not start (a monitoring alert, say):
+`POST /inbound/<source>`. Each source's token, and the chat it lands in, are declared in policy.yaml. It
+becomes an `external` event in that chat; whether it triggers a turn is up to the trigger.
+
+## 11. Media
+
+The framework does not prefetch links or filter noise on the assistant's behalf; the assistant calls a
+tool when it needs to. Where a forward came from and the text being replied to are recorded as event
+fields.
+
+- **Images**: photos and static stickers go to the model as images. Animated (tgs) and video (webm)
+  stickers become a thumbnail or one frame, with their emoji and pack.
+- **Sticker description cache**: a short description keyed by `file_unique_id`, for replay, retrieval
+  and the sticker library; the model never sees it instead of the image.
+- **Video and large files** never block a turn: the assistant gets a thumbnail and metadata first and
+  decides whether to process them. Common processing (keyframes, transcription, compression) is a
+  framework tool that runs remotely and returns the result, so the assistant never assembles the commands
+  itself.
+- Heavy computation always runs remotely (on Hangar), never on shuvi's machine.
+- No speech-to-text in v1.
+
+## 12. Sticker library
+
+```yaml
+# home/stickers/<pack>.yaml
+pack: <set name>
+role: avatar            # avatar / common / meme: the pack's base weight
+stickers:
+  - n: 10
+    file_unique_id: <...>
+    desc: an OK hand sign        # what it shows (fact)
+    use: OK, got it              # when to use it (preference)
+    tier: go-to                  # go-to / (omitted) normal / rare / never
+```
+
+- `file_id`, size, static or animated, and whether it is narrow are fetched from Telegram by the
+  framework, never written by hand.
+- `desc` is a fact anyone can write by looking, and rarely changes; `use` and `tier` are preferences and
+  keep changing as the owner adjusts them.
+- `find_sticker(terms[], pack?)` matches both `desc` and `use`. Ranking is the match, the pack's `role`
+  and `tier`, minus the assistant's recent use of that sticker (so it varies now and then). Which stickers
+  the owner sends often is not counted, so the weights stay predictable. Candidates show their `tier` and
+  recent use.
+- `view_stickers(ids)`: look at thumbnails only when the appearance needs checking.
+- `add_sticker_pack(name)`: the framework fetches the pack and renders a numbered contact sheet; the
+  assistant looks at it and writes the descriptions.
+- **Mechanical rules are the framework's; taste is the assistant's.**
+  - Guaranteed by the tool: at most one sticker per message, never echo the sticker just sent, narrow
+    stickers are not offered.
+  - Left to the assistant: whether a sticker fits, and which one.
+
+## 13. Control and alerts
+
+- **Control bot**: a separate bot only the owner can use, for:
+  - global status: running turns, jobs, cost;
+  - stopping or cancelling across chats, reverting `home/`;
+  - approval cards;
+  - alerts: an unknown group, an expired job, a crashed turn, persistent 429s.
+- **Commands that act on the current chat** are sent in that chat, and only the owner's sender id counts:
+  - `/new`: start a fresh conversation context. `chat_events` and the cursor are kept; the new
+    conversation opens with the last 10 messages.
+  - `/stop`: stop the turn running in this chat.
+
+  The framework acknowledges a command only by reacting to it; it sends no message.
+- **CLI**: deep debugging on the machine (reading `chat_events`, turns, jobs).
+
+## 14. Deployment assumptions
+
+- The main backend is agent-runtime's Claude driver. Each turn starts a Claude Code subprocess, so the
+  machine needs at least 4 GB of memory for 2–3 turns at once.
+- Heavy computation runs remotely.
+
+## 15. Open questions
+
+- Which machine it runs on.
+- Whether agent-runtime's Claude driver can carry images in a user message; if not, the runtime needs it
+  first.
+- Migrating from the previous assistant: splitting persona and rules into the §6 layers; converting
+  sticker descriptions to the §12 format; whether to import the old conversation logs as `chat_events`.
