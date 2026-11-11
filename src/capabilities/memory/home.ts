@@ -13,6 +13,10 @@ import { PLAYBOOK_NAME } from "../../agent/playbooks.ts";
  *   persona/public.md, persona/private.md, directives.md, memory/private.md   the assistant herself
  *   chats/<this chat>.md                                                      this chat's notes
  *   playbooks/<name>.md                                                       how-tos
+ *   stickers/preferences.md                                                   how she picks stickers
+ *   stickers/<pack>.yaml                                                      the sticker library (the
+ *                                                                             owner's DM only: a pack's
+ *                                                                             dm_only uses stay out of groups)
  *
  * What a chat may SEE is decided here, from `HomeAccess` (data scope follows the chat). Who may CHANGE
  * what is not: that is authority, decided per call by the turn's boundary (memory/index.ts `ownerOnly`).
@@ -36,21 +40,28 @@ const PRIVATE_FILES = new Set(["persona/private.md", "memory/private.md"]);
 
 export const chatNotesPath = (chatTgId: number) => `chats/${chatTgId}.md`;
 
+/** The sticker library's files (src/capabilities/stickers/): a pack file is named by its Telegram set name. */
+export const STICKER_PREFERENCES = "stickers/preferences.md";
+const STICKER_PACK = /^stickers\/[A-Za-z0-9_]{1,64}\.yaml$/;
+
 /** Why `path` is out of this chat's reach, or null when it is on the allow-list and visible here. */
 export function refusal(path: string, access: HomeAccess): string | null {
   const isChatNotes = path === chatNotesPath(access.chatTgId);
   const playbook = /^playbooks\/(.+)\.md$/.exec(path);
   const isPlaybook = !!playbook && PLAYBOOK_NAME.test(playbook[1]!);
   const isSelf = (SELF_FILES as readonly string[]).includes(path);
-  if (!isChatNotes && !isPlaybook && !isSelf) return `${path} is not one of your files. You can reach: ${allowedFor(access).join(", ")}.`;
-  if (PRIVATE_FILES.has(path) && !access.ownerDm) return `${path} is not available in this chat.`;
+  const isStickerPack = STICKER_PACK.test(path);
+  const isSticker = path === STICKER_PREFERENCES || isStickerPack;
+  if (!isChatNotes && !isPlaybook && !isSelf && !isSticker) return `${path} is not one of your files. You can reach: ${allowedFor(access).join(", ")}.`;
+  if ((PRIVATE_FILES.has(path) || isStickerPack) && !access.ownerDm) return `${path} is not available in this chat.`;
   return null;
 }
 
 /** The allow-list as it applies to `access`, for messages. */
 export function allowedFor(access: HomeAccess): string[] {
-  const all = [...SELF_FILES, chatNotesPath(access.chatTgId), "playbooks/<name>.md"];
-  return all.filter((p) => refusal(p === "playbooks/<name>.md" ? "playbooks/x.md" : p, access) === null);
+  const all = [...SELF_FILES, chatNotesPath(access.chatTgId), "playbooks/<name>.md", STICKER_PREFERENCES, "stickers/<pack>.yaml"];
+  const probe = (p: string) => (p === "playbooks/<name>.md" ? "playbooks/x.md" : p === "stickers/<pack>.yaml" ? "stickers/x.yaml" : p);
+  return all.filter((p) => refusal(probe(p), access) === null);
 }
 
 /** The file's text, or null when it does not exist. */

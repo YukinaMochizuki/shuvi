@@ -57,12 +57,12 @@ const git = (home: string, ...args: string[]) => Bun.spawnSync(["git", "-C", hom
 describe("home/ allow-list", () => {
   const owner: HomeAccess = { chatTgId: OWNER, ownerDm: true };
   test("the listed files are reachable from the owner's DM", () => {
-    for (const p of ["persona/public.md", "persona/private.md", "directives.md", "memory/private.md", `chats/${OWNER}.md`, "playbooks/cooking-rice.md"]) {
+    for (const p of ["persona/public.md", "persona/private.md", "directives.md", "memory/private.md", `chats/${OWNER}.md`, "playbooks/cooking-rice.md", "stickers/preferences.md", "stickers/EveOneCat.yaml"]) {
       expect(refusal(p, owner)).toBeNull();
     }
   });
   test("anything else is refused, traversal and policy.yaml included", () => {
-    for (const p of ["policy.yaml", "../secret.md", "/etc/passwd", "persona/../policy.yaml", "./directives.md", "playbooks/../directives.md", "playbooks/.hidden.md", "playbooks/a/b.md", "chats/12345.md", "stickers/pack.yaml", "persona\\public.md", "memory/other.md", ".git/config", ""]) {
+    for (const p of ["policy.yaml", "../secret.md", "/etc/passwd", "persona/../policy.yaml", "./directives.md", "playbooks/../directives.md", "playbooks/.hidden.md", "playbooks/a/b.md", "chats/12345.md", "stickers/../directives.md", "stickers/a/b.yaml", "stickers/notes.md", "persona\\public.md", "memory/other.md", ".git/config", ""]) {
       expect(refusal(p, owner)).not.toBeNull();
     }
   });
@@ -74,6 +74,9 @@ describe("home/ allow-list", () => {
     expect(refusal("playbooks/x.md", grp)).toBeNull();
     expect(refusal(`chats/${GROUP}.md`, grp)).toBeNull();
     expect(refusal(`chats/${OWNER}.md`, grp)).not.toBeNull();
+    // Sticker preferences are in every chat's prompt anyway; a pack file can hold dm_only uses.
+    expect(refusal("stickers/preferences.md", grp)).toBeNull();
+    expect(refusal("stickers/EveOneCat.yaml", grp)).not.toBeNull();
   });
 });
 

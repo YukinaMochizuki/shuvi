@@ -47,10 +47,12 @@ export const EVENT_KINDS = [
   "job_done",
   /** An external system POSTed to `/inbound/<source>` (capabilities/jobs/inbound.ts). */
   "external",
+  /** The assistant sent a sticker (src/capabilities/stickers/). Outbound, like `bot_message`. */
+  "bot_sticker",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
-export const OUTBOUND_KINDS: EventKind[] = ["bot_message", "bot_reaction"];
+export const OUTBOUND_KINDS: EventKind[] = ["bot_message", "bot_reaction", "bot_sticker"];
 /**
  * Kinds that, past the cursor, are a turn's input, and ask for a turn. One exception: an `external` event
  * from a source declared with `trigger: false` is input for the next turn but does not start one
@@ -257,4 +259,84 @@ export const schedules = sqliteTable(
     createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
   (t) => [index("schedules_due").on(t.state, t.nextAt)],
+);
+
+// ---- the sticker library (src/capabilities/stickers/, docs/design.md §12) ----------------------------
+//
+// Two sources, kept apart so neither overwrites the other:
+//   - Telegram's side (`sticker_sets`, `sticker_meta`): fetched by the server, never written by hand.
+//   - The owner's side (`sticker_packs`, `sticker_library`): an INDEX of home/stickers/<pack>.yaml,
+//     rebuilt from the files whenever one changes. The YAML is the truth; these rows can be dropped.
+// They meet on `file_unique_id`. How often she used a sticker is not stored here: it is counted from
+// `chat_events` (`bot_sticker`).
+
+/** A sticker set as Telegram has it, and whether the server has fetched it. */
+export const stickerSets = sqliteTable("sticker_sets", {
+  /** The set's name (`getStickerSet`), which is also the YAML's `pack`. */
+  name: text("name").primaryKey(),
+  title: text("title"),
+  /** pending: asked for, the server fetches it; ready: fetched; failed: given up (`error`). */
+  state: text("state", { enum: ["pending", "ready", "failed"] }).notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  error: text("error"),
+  /** How many stickers the set had when fetched. */
+  count: integer("count"),
+  requestedAt: text("requested_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  fetchedAt: text("fetched_at"),
+});
+
+/** One sticker's Telegram-side facts, keyed by its stable `file_unique_id`. */
+export const stickerMeta = sqliteTable(
+  "sticker_meta",
+  {
+    fileUniqueId: text("file_unique_id").primaryKey(),
+    setName: text("set_name").notNull(),
+    /** 1-based position in the set when last fetched: the `n` of a fresh YAML skeleton. */
+    position: integer("position").notNull(),
+    /** What `sendSticker` takes. */
+    fileId: text("file_id").notNull(),
+    emoji: text("emoji"),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    format: text("format", { enum: ["static", "animated", "video"] }).notNull(),
+    /** Too thin or too wide to read well in a chat (aspect ratio); not offered unless named. */
+    narrow: integer("narrow", { mode: "boolean" }).notNull(),
+    /** The picture shown for it (vision's rule: a static sticker itself, else its thumbnail), under the data dir. */
+    path: text("path"),
+    mimeType: text("mime_type"),
+    updatedAt: text("updated_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [index("sticker_meta_set").on(t.setName, t.position)],
+);
+
+/** One home/stickers/*.yaml file, as last indexed. */
+export const stickerPacks = sqliteTable("sticker_packs", {
+  /** The file's name under home/stickers/. */
+  file: text("file").primaryKey(),
+  /** A hash of the file's bytes: a different one means re-index it. */
+  hash: text("hash").notNull(),
+  /** `pack`, from the file; null when the file has never parsed. */
+  pack: text("pack"),
+  role: text("role", { enum: ["avatar", "common", "meme"] }),
+  dmOnly: integer("dm_only", { mode: "boolean" }).notNull().default(false),
+  /** Why the file's latest version could not be indexed (its previous stickers are kept meanwhile). */
+  error: text("error"),
+});
+
+/** One sticker of the library, from its pack's YAML. The full-text index over it is `sticker_fts` (stickers/library.ts). */
+export const stickerLibrary = sqliteTable(
+  "sticker_library",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    file: text("file").notNull(),
+    pack: text("pack").notNull(),
+    n: integer("n").notNull(),
+    fileUniqueId: text("file_unique_id").notNull(),
+    desc: text("desc").notNull().default(""),
+    use: text("use").notNull().default(""),
+    /** go-to / normal (omitted in the YAML) / rare / never. */
+    tier: text("tier", { enum: ["go-to", "normal", "rare", "never"] }).notNull(),
+    dmOnly: integer("dm_only", { mode: "boolean" }).notNull().default(false),
+  },
+  (t) => [uniqueIndex("sticker_library_pack_n").on(t.pack, t.n), index("sticker_library_file").on(t.file)],
 );

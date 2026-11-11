@@ -1,5 +1,5 @@
 import { runAtBoundary, type AdapterRunOptions, type AdapterRunResult, type BackendAdapter, type Prompt, type ToolBoundary, type ToolDef, type ToolResult } from "agent-runtime";
-import type { Update } from "grammy/types";
+import type { StickerSet, Update } from "grammy/types";
 import { openDb, type Db } from "../src/store/db.ts";
 import { ensureChat, recordInbound, type MessagePayload } from "../src/store/events.ts";
 
@@ -115,13 +115,14 @@ export interface FakeCall {
  * A minimal Telegram Bot API over real HTTP, so grammY's own client (and its error types) is what the
  * code under test talks to. `fail` queues responses for the next calls of a method. `files` are what
  * `getFile` and the file endpoint (`/file/bot<token>/<path>`) serve, by file_id; `downloads` counts the
- * file endpoint's hits per file_id.
+ * file endpoint's hits per file_id. `stickerSets` are what `getStickerSet` serves, by name.
  */
 export class FakeTelegram {
   readonly calls: FakeCall[] = [];
   readonly updates: Update[] = [];
   readonly files = new Map<string, Uint8Array>();
   readonly downloads = new Map<string, number>();
+  readonly stickerSets = new Map<string, StickerSet>();
   private failures = new Map<string, { code: number; description: string; retry_after?: number }[]>();
   private nextMessageId = 9000;
   private server: ReturnType<typeof Bun.serve>;
@@ -165,6 +166,12 @@ export class FakeTelegram {
             return Response.json({ ok: true, result: true });
           case "sendMessage":
             return Response.json({ ok: true, result: { message_id: this.nextMessageId++, date: 0, chat: { id: body.chat_id, type: "private" }, text: body.text } });
+          case "sendSticker":
+            return Response.json({ ok: true, result: { message_id: this.nextMessageId++, date: 0, chat: { id: body.chat_id, type: "private" }, sticker: { file_id: body.sticker } } });
+          case "getStickerSet": {
+            const set = this.stickerSets.get(String(body.name));
+            return set ? Response.json({ ok: true, result: set }) : Response.json({ ok: false, error_code: 400, description: "Bad Request: STICKERSET_INVALID" });
+          }
           default:
             return Response.json({ ok: true, result: true });
         }

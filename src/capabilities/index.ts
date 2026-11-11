@@ -4,6 +4,7 @@ import { playbooks } from "./playbooks/index.ts";
 import { retrieval } from "./retrieval/index.ts";
 import { schedules } from "./schedules/index.ts";
 import { speech } from "./speech/index.ts";
+import { stickers } from "./stickers/index.ts";
 import { enableCapabilities, type Capability, type EnabledCapability, type Env } from "./types.ts";
 import { vision } from "./vision/index.ts";
 import { web } from "./web/index.ts";
@@ -28,6 +29,7 @@ export const CAPABILITIES: readonly Capability<any>[] = [
   memory,
   retrieval,
   playbooks,
+  stickers,
 ];
 
 /** The capabilities enabled in this process, in registry order. */

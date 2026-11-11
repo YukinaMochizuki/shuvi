@@ -50,9 +50,9 @@ describe("the owner's DM system prompt is byte-identical to before the capabilit
 
 describe("the registry", () => {
   test("speech is first and always on; web, vision and schedules follow their variables", () => {
-    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks"]);
-    expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks"]);
-    expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" }).map((e) => e.capability.id)).toEqual(["speech", "jobs"]);
+    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks", "stickers"]);
+    expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks", "stickers"]);
+    expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_STICKERS: "off" }).map((e) => e.capability.id)).toEqual(["speech", "jobs"]);
   });
 
   test("workstream is on only with its URL and token", () => {
@@ -75,7 +75,7 @@ describe("the registry", () => {
       capabilities: enabledCapabilities({}),
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "pass" }])),
     });
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "web_fetch"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "view_stickers", "sticker", "add_sticker_pack", "web_fetch"]);
     const names = capabilityTools(enabledCapabilities({}), { db, home: fixtureHome(), chat: getChat(db, ownerChatId(db))!, turnId: turn.id, timeZone: "UTC", owner: {}, state: {} as never }).map((b) => b.serverName);
     expect(names).toEqual(["shuvi", "web"]);
   });
@@ -108,7 +108,7 @@ describe("a capability added to the registry", () => {
   const registry = [...CAPABILITIES, probe];
 
   test("is off unless its own variable enables it", () => {
-    expect(enableCapabilities(registry, {}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks"]);
+    expect(enableCapabilities(registry, {}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks", "stickers"]);
   });
 
   test("its tool reaches the turn after the others, and its section reaches the prompt in registry order", async () => {
@@ -125,7 +125,7 @@ describe("a capability added to the registry", () => {
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "probe" }, { token: "done" }])),
     });
     expect(outcome).toBe("done");
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "web_fetch", "probe"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "view_stickers", "sticker", "add_sticker_pack", "web_fetch", "probe"]);
     const result = adapter.toolResults[0]!.result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
     expect(result).toContain(`hello from turn ${turn.id}`);
 
@@ -138,10 +138,10 @@ describe("a capability added to the registry", () => {
   test("its loop runs through the server's loop helper, and stops with the server", async () => {
     const db = memDb();
     const stop = new AbortController();
-    const files = { download: async () => new Uint8Array() };
+    const files = { download: async () => new Uint8Array(), stickerSet: async () => Promise.reject(new Error("unused")) };
     const ctx: ServerContext = { db, home: fixtureHome(), timeZone: "UTC", ownerId: 1, files, signal: stop.signal };
     const loops = capabilityLoops(enableCapabilities(registry, { SHUVI_PROBE: "hello", SHUVI_VISION: "off" }), ctx);
-    expect(loops.map((l) => l.name)).toEqual(["jobs", "schedules", "probe"]);
+    expect(loops.map((l) => l.name)).toEqual(["jobs", "schedules", "stickers", "probe"]);
     loopRuns = 0;
     startLoops(loops.filter((l) => l.name === "probe"), stop.signal);
     await Bun.sleep(40);

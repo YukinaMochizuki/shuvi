@@ -9,6 +9,7 @@ import {
   recordPartSent,
   type BotMessagePayload,
   type BotReactionPayload,
+  type BotStickerPayload,
   type ChatEvent,
 } from "../store/events.ts";
 import { renderParts } from "../telegram/format.ts";
@@ -81,6 +82,12 @@ async function sendReaction(db: Db, api: Api, row: ChatEvent, tgChatId: number):
   markSent(db, row.seq, null);
 }
 
+async function sendSticker(db: Db, api: Api, row: ChatEvent, tgChatId: number): Promise<void> {
+  const p = row.payload as unknown as BotStickerPayload;
+  const msg = await api.sendSticker(tgChatId, p.fileId);
+  markSent(db, row.seq, msg.message_id);
+}
+
 class Pending extends Error {}
 
 /** One pass over the queue. Stops at the first row that must wait, so a chat's order is never broken. */
@@ -95,6 +102,7 @@ export async function sendPass(db: Db, api: Api): Promise<SendResult> {
     }
     try {
       if (row.kind === "bot_message") await sendMessage(db, api, row, chat.tgChatId);
+      else if (row.kind === "bot_sticker") await sendSticker(db, api, row, chat.tgChatId);
       else await sendReaction(db, api, row, chat.tgChatId);
       res.sent++;
     } catch (e) {
