@@ -35,7 +35,10 @@ A capability (speech, web, …) is one folder plus one line:
 
 1. Create `src/capabilities/<id>/index.ts` exporting a `Capability` (`defineCapability`, see
    `src/capabilities/types.ts`): its `id`, `enable(env)` (read your own `SHUVI_*` variables here and list
-   them in the module header; return `null` when off), and any of `tools`, `section`, `loops`.
+   them in the module header; return `null` when off), and any of `tools`, `section`, `loops`, and for
+   what a message shows, `holds` (perception gating: hold a turn for a few seconds while it is not ready)
+   and `perceive` (image parts after the message's line). A loop gets a read-only file downloader
+   (`ServerContext.files`), never the bot API.
 2. Append it to `CAPABILITIES` in `src/capabilities/index.ts`. Append, do not insert: registry order is
    tool order and prompt-section order, and so part of the prompt-cache prefix. Speech stays first.
 

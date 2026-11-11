@@ -24,6 +24,33 @@ export interface MessagePayload {
   placeholder?: boolean;
   /** Where a forwarded message came from. */
   forwardedFrom?: string;
+  /** A picture the message carries that the model can be shown (a photo, a sticker). See MessageMedia. */
+  media?: MessageMedia;
+}
+
+/**
+ * The picture a message carries, as recorded with the message and completed in place by the server once
+ * downloaded (src/capabilities/vision/). `text` keeps its placeholder ("[sticker: 😳, Pack]") either way, so
+ * the emoji and pack stay known whether or not the image can be shown. Never pruned from `chat_events`.
+ */
+export interface MessageMedia {
+  kind: "photo" | "sticker";
+  /** The photo's or sticker's own `file_unique_id`: its stable identity (a sticker's, for the library). */
+  fileUniqueId: string;
+  /**
+   * The file shown to the model: the photo size chosen, a static sticker itself, or an animated or video
+   * sticker's thumbnail (`thumbnail`). Null when there is nothing to show (an animated sticker with no
+   * thumbnail).
+   */
+  file: { fileId: string; fileUniqueId: string; thumbnail?: boolean } | null;
+  /** pending: not downloaded yet; ready: at `path`; failed: given up (`error`); none: nothing to fetch. */
+  state: "pending" | "ready" | "failed" | "none";
+  /** Relative to the data dir: `media/<file.fileUniqueId>`. Set once downloaded. */
+  path?: string;
+  /** The downloaded file's media type, read from its bytes. */
+  mimeType?: string;
+  attempts?: number;
+  error?: string;
 }
 
 export interface CommandPayload {

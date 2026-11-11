@@ -39,8 +39,13 @@ function required(name: string): string {
   return v;
 }
 
+/** The data dir (`SHUVI_DATA_DIR`, default ./data), absolute. Exported for a capability that keeps files there. */
+export function dataDirFrom(env: Record<string, string | undefined>): string {
+  return resolve(env.SHUVI_DATA_DIR ?? "data");
+}
+
 export function loadConfig(opts: { needToken?: boolean } = {}): Config {
-  const dataDir = resolve(process.env.SHUVI_DATA_DIR ?? "data");
+  const dataDir = dataDirFrom(process.env);
   const ownerId = Number(required("SHUVI_OWNER_ID"));
   if (!Number.isSafeInteger(ownerId)) throw new Error("SHUVI_OWNER_ID must be a Telegram user id");
   return {

@@ -22,6 +22,7 @@ import { loadConfig } from "../env.ts";
 import { openDb } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
 import { runningTurns } from "../store/turns.ts";
+import { telegramFiles } from "../telegram/files.ts";
 import { commandPass } from "./commands.ts";
 import { loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
@@ -32,6 +33,7 @@ import { wakerPass } from "./waker.ts";
 const cfg = loadConfig();
 const db = openDb(cfg.dbPath, { migrate: true });
 const api = new Api(cfg.botToken, cfg.telegramApiRoot ? { apiRoot: cfg.telegramApiRoot } : undefined);
+const capabilities = enabledCapabilities();
 const me = await api.getMe();
 console.log(`shuvi server: @${me.username}, data in ${cfg.dataDir}`);
 
@@ -44,7 +46,7 @@ void loop(
   "waker",
   async () => {
     commandPass(db);
-    wakerPass({ db, spawn: spawnTurn });
+    wakerPass({ db, spawn: spawnTurn, capabilities });
   },
   300,
 );
@@ -59,7 +61,8 @@ void loop(
   },
   4000,
 );
-startLoops(capabilityLoops(enabledCapabilities(), { db, home: cfg.home, timeZone: cfg.timeZone, ownerId: cfg.ownerId, signal: stop.signal }), stop.signal);
+const files = telegramFiles(api, cfg.botToken, cfg.telegramApiRoot);
+startLoops(capabilityLoops(capabilities, { db, home: cfg.home, timeZone: cfg.timeZone, ownerId: cfg.ownerId, files, signal: stop.signal }), stop.signal);
 
 function shutdown(signal: string): void {
   // Running turns are NOT stopped: they are detached, and outliving this process is why they are.

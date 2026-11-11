@@ -196,7 +196,8 @@ describe("runTurn: input and the cursor", () => {
     db.$client.exec("update chats set backend_session_id = null"); // what /new does
     ownerSays(db, "which colour then");
     const { adapter } = await turnWith(db, [{ token: "black" }]);
-    const prompt = adapter.calls[0]!.prompt;
+    const prompt = adapter.calls[0]!.prompt as string; // no image: still a plain string
+    expect(typeof prompt).toBe("string");
     expect(adapter.calls[0]!.method).toBe("run");
     expect(prompt).toContain("we were just talking about headphones");
     expect(prompt).toContain("· you] QC Ultra is good");

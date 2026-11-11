@@ -47,10 +47,10 @@ describe("the owner's DM system prompt is byte-identical to before the capabilit
 });
 
 describe("the registry", () => {
-  test("speech is first and always on; web follows SHUVI_WEB", () => {
-    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web"]);
-    expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web"]);
-    expect(enabledCapabilities({ SHUVI_WEB: "off" }).map((e) => e.capability.id)).toEqual(["speech"]);
+  test("speech is first and always on; web follows SHUVI_WEB; vision follows SHUVI_VISION", () => {
+    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision"]);
+    expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision"]);
+    expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off" }).map((e) => e.capability.id)).toEqual(["speech"]);
   });
 
   test("web reads SHUVI_TAVILY_API_KEY: web_search only with a key", () => {
@@ -81,7 +81,7 @@ describe("a capability added to the registry", () => {
   const registry = [...CAPABILITIES, probe];
 
   test("is off unless its own variable enables it", () => {
-    expect(enableCapabilities(registry, {}).map((e) => e.capability.id)).toEqual(["speech", "web"]);
+    expect(enableCapabilities(registry, {}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision"]);
   });
 
   test("its tool reaches the turn after the others, and its section reaches the prompt in registry order", async () => {
@@ -111,8 +111,9 @@ describe("a capability added to the registry", () => {
   test("its loop runs through the server's loop helper, and stops with the server", async () => {
     const db = memDb();
     const stop = new AbortController();
-    const ctx: ServerContext = { db, home: fixtureHome(), timeZone: "UTC", ownerId: 1, signal: stop.signal };
-    const loops = capabilityLoops(enableCapabilities(registry, { SHUVI_PROBE: "hello" }), ctx);
+    const files = { download: async () => new Uint8Array() };
+    const ctx: ServerContext = { db, home: fixtureHome(), timeZone: "UTC", ownerId: 1, files, signal: stop.signal };
+    const loops = capabilityLoops(enableCapabilities(registry, { SHUVI_PROBE: "hello", SHUVI_VISION: "off" }), ctx);
     expect(loops.map((l) => l.name)).toEqual(["probe"]);
     loopRuns = 0;
     startLoops(loops, stop.signal);
