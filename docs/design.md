@@ -287,10 +287,22 @@ An **inbound source** carries external events the assistant did not start (a mon
 
 ## 11. Media
 
-The framework does not prefetch links or filter noise on the assistant's behalf; the assistant calls a
-tool when it needs to. Where a forward came from and the text being replied to are recorded as event
-fields.
+The framework does not filter noise on the assistant's behalf, and does not prefetch links, with one
+exception the owner decided (the prewarm, below); otherwise the assistant calls a tool when it needs to.
+Where a forward came from and the text being replied to are recorded as event fields.
 
+- **Videos from links** go through porchkit, a separate service on the owner's home connection
+  (`src/capabilities/media/`, `src/porchkit/`): what a video is, its subtitles, contact sheets, a download.
+  It is always anonymous: nothing behind a login is ever fetched, and the assistant says so rather than
+  guessing. Its per-site request budgets protect the home IP and porchkit enforces them; told to wait, the
+  assistant says it is busy and roughly how long. Anyone may have the assistant LOOK at a video in a chat
+  whose policy enables media; a download onto the computer (`video_fetch`) is the owner's alone.
+- **The prewarm** is the one prefetch: a link to a known video site in an OWNER's message is probed as
+  soon as the message is recorded, alongside spawning the turn. Probe only, never a download; best effort
+  (a failure is logged and ignored; porchkit refuses it when the site's budget is half used); it never
+  delays the turn. The framework never puts what was fetched into the turn's input: it only says what is
+  ready ("(Prepared: #53's link — video_probe returns at once.)"), and the assistant asks when it wants it.
+  Each prewarm is recorded with whether the turn then used it.
 - **Images**: photos and static stickers go to the model as images. Animated (tgs) and video (webm)
   stickers become a thumbnail or one frame, with their emoji and pack. The server downloads them
   (`media/<file_unique_id>`, once per file); a turn waits a few seconds at most for one still downloading
@@ -428,7 +440,9 @@ belongs to the chat:
 - **One computer, three ways to run**, following workstream's box tools: `exec(cmd)` (synchronous,
   time-limited), `exec(cmd, background: true)` (asynchronous; the result returns to the chat as an
   event), and `boost: { cpu, memory }` (on a larger short-lived copy with the same home). Framework media
-  tools (`video_sheet`: contact sheets with each frame's time) are prepared `exec` calls. Transcription
+  tools on a FILE of the computer (`video_sheet` with a `path`: contact sheets with each frame's time) are
+  prepared `exec` calls. A sheet of a LINK is not: it comes from porchkit (§11) with no computer involved,
+  and `video_fetch` downloads through porchkit and copies the file into `~/inbox/`. Transcription
   is not one: it is to come from a shared platform service (§11), which the computer does not install.
 - **Visibility follows §6**: the owner's DM may read other chats' homes; a group sees only its own. Only
   a turn the owner triggered gets `exec`.

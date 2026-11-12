@@ -15,6 +15,7 @@ bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bo
 bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
 bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, an unknown group approved
+bun scripts/e2e-media.ts    # videos from links against a fake porchkit (test/fake-porchkit.ts) and a fake Hangar
 bun run db:generate         # after any change to src/store/schema.ts
 ```
 
@@ -25,6 +26,8 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | Touching | Read first |
 |---|---|
 | what is stored, and the exactly-once keys | `src/store/schema.ts` |
+| videos from links (porchkit): who may look, who may fetch, the prewarm and its accounting | `src/capabilities/media/index.ts`, then `prewarm.ts`, `fetch.ts`; the client and its error texts: `src/porchkit/client.ts` |
+| a capability's hook on each new inbound message, a tool owner-only in some calls, a capability's own credential | `src/capabilities/types.ts` (`inbound`, `ownerOnlyWhen` / `ownerOnlyNote`, `secrets`) |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |
@@ -60,8 +63,10 @@ A capability (speech, web, …) is one folder plus one line:
    describe it), its policy `params` if `configure` reads any, `enable(env)` (read your own `SHUVI_*` variables here and list
    them in the module header; return `null` when off), and any of `tools`, `section`, `loops`, `jobKinds`,
    `ownerOnly`, and for what a message shows, `holds` (perception gating: hold a turn for a few seconds
-   while it is not ready) and `perceive` (image parts after the message's line). A loop gets a read-only
-   file downloader (`ServerContext.files`), never the bot API.
+   while it is not ready) and `perceive` (image or note parts after the message's line; it may read the
+   store). A loop gets a read-only file downloader (`ServerContext.files`), never the bot API. `inbound` is
+   the server's hook on each new message (start work, never wait on it); `secrets` names a credential the
+   capability holds, redacted from transcripts.
 2. Append it to `CAPABILITIES` in `src/capabilities/index.ts`. Append, do not insert: registry order is
    part of the prompt-cache prefix. Speech stays first.
    - Prompt sections follow registry order.
@@ -75,6 +80,8 @@ A capability (speech, web, …) is one folder plus one line:
 3. A tool that acts for the owner (sets a schedule, asks workstream, edits memory) goes in `ownerOnly`.
    Do not hide it in turns the owner did not start: it is always offered, and the turn's boundary refuses
    the call unless the owner himself is in the turn (`ownerAuthority` in `src/agent/turn.ts`).
+   A tool that acts for the owner only in some calls (video_sheet of a file, not of a link) goes in
+   `ownerOnlyWhen`; `ownerOnlyNote` gives its refusal a reason and an alternative the model can relay.
 
 Do not edit `src/agent/turn.ts`, `src/agent/prompt.ts`, `src/server/main.ts` or `src/env.ts` for it. A
 capability never talks to Telegram: its tools and loops queue rows, and the sender sends them.

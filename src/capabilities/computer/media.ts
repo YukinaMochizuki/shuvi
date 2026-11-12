@@ -38,6 +38,12 @@ export const SHEET_SCRIPT = readFileSync(new URL("./video-sheet.sh", import.meta
 const HEREDOC = "SHUVI_VIDEO_SHEET_EOF";
 if (SHEET_SCRIPT.includes(HEREDOC)) throw new Error(`video-sheet.sh must not contain ${HEREDOC}`);
 
+/**
+ * Does this video_sheet call act for the owner? On a file of the computer, yes (`ownerOnlyWhen`, for this
+ * capability's video_sheet and media's alike); on a link alone (media's `url`), no: anyone may look at a link.
+ */
+export const sheetActsForOwner = (a: Record<string, unknown>): boolean => typeof a.url !== "string" || a.path !== undefined;
+
 export interface SheetArgs {
   every?: number;
   count?: number;

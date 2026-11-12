@@ -6,7 +6,7 @@ import { Api } from "grammy";
 import { textOf } from "agent-runtime";
 import { runTurn } from "../src/agent/turn.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
-import { capabilityOwnerOnly } from "../src/capabilities/types.ts";
+import { capabilityOwnerOnly, capabilityOwnerOnlyWhen } from "../src/capabilities/types.ts";
 import { computerConfig } from "../src/capabilities/computer/config.ts";
 import { Computers } from "../src/capabilities/computer/computer.ts";
 import { computerJobKind, parseUsage, trimView } from "../src/capabilities/computer/exec.ts";
@@ -84,7 +84,12 @@ describe("configuration", () => {
   test("every computer tool acts for the owner", () => {
     const t = setup();
     const owner = capabilityOwnerOnly(enabledCapabilities(t.env));
-    for (const name of ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "video_sheet", "apply_computer_config"]) expect(owner.has(name)).toBe(true);
+    for (const name of ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "apply_computer_config"]) expect(owner.has(name)).toBe(true);
+    // video_sheet on a file is the owner's, call by call (media's video_sheet of a link is anyone's).
+    const sheet = capabilityOwnerOnlyWhen(enabledCapabilities(t.env)).get("video_sheet")!;
+    expect(sheet({ path: "~/inbox/a.mp4" })).toBe(true);
+    expect(sheet({})).toBe(true);
+    expect(sheet({ url: "https://youtu.be/abc123def45" })).toBe(false);
     expect(owner.has("transcribe")).toBe(false);
     expect(COMPUTER).not.toMatch(/transcri|whisper/i);
   });

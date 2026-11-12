@@ -31,6 +31,7 @@ const { loadConfig } = await import("../env.ts");
 const { openDb } = await import("../store/db.ts");
 const { runTurn } = await import("../agent/turn.ts");
 const { enabledCapabilities } = await import("../capabilities/index.ts");
+const { withCapabilitySecrets } = await import("../capabilities/types.ts");
 const { loadPolicy } = await import("../policy/load.ts");
 const { botIdentity } = await import("../agent/triggers.ts");
 const { LiveRedaction } = await import("../secrets/redaction.ts");
@@ -63,6 +64,10 @@ if (secretsProblem) {
   }
 }
 
+const capabilities = enabledCapabilities();
+// A capability's own credential (porchkit's token) is redacted too, as `[REDACTED:<label>]`.
+const redact = withCapabilitySecrets((s) => redaction.redact(s), capabilities);
+
 const outcome = await runTurn({
   db,
   turnId,
@@ -71,14 +76,14 @@ const outcome = await runTurn({
   ownerId: cfg.ownerId,
   ...(cfg.model ? { model: cfg.model } : {}),
   ...(cfg.ownerLanguage ? { ownerLanguage: cfg.ownerLanguage } : {}),
-  capabilities: enabledCapabilities(),
+  capabilities,
   policy,
   ...(bot ? { bot } : {}),
   // liveSystemPrompt: each turn's system prompt replaces the one the conversation began with, so an edit
   // to home/ is heard from the next turn (Claude Code otherwise replays the prompt it recorded).
   makeAdapter: (boundary) => new ClaudeBackend({ boundary, liveSystemPrompt: true, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
   signal: ac.signal,
-  record: { dataDir: cfg.dataDir, redact: redaction.redact, notes },
+  record: { dataDir: cfg.dataDir, redact, notes },
 });
 console.log(`turn ${turnId}: ${outcome}`);
 process.exit(0);

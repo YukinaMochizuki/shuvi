@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { err, ok, type ToolContent, type ToolDef, type ToolResult } from "agent-runtime";
+import type { TurnState } from "../../agent/turn.ts";
 import type { Db } from "../../store/db.ts";
 import type { JobDonePayload } from "../../store/events.ts";
 import { getJob } from "../../store/jobs.ts";
@@ -10,13 +11,13 @@ import { getChat, getEvent } from "../../store/events.ts";
 import { chatLabel } from "../../store/turns.ts";
 import { updateAttachment } from "../../store/media.ts";
 import { attachmentOfEvent } from "../../store/media.ts";
-import { defineCapability } from "../types.ts";
+import { defineCapability, policyEnables } from "../types.ts";
 import { computerConfig, DISK_MAX, DISK_SIZE, sizeLabel, type ComputerConfig, type Size } from "./config.ts";
 import { ComputerError, Computers } from "./computer.ts";
 import { BOOST_TERMS, cancelJob, computerJobKind, parseSheets, readJob, runSync, sheetsDir, sheetsIndex, sheetsScript, startJob, syncCommand, type ExecContext } from "./exec.ts";
 import { awaitInbox, inboxNote, inboxPass, sendFromComputer } from "./files.ts";
 import { applyResultText, DECLARED_PATH } from "./declared.ts";
-import { DEFAULT_GRID, GRID_MAX, SHEET_EDGE, SHEET_MAX_FRAMES, sheetCommand, sheetOptions } from "./media.ts";
+import { DEFAULT_GRID, GRID_MAX, SHEET_EDGE, SHEET_MAX_FRAMES, sheetActsForOwner, sheetCommand, sheetOptions, type SheetArgs } from "./media.ts";
 import { liveGrants, requestSecret, syncGrants, TTLS, type Ttl } from "./secrets.ts";
 import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, releaseOp, runningComputerJobs } from "./state.ts";
 
@@ -25,8 +26,10 @@ import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, relea
  * started when needed and stopped when idle. What it brings:
  *
  *   tools     exec, read_job, cancel_job (exec.ts, after workstream's box tools); request_secret
- *             (secrets.ts); send_file, send_photo (files.ts); video_sheet (media.ts);
- *             apply_computer_config (declared.ts). All act for the owner (`ownerOnly`), under the one rule
+ *             (secrets.ts); send_file, send_photo (files.ts); video_sheet (media.ts; in a chat that
+ *             has the media capability, media gives video_sheet instead, for a link or a file, and runs a
+ *             file's here, `localSheet`); apply_computer_config (declared.ts). All act for the owner
+ *             (`ownerOnly`; video_sheet on a file, `ownerOnlyWhen`), under the one rule
  *             every owner-only tool shares (`ownerAuthority` in src/agent/turn.ts): the turn's boundary
  *             refuses them unless the owner is in the turn; other people's messages beside his neither
  *             grant nor block. So changing ~/.computer.yaml, which only a computer tool can, is the
@@ -87,11 +90,12 @@ function failure(e: unknown): ToolResult {
   return err(`The computer failed unexpectedly: ${e instanceof Error ? e.message : String(e)}`);
 }
 
-/** One Computers per store, so a turn's tools and the server's loops share nothing else. */
+/** One Computers per store, so a turn's tools and the server's loops share nothing else. Shared with media. */
 const shared = new WeakMap<Db, Computers>();
-function computersFor(db: Db, cfg: ComputerConfig): Computers {
+export function computersFor(db: Db, cfg: ComputerConfig): Computers {
   let c = shared.get(db);
-  if (!c || c.cfg !== cfg) shared.set(db, (c = new Computers(db, cfg)));
+  // Media reads the same configuration on its own (an equal object, not the same one): that is no change.
+  if (!c || (c.cfg !== cfg && JSON.stringify(c.cfg) !== JSON.stringify(cfg))) shared.set(db, (c = new Computers(db, cfg)));
   return c;
 }
 
@@ -139,13 +143,69 @@ export async function maintainPass(db: Db, computers: Computers, cfg: ComputerCo
   return { stopped, restored, failed };
 }
 
+/** What a refusal of video_sheet on a file says (the boundary's, agent/turn.ts). */
+export const SHEET_FILE_NOTE =
+  "A file on the computer is the owner's to look at. With the video's link (url), video_sheet works for anyone, where it is offered; otherwise tell them only the owner can have that file looked at.";
+
+/** What video_sheet does, in its description (this capability's and media's). */
+export const SHEET_DESCRIPTION =
+  "frames tiled in order, each with its time (mm:ss) under it, plus an index (duration, resolution, each sheet's frames' times). " +
+  "Spacing, at most one of: `every` (seconds between frames), `count` (frames spread evenly), `scene: true` (the start and a frame at each scene change); none: a count chosen from the length (16 for a short clip, more for a long one). " +
+  `\`from\` / \`to\` sheet only that window: to look closer at a part, give its window and a smaller \`every\` rather than sheeting the whole video again. At most ${SHEET_MAX_FRAMES} frames per call; more is refused with how to narrow it. ` +
+  `Each sheet is \`grid\` (columns x rows, default ${DEFAULT_GRID.cols}x${DEFAULT_GRID.rows}) frames, at most ${SHEET_EDGE} px on its long edge.`;
+
+const time = z.union([z.number().nonnegative(), z.string()]);
+/** video_sheet's spacing, window and grid (this capability's and media's). */
+export const sheetSchema = {
+  every: z.number().positive().optional().describe("Seconds between frames, e.g. 10, or 0.5 inside a short window"),
+  count: z.number().int().positive().optional().describe(`How many frames, spread evenly (at most ${SHEET_MAX_FRAMES})`),
+  scene: z.boolean().optional().describe("true: a frame at each scene change (cut) instead"),
+  from: time.optional().describe('Start of the window: seconds, or "mm:ss" / "hh:mm:ss" (default: the start)'),
+  to: time.optional().describe("End of the window, as from (default: the end)"),
+  grid: z.string().optional().describe(`Columns x rows per sheet, e.g. "4x4" (default), "3x2"; each 1 to ${GRID_MAX}`),
+};
+
+export type LocalSheetInput = SheetArgs & { path: string; background?: boolean };
+
+/**
+ * video_sheet on a file of the computer: in the background as a `computer` job by default (the sheets come back
+ * with its result), or waited for. Shared with media's video_sheet, whose `path` calls run here.
+ */
+export async function localSheet(x: ExecContext, s: TurnState, a: LocalSheetInput): Promise<ToolResult> {
+  const plan = sheetOptions(a);
+  if (!plan.ok) return err(plan.error);
+  const title = `video_sheet ${oneLine(a.path)}${plan.title ? ` (${plan.title})` : ""}`;
+  try {
+    if (a.background !== false) {
+      const { text } = await startJob(x, { spec: { tool: "video_sheet", command: sheetCommand(a.path, plan.options, '"$SHUVI_JOB.sheets"', false) }, title, originSeq: s.toSeq });
+      return ok(text);
+    }
+    const dir = '"$HOME/.cache/shuvi-sheets"';
+    const script = `${sheetCommand(a.path, plan.options, dir, false)}\n${sheetsScript(dir)}`;
+    const r = await runSync(x, ["bash", "-c", script], { timeoutSec: x.cfg.execDefaultSec, secrets: false, keepStdout: 32 << 20 });
+    if (r.isError) return err(r.text);
+    const files = parseSheets(Buffer.from(r.stdout).toString("utf8"));
+    const sheets = files.filter((f) => f.name.endsWith(".jpg"));
+    const content: ToolContent[] = [
+      { type: "text", text: `${sheetsIndex(files) || `${a.path}:`}\n${sheets.length} sheet(s), in order:` },
+      ...sheets.map((f) => ({ type: "image" as const, data: f.data, mimeType: "image/jpeg" })),
+    ];
+    return { content };
+  } catch (e) {
+    return failure(e);
+  }
+}
+
 export const computer = defineCapability<ComputerConfig>({
   id: "computer",
   label: "computer (owner only)",
   gives: "this chat's own computer: exec, files, secrets, photos, video contact sheets.",
   enable: computerConfig,
-  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "video_sheet", "apply_computer_config"],
-  tools({ db, chat, state: s }, cfg) {
+  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "apply_computer_config"],
+  // A sheet of a file on the computer is the owner's; one of a link (media's video_sheet) is anyone's.
+  ownerOnlyWhen: { video_sheet: sheetActsForOwner },
+  ownerOnlyNote: { video_sheet: SHEET_FILE_NOTE },
+  tools({ db, chat, state: s, chatPolicy }, cfg) {
     const computers = computersFor(db, cfg);
     const x: ExecContext = { db, chat, computers, cfg };
 
@@ -300,51 +360,14 @@ export const computer = defineCapability<ComputerConfig>({
       },
     };
 
-    type SheetInput = { path: string; every?: number; count?: number; scene?: boolean; from?: number | string; to?: number | string; grid?: string; background?: boolean };
-    const time = z.union([z.number().nonnegative(), z.string()]);
-    const videoSheet: ToolDef<SheetInput> = {
+    const videoSheet: ToolDef<LocalSheetInput> = {
       name: "video_sheet",
-      description:
-        "Look at a video on the computer as contact sheets: frames tiled in order, each with its time (mm:ss) under it, plus an index (duration, resolution, each sheet's frames' times). " +
-        "Spacing, at most one of: `every` (seconds between frames), `count` (frames spread evenly), `scene: true` (the start and a frame at each scene change); none: a count chosen from the length (16 for a short clip, more for a long one). " +
-        `\`from\` / \`to\` sheet only that window: to look closer at a part, give its window and a smaller \`every\` rather than sheeting the whole video again. At most ${SHEET_MAX_FRAMES} frames per call; more is refused with how to narrow it. ` +
-        `Each sheet is \`grid\` (columns x rows, default ${DEFAULT_GRID.cols}x${DEFAULT_GRID.rows}) frames, at most ${SHEET_EDGE} px on its long edge. ` +
-        "In the background by default (the sheets come back to this chat with the job's result); background: false waits for them (short videos, a few frames).",
-      inputSchema: {
-        path: z.string().min(1).describe("The video's path on the computer, e.g. ~/inbox/123-clip.mp4"),
-        every: z.number().positive().optional().describe("Seconds between frames, e.g. 10, or 0.5 inside a short window"),
-        count: z.number().int().positive().optional().describe(`How many frames, spread evenly (at most ${SHEET_MAX_FRAMES})`),
-        scene: z.boolean().optional().describe("true: a frame at each scene change (cut) instead"),
-        from: time.optional().describe('Start of the window: seconds, or "mm:ss" / "hh:mm:ss" (default: the start)'),
-        to: time.optional().describe('End of the window, as from (default: the end)'),
-        grid: z.string().optional().describe(`Columns x rows per sheet, e.g. "4x4" (default), "3x2"; each 1 to ${GRID_MAX}`),
-        background: z.boolean().optional().describe("false: wait for the sheets (default true)"),
-      },
-      async handler(a) {
-        const plan = sheetOptions(a);
-        if (!plan.ok) return err(plan.error);
-        const title = `video_sheet ${oneLine(a.path)}${plan.title ? ` (${plan.title})` : ""}`;
-        try {
-          if (a.background !== false) {
-            const { text } = await startJob(x, { spec: { tool: "video_sheet", command: sheetCommand(a.path, plan.options, '"$SHUVI_JOB.sheets"', false) }, title, originSeq: s.toSeq });
-            return ok(text);
-          }
-          const dir = '"$HOME/.cache/shuvi-sheets"';
-          const script = `${sheetCommand(a.path, plan.options, dir, false)}\n${sheetsScript(dir)}`;
-          const r = await runSync(x, ["bash", "-c", script], { timeoutSec: cfg.execDefaultSec, secrets: false, keepStdout: 32 << 20 });
-          if (r.isError) return err(r.text);
-          const files = parseSheets(Buffer.from(r.stdout).toString("utf8"));
-          const sheets = files.filter((f) => f.name.endsWith(".jpg"));
-          const content: ToolContent[] = [
-            { type: "text", text: `${sheetsIndex(files) || `${a.path}:`}\n${sheets.length} sheet(s), in order:` },
-            ...sheets.map((f) => ({ type: "image" as const, data: f.data, mimeType: "image/jpeg" })),
-          ];
-          return { content };
-        } catch (e) {
-          return failure(e);
-        }
-      },
+      description: `Look at a video on the computer as contact sheets: ${SHEET_DESCRIPTION} In the background by default (the sheets come back to this chat with the job's result); background: false waits for them (short videos, a few frames).`,
+      inputSchema: { path: z.string().min(1).describe("The video's path on the computer, e.g. ~/inbox/123-clip.mp4"), ...sheetSchema, background: z.boolean().optional().describe("false: wait for the sheets (default true)") },
+      handler: (a) => localSheet(x, s, a),
     };
+    // In a chat with the media capability, media's video_sheet (a link or a file) stands in for this one.
+    const sheetHere = !(cfg.mediaOn && policyEnables(chatPolicy, "media"));
 
     const applyConfig: ToolDef<Record<string, never>> = {
       name: "apply_computer_config",
@@ -363,7 +386,7 @@ export const computer = defineCapability<ComputerConfig>({
       },
     };
 
-    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, sendFile, sendPhoto, savePhoto, videoSheet, applyConfig] as ToolDef[] }];
+    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, sendFile, sendPhoto, savePhoto, ...(sheetHere ? [videoSheet] : []), applyConfig] as ToolDef[] }];
   },
   section: () => COMPUTER,
   jobKinds: (cfg) => [computerJobKind(cfg, (db) => computersFor(db, cfg))],

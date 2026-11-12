@@ -29,6 +29,7 @@ import {
   outboundOf,
   toolNames,
   turnById,
+  turnPrewarms,
   type ConsoleChat,
   type TurnFilter,
 } from "./queries.ts";
@@ -702,6 +703,8 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
   const refused = tools.filter((s) => s.status === "refused").length;
   const failedCalls = tools.filter((s) => s.status === "error" || s.status === "threw").length;
   const place = segmentOf(ctx.db, turn.chatId, turn.id);
+  // The media capability's prewarms of this turn's messages, and whether a video_probe then used them.
+  const pre = turnPrewarms(ctx.db, turn.chatId, turn.fromSeq, turn.toSeq);
 
   const facts = [
     ...(w !== null ? [html`<b>${secs(w)}</b>`] : turn.status === "running" ? [html`running for <b>${secs((Date.now() - Date.parse(turn.startedAt)) / 1000)}</b>`] : []),
@@ -710,6 +713,9 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
     ...(turn.costMicroUsd ? [html`<b>${usd(turn.costMicroUsd / 1e6)}</b>`] : []),
     html`${tools.length} tool call${tools.length === 1 ? "" : "s"}${refused ? html`, <span class="c-refused">${refused} refused</span>` : ""}${failedCalls ? html`, <span class="c-failed">${failedCalls} failed</span>` : ""}`,
     ...(transcript?.model ? [html`<span class="mono">${transcript.model}</span>`] : []),
+    ...(pre.used + pre.unused
+      ? [html`<span class="prewarm" title="links in this turn's messages looked up ahead (media prewarm), and whether video_probe then used them">prewarmed: ${pre.used ? html`<b class="c-done">${pre.used} used</b>` : ""}${pre.used && pre.unused ? " / " : ""}${pre.unused ? html`<b class="c-stopped">${pre.unused} unused</b>` : ""}</span>`]
+      : []),
   ];
   const head = html`<div class="head">
 <a class="back" href="${href("/turns", f)}">← All chats</a>
