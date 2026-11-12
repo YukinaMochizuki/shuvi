@@ -51,8 +51,11 @@ shows them from the chat's log and says so, with the first recorded turn and its
 is kept as a marker, so such a turn is never mistaken for a pruned one.
 
 Transcripts are kept for `SHUVI_TRANSCRIPT_DAYS` (default 30) after a turn ends, then pruned with any prompt
-text no transcript points at. Pruning never touches `chat_events`, and the `turns` row (with its usage)
-stays.
+text no transcript points at. Abandoned OpenAI-compatible histories use the same retention period measured
+from their last write and are pruned hourly; active sessions and sessions used by running turns are preserved.
+Legacy histories use their latest associated turn as the retention date; one with no associated turn is
+eligible immediately. `/new` clears the active OpenAI-compatible session while its old history remains until
+retention expires. Pruning never touches `chat_events`, and the `turns` row (with its usage) stays.
 
 ## Publishing it on the tailnet
 

@@ -14,6 +14,10 @@ import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqli
  *   - a framework event off `idem_key` too: `job:<id>` (one `job_done` per job), `schedule:<id>:<due>`
  *     (one `scheduled` per firing), `inbound:<source>:<key>` (an inbound POST retried with the same
  *     Idempotency-Key).
+ *
+ * `kv` also holds OpenAI-compatible model histories (`conversation:<session>`), including image data, and
+ * their last-write retention timestamps (`conversation_retention:<session>`). The server prunes abandoned
+ * histories with the same retention window as turn transcripts; active chat and running-turn sessions stay.
  */
 
 export const chats = sqliteTable("chats", {

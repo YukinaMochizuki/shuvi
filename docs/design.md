@@ -82,11 +82,15 @@ Everything is in one SQLite file (WAL mode).
   driver, the `ConversationStore` for openai-compat), not rebuilt from `chat_events`. Shuvi implements
   the latter in SQLite's `kv` table (`src/store/conversations.ts`), appending tool calls and their results
   durably and replacing history on compaction. It survives separate runner processes and is backed up
-  with the database; previous conversations remain stored after `/new`.
+  with the database; previous OpenAI-compatible histories remain stored after `/new` until retention expires.
   Session IDs are scoped to the backend, and OpenAI-compatible sessions also to endpoint, model and chat;
   API-key changes do not change the scope. Switching scope starts fresh with the last 10 chat messages,
   records a `changed` opening and a transcript note, and raises a control-bot alert.
-  Legacy untagged IDs belong to Claude.
+  Legacy untagged IDs belong to Claude. Abandoned histories are retained for `SHUVI_TRANSCRIPT_DAYS`
+  (default 30) after their last write, then pruned hourly; active sessions and sessions used by running turns
+  are preserved. Legacy histories without a retention timestamp use their latest associated turn; a history
+  with neither is eligible immediately. `/new` clears the active session but leaves its OpenAI-compatible
+  history until retention expires.
   `chat_events` is "what actually happened", for people and for retrieval tools.
 
 `home/` is a second data directory, next to the SQLite file and outside the code repository:
@@ -395,7 +399,7 @@ stickers:
   secrets and schedules are its intended callers.
 - **Commands that act on the current chat** are sent in that chat, and only the owner's sender id counts:
   - `/new`: start a fresh conversation context. `chat_events` and the cursor are kept; the new
-    conversation opens with the last 10 messages.
+    conversation opens with the last 10 messages. Old OpenAI-compatible history remains until retention expires.
   - `/stop`: stop the turn running in this chat.
 
   The framework acknowledges a command only by reacting to it; it sends no message.

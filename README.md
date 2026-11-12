@@ -96,9 +96,11 @@ Development commands and local integration checks are in [CONTRIBUTING.md](CONTR
 memory as markdown, and `policy.yaml`) and `media/` (the photos and stickers it was sent, by `file_unique_id`;
 `media/transcript/` holds the other images turn transcripts refer to, pruned with them). All of it is
 private: it lives outside this repository and is never committed or pushed. OpenAI-compatible conversation
-history, including tool results and images, is stored in `shuvi.db` and included in its backups. Resetting a
-conversation with `/new` keeps its previous stored history. Claude Code keeps its own session files,
-including copies of images a turn is shown.
+history, including tool results and images, is stored in `shuvi.db` and included in its backups. Abandoned
+histories are pruned after `SHUVI_TRANSCRIPT_DAYS` (default 30) from their last write; active sessions and
+sessions used by running turns are preserved. Resetting a conversation with `/new` leaves its previous
+OpenAI-compatible history until retention expires. Claude Code keeps its own session files, including copies
+of images a turn is shown.
 
 Once a day the server writes a consistent copy of `shuvi.db` and a `git bundle` of `home/` (when it is a
 git repo) to `$SHUVI_DATA_DIR/backups/<time>/`, keeping the last 7. They are on the same disk; copy
