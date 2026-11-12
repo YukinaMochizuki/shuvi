@@ -116,6 +116,12 @@ code {
 .c-refused {
   color: var(--refused);
 }
+.c-lost {
+  color: var(--lost);
+}
+.c-accent {
+  color: var(--accent);
+}
 .sep::before {
   content: "·";
   margin: 0 var(--s2);
@@ -357,6 +363,41 @@ details.group .more-link {
   font-size: var(--t-meta);
 }
 
+/* a conversation's header among its segments: quiet, a step above the rows */
+.rows a.conv {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: var(--s2) var(--s4) 2px calc(var(--s4) + 18px);
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+  text-transform: none;
+}
+.rows a.conv .cl {
+  color: var(--ink-dim);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.rows a.conv .cm {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rows a.conv:hover {
+  text-decoration: none;
+}
+.rows a.conv:hover .cl,
+.rows a.conv.on .cl {
+  color: var(--accent);
+}
+.rows a.conv + a.row {
+  margin-top: 0;
+}
+
 /* ---- the turn list -------------------------------------------------------------------------------- */
 .rows a.row {
   display: block;
@@ -508,6 +549,14 @@ details.group .more-link {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A fact ("3,140 in / 752 out") breaks between facts (the <wbr> after each dot), never inside one. */
+.facts .fact {
+  white-space: nowrap;
+}
+/* Where a turn or a span sits: worth reading whole, so it wraps (the trigger line quotes a message, and is cut). */
+.trigger.context {
+  white-space: normal;
+}
 .banner {
   margin-top: var(--s4);
   padding: var(--s3) var(--s4);
@@ -552,6 +601,94 @@ details.group .more-link {
 }
 .panel {
   padding-top: var(--s5);
+}
+.tabs > span.on {
+  color: var(--ink);
+  padding-bottom: var(--s2);
+  margin-bottom: -1px;
+  border-bottom: 2px solid var(--accent);
+}
+
+/* ---- a segment or conversation: turn dividers, time gaps, compaction -------------------------------- */
+.tdiv {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s3);
+  margin: var(--s4) 0 var(--s1) var(--gutter);
+  padding: var(--s1) 0 var(--s1) var(--s3);
+  border-top: 1px solid var(--line-soft);
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.trace > .tdiv:first-child {
+  margin-top: 0;
+  border-top: 0;
+}
+.tdiv > a:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-dim);
+  font-weight: 600;
+}
+.tdiv .tabs-link {
+  color: var(--ink-faint);
+}
+/* A turn's "prompt raw", kept together (they wrap as one when the line is full). */
+.tdiv .tlinks {
+  display: inline-flex;
+  gap: var(--s3);
+  white-space: nowrap;
+}
+.tdiv .tabs-link:hover {
+  color: var(--accent);
+}
+.tdiv.match {
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: rgb(122 162 247 / 0.06);
+}
+.gapdiv {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin: var(--s5) 0 var(--s2) var(--gutter);
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.gapdiv::before,
+.gapdiv::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: repeating-linear-gradient(to right, var(--line) 0 4px, transparent 4px 8px);
+}
+.compaction {
+  margin: var(--s2) 0;
+  padding: var(--s2) var(--s3);
+  border-radius: 8px;
+  background: rgb(234 208 132 / 0.1);
+  box-shadow: inset 3px 0 0 var(--lost);
+  font-size: var(--t-small);
+}
+.compaction .ct {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s3);
+  color: var(--lost);
+}
+.compaction .ct b {
+  font-weight: 600;
+}
+.compaction .cs {
+  color: var(--ink-dim);
+}
+.note.left {
+  text-align: left;
+  max-width: var(--measure);
+  margin-top: var(--s2);
 }
 
 /* ---- the trace -------------------------------------------------------------------------------------- */
@@ -1089,6 +1226,18 @@ details.fold[open] {
   }
   .tr > .at {
     display: none;
+  }
+  .tdiv,
+  .gapdiv {
+    margin-left: 0;
+  }
+  /* Tighter, so a turn's divider (with its "prompt raw") stays on one line at phone width. */
+  .tdiv {
+    gap: var(--s1) var(--s2);
+    padding-left: var(--s2);
+  }
+  .tdiv .tlinks {
+    gap: var(--s2);
   }
   .bubble {
     max-width: 92%;

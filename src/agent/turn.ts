@@ -22,7 +22,7 @@ import {
 } from "../store/events.ts";
 import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
-import { chatLabel, extendTurn, finishTurn, getTurn, saveSession } from "../store/turns.ts";
+import { chatLabel, extendTurn, finishTurn, getTurn, hadEarlierTurn, saveSession, setTurnConversation } from "../store/turns.ts";
 import { buildPromptSections, joinSections } from "./prompt.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, timeNote, type InputOptions, type Perceive } from "./render.ts";
 import { recordingBoundary, TurnRecorder, type RecorderOptions } from "./transcript.ts";
@@ -293,6 +293,14 @@ export function turnBoundary(
   };
 }
 
+/** A compaction as the driver reports it (agent-runtime `CompactionEvent`, restated so either runtime version builds). */
+interface CompactionSeen {
+  trigger: "auto" | "manual";
+  tokensBefore: number;
+  tokensAfter?: number;
+  summarized?: boolean;
+}
+
 export type TurnOutcome = "done" | "stopped" | "failed" | "empty";
 
 /** Run turn `turnId` to the end and close it. Never throws: a failure is recorded on the turn. */
@@ -398,7 +406,13 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       flush();
       rec.toolAnnounced();
     },
-    onSessionId: (id: string) => saveSession(db, chat.id, id),
+    onSessionId: (id: string) => {
+      saveSession(db, chat.id, id);
+      setTurnConversation(db, turnId, { backendSessionId: id });
+    },
+    // The driver compacted the conversation (agent-runtime's `onCompaction`, from its claude-compaction-event
+    // change on): a step in the transcript. Typed here, so this compiles against a runtime without it too.
+    onCompaction: (e: CompactionSeen) => rec.compaction(e),
     ...(deps.signal ? { signal: deps.signal } : {}),
   };
 
@@ -408,6 +422,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const sections = buildPromptSections(deps.home, chat, owner, capabilities, chatPolicy, db);
   const systemPrompt = joinSections(sections);
   rec.prompt(sections);
+  // Which conversation this turn is in: the chat's (resumed), or a fresh one (the chat's first, after `/new`).
+  setTurnConversation(db, turnId, { opening: chat.backendSessionId ? "resumed" : hadEarlierTurn(db, chat.id, turnId) ? "new" : "first" });
   const fresh = (p: Prompt) => {
     rec.input(p, false);
     return adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
@@ -425,6 +441,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       } catch (e) {
         if (deps.signal?.aborted || !isLostSession(e)) throw e;
         resetConversation(db, chat.id);
+        setTurnConversation(db, turnId, { opening: "lost" });
         raiseAlert(db, {
           key: `lost-session:${turnId}`,
           turnId,

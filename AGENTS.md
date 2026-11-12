@@ -49,6 +49,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | what a turn's transcript records, image references | `src/agent/transcript.ts`, `src/store/transcripts.ts` |
 | secret redaction (transcripts and a chat computer's output) | `src/secrets/redaction.ts` (requests and grants: `src/capabilities/computer/secrets.ts`) |
 | the console: who may look (loopback, Host, tailnet login, token), its pages and design | `src/console/server.ts`, `pages.ts`, `DESIGN.md`; docs/console.md |
+| how the console groups turns: conversations (backend session, `/new`, lost), 30-minute segments, compaction | `src/console/sessions.ts`; what a turn records: `turns.opening` / `backend_session_id` (`src/agent/turn.ts`) |
 
 ## Adding a capability
 

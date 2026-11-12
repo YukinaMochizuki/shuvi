@@ -126,7 +126,7 @@ if (consoleOn(cfg.console)) {
     "console",
     async () => {
       if (served) return;
-      startConsole(cfg.console, { db, timeZone: cfg.timeZone, dataDir: cfg.dataDir, ownerId: cfg.ownerId }, stop.signal);
+      startConsole(cfg.console, { db, timeZone: cfg.timeZone, dataDir: cfg.dataDir, ownerId: cfg.ownerId, transcriptDays: cfg.transcriptDays }, stop.signal);
       served = true;
     },
     5000,

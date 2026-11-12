@@ -294,7 +294,10 @@ check(turnHtml.includes(`<b>${last.input_tokens.toLocaleString("en-US")}</b> in 
 check(turnHtml.includes("send me a sticker"), "and the input");
 check((await consoleGet(`/turns/${last.id}`, "someone@example.com")).status === 403 && (await consoleGet(`/turns/${last.id}`)).status === 403, "a login not on the list, or none, gets 403");
 const listHtml = await (await consoleGet("/turns?tool=sticker", "owner@example.com")).text();
-check(listHtml.includes(`href="/turns/${last.id}?tool=sticker"`) && listHtml.includes("1 turn in 1 chat"), "the grouped list finds it by the tool it used");
+const segmentId = /href="\/segments\/(\d+)\?tool=sticker"/.exec(listHtml)?.[1];
+check(segmentId !== undefined && listHtml.includes("1 segment, 1 turn in 1 chat"), "the grouped list finds its segment by the tool it used");
+const segmentHtml = await (await consoleGet(`/segments/${segmentId}?tool=sticker`, "owner@example.com")).text();
+check(segmentHtml.includes(`<div class="tdiv match"><a href="/turns/${last.id}?tool=sticker">`), "the segment marks the turn that used it");
 
 log("PASS");
 cleanup();

@@ -7,12 +7,13 @@ import type { Turn } from "../store/turns.ts";
  * the lists filter and aggregate in ways the query builder only makes longer.
  */
 
-const TURN_COLUMNS = `t.id, t.chat_id as chatId, t.status, t.pid, t.pid_start as pidStart, t.term_at as termAt, t.from_seq as fromSeq,
+export const TURN_COLUMNS = `t.id, t.chat_id as chatId, t.status, t.pid, t.pid_start as pidStart, t.term_at as termAt, t.from_seq as fromSeq,
   t.to_seq as toSeq, t.trigger_seq as triggerSeq, t.stop_seq as stopSeq, t.error, t.cost_micro_usd as costMicroUsd,
   t.input_tokens as inputTokens, t.output_tokens as outputTokens, t.cache_read_tokens as cacheReadTokens,
-  t.cache_creation_tokens as cacheCreationTokens, t.started_at as startedAt, t.ended_at as endedAt`;
+  t.cache_creation_tokens as cacheCreationTokens, t.backend_session_id as backendSessionId, t.opening,
+  t.started_at as startedAt, t.ended_at as endedAt`;
 
-const CHAT_COLUMNS = `c.id, c.tg_chat_id as tgChatId, c.kind, c.title, c.cursor_seq as cursorSeq, c.backend_session_id as backendSessionId,
+export const CHAT_COLUMNS = `c.id, c.tg_chat_id as tgChatId, c.kind, c.title, c.cursor_seq as cursorSeq, c.backend_session_id as backendSessionId,
   c.context_tokens as contextTokens, c.created_at as createdAt,
   (select json_extract(e.payload, '$.from.name') from chat_events e where e.chat_id = c.id and e.kind = 'message' order by e.seq desc limit 1) as person`;
 
@@ -68,18 +69,6 @@ export interface TurnFilter {
   id?: number;
 }
 
-export interface TurnRow extends Turn {
-  chatTitle: string | null;
-  chatKind: Chat["kind"];
-  tgChatId: number;
-  person: string | null;
-  toolCalls: number;
-  refused: number;
-  failedCalls: number;
-  triggerKind: string | null;
-  triggerPayload: string | null;
-}
-
 /** How far `timeZone` is ahead of UTC at instant `t`, in ms. */
 function zoneOffset(t: number, timeZone: string): number {
   const p = Object.fromEntries(
@@ -104,7 +93,7 @@ function nextDay(date: string): string {
   return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
 }
 
-function turnWhere(f: TurnFilter): { sql: string; params: (string | number)[] } {
+export function turnWhere(f: TurnFilter): { sql: string; params: (string | number)[] } {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (f.chat !== undefined) where.push("t.chat_id = ?"), params.push(f.chat);
@@ -123,75 +112,6 @@ function turnWhere(f: TurnFilter): { sql: string; params: (string | number)[] } 
   if (f.before !== undefined) where.push("t.id < ?"), params.push(f.before);
   if (f.id !== undefined) where.push("t.id = ?"), params.push(f.id);
   return { sql: where.length ? `where ${where.join(" and ")}` : "", params };
-}
-
-/** What a list row shows of a turn beyond its own columns. */
-const ROW_EXTRAS = `c.title as chatTitle, c.kind as chatKind, c.tg_chat_id as tgChatId,
-        (select json_extract(e.payload, '$.from.name') from chat_events e where e.chat_id = c.id and e.kind = 'message' order by e.seq desc limit 1) as person,
-        (select count(*) from turn_steps s where s.turn_id = t.id and s.kind = 'tool') as toolCalls,
-        (select count(*) from turn_steps s where s.turn_id = t.id and s.kind = 'tool' and s.status = 'refused') as refused,
-        (select count(*) from turn_steps s where s.turn_id = t.id and s.kind = 'tool' and s.status in ('error', 'threw')) as failedCalls,
-        (select e.kind from chat_events e where e.seq = coalesce(t.trigger_seq, t.to_seq)) as triggerKind,
-        (select e.payload from chat_events e where e.seq = coalesce(t.trigger_seq, t.to_seq)) as triggerPayload`;
-
-/** A chat at the head of its group in the turn list: what its matching turns add up to. */
-export interface ChatGroupHead extends ConsoleChat {
-  lastEventAt: string | null;
-  /** Its turns that match the filter, and how many of those failed. */
-  matching: number;
-  failed: number;
-}
-
-export interface TurnTree {
-  groups: { chat: ChatGroupHead; rows: TurnRow[] }[];
-  /** Matching turns in all. */
-  total: number;
-}
-
-const isFiltered = (f: TurnFilter) => !!(f.chat !== undefined || f.outcome || f.tool || f.from || f.to || f.q);
-
-/**
- * The turn list grouped by chat: every chat with a matching turn (with no filter, every chat), most recently
- * active first, each with its latest `perChat` matching turns, newest first. One query for the heads and
- * one, windowed, for the rows, however many chats there are.
- */
-export function turnTree(db: Db, f: TurnFilter, perChat: number): TurnTree {
-  const { sql, params } = turnWhere({ ...f, before: undefined });
-  const heads = db.$client
-    .query(
-      `select ${CHAT_COLUMNS},
-        (select e.at from chat_events e where e.chat_id = c.id order by e.seq desc limit 1) as lastEventAt,
-        coalesce(m.n, 0) as matching, coalesce(m.failed, 0) as failed
-      from chats c
-      ${isFiltered(f) ? "join" : "left join"} (select t.chat_id, count(*) as n, sum(t.status = 'failed') as failed, max(t.started_at) as lastTurnAt from turns t ${sql} group by t.chat_id) m on m.chat_id = c.id
-      order by coalesce(lastEventAt, m.lastTurnAt, c.created_at) desc, c.id desc`,
-    )
-    .all(...params) as ChatGroupHead[];
-  const rows = db.$client
-    .query(
-      `with ranked as (select t.*, row_number() over (partition by t.chat_id order by t.id desc) as rn from turns t ${sql})
-      select ${TURN_COLUMNS}, ${ROW_EXTRAS}
-      from ranked t join chats c on c.id = t.chat_id
-      where t.rn <= ? order by t.id desc`,
-    )
-    .all(...params, perChat) as TurnRow[];
-  const byChat = new Map<number, TurnRow[]>();
-  for (const r of rows) byChat.set(r.chatId, [...(byChat.get(r.chatId) ?? []), r]);
-  return { groups: heads.map((chat) => ({ chat, rows: byChat.get(chat.id) ?? [] })), total: heads.reduce((n, h) => n + h.matching, 0) };
-}
-
-export function turnList(db: Db, f: TurnFilter, limit: number): { rows: TurnRow[]; more: boolean; total: number } {
-  const { sql, params } = turnWhere(f);
-  const rows = db.$client
-    .query(
-      `select ${TURN_COLUMNS}, ${ROW_EXTRAS}
-      from turns t join chats c on c.id = t.chat_id
-      ${sql} order by t.id desc limit ?`,
-    )
-    .all(...params, limit + 1) as TurnRow[];
-  const { sql: countSql, params: countParams } = turnWhere({ ...f, before: undefined });
-  const total = (db.$client.query(`select count(*) as n from turns t ${countSql}`).get(...countParams) as { n: number }).n;
-  return { rows: rows.slice(0, limit), more: rows.length > limit, total };
 }
 
 /** Every tool name recorded, most used first (the turns list's filter). */

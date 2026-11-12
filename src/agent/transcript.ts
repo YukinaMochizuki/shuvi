@@ -5,7 +5,7 @@ import { promptParts, textOf, type Appended, type Prompt, type ToolBoundary, typ
 import type { Db } from "../store/db.ts";
 import { imageFileOf } from "../store/media.ts";
 import type { TranscriptPart } from "../store/schema.ts";
-import { addStep, completeStep, hashText, savePrompt, saveTranscript, setTranscriptModel, type StepInsert } from "../store/transcripts.ts";
+import { addStep, completeStep, hashText, markRecordingStarted, savePrompt, saveTranscript, setTranscriptModel, type StepInsert } from "../store/transcripts.ts";
 import { SECTION_JOIN, type PromptSection } from "./prompt.ts";
 
 /**
@@ -25,7 +25,8 @@ import { SECTION_JOIN, type PromptSection } from "./prompt.ts";
  *                 by call id at the end (result, error, or the throw); a refusal is a row of its own;
  *       append    from the boundary's `append`: which events (from_seq, to_seq] were appended, after which
  *                 call, and the text and images the model was given;
- *       note      what the framework did to the turn (a lost conversation started over).
+ *       note      what the framework did to the turn (a lost conversation started over);
+ *       compaction  the driver compacted the conversation (`onCompaction`): its trigger, tokens before/after.
  *   - the MODEL; usage and the outcome are on `turns` (store/turns.ts `finishTurn`).
  *
  * Every text is passed through `redact` (the computer's secret redaction, computer/secrets.ts) before it
@@ -181,6 +182,7 @@ export class TurnRecorder {
         const t = tx as unknown as Db;
         if (sys) savePrompt(t, sys.text, sys.bounds);
         saveTranscript(t, this.turnId, { promptHash: sys?.hash ?? null, input, resumed });
+        markRecordingStarted(t, this.turnId);
       });
     });
   }
@@ -258,6 +260,23 @@ export class TurnRecorder {
       const parts = typeof content === "string" ? [{ type: "text" as const, text: content }] : (content ?? []);
       const text = parts.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("\n");
       this.step(this.n++, { kind: "append", callId: callId ?? null, fromSeq, toSeq, text: this.redact(text), images: this.images(parts) });
+    });
+  }
+
+  /** The driver compacted the conversation: from here on the model sees a summary of what came before. */
+  compaction(e: { trigger: "auto" | "manual"; tokensBefore: number; tokensAfter?: number; summarized?: boolean }): void {
+    this.safe("a compaction", () => {
+      this.closeThinking();
+      const at = new Date().toISOString();
+      this.step(this.n++, {
+        kind: "compaction",
+        name: e.trigger,
+        tokensBefore: e.tokensBefore || null,
+        tokensAfter: e.tokensAfter ?? null,
+        ...(e.summarized !== undefined ? { text: e.summarized ? "summarized" : "pruned" } : {}),
+        at,
+        endedAt: at,
+      });
     });
   }
 
