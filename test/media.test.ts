@@ -15,7 +15,7 @@ import { SUBS_MAX_CHARS } from "../src/capabilities/media/text.ts";
 import { jobWatchPass } from "../src/capabilities/jobs/watch.ts";
 import { capabilityJobKinds } from "../src/capabilities/types.ts";
 import { turnPrewarms } from "../src/console/queries.ts";
-import { describe as describeError, Porchkit, PorchkitError, porchkitConfig, UNAVAILABLE } from "../src/porchkit/client.ts";
+import { describe as describeError, Porchkit, PorchkitError, porchkitConfig, SUBS_UNPARSED, UNAVAILABLE } from "../src/porchkit/client.ts";
 import { parsePolicy, resolveChat, type Policy } from "../src/policy/policy.ts";
 import { recordBatch } from "../src/server/poller.ts";
 import type { Db } from "../src/store/db.ts";
@@ -713,5 +713,37 @@ chats:
     expect(refusedText(a, 0)).not.toBeNull();
     expect(text(a.toolResults[1]!.result)).toContain("yes, download it"); // appended after video_probe
     expect(text(a.toolResults[2]!.result)).toStartWith("Started job");
+  });
+});
+
+describe("subtitles that are not there, or cannot be read", () => {
+  test("502 subs_unparsed: the site lists them but they can't be read; look with video_sheet, never say there are none", async () => {
+    const p = porch();
+    p.failNext("/media/subs", 502, { error: "subs_unparsed", detail: "the subtitle track en is listed but yielded no lines" });
+    const db = memDb();
+    ownerSays(db, "what do they say?");
+    const a = await dmTurn(db, p.env({ SHUVI_WEB: "off" }), [{ tool: "video_subs", args: { url: "https://x.com/example/status/1" } }, { tool: "pass" }]);
+    expect(a.toolResults[0]!.result.isError).toBe(true);
+    expect(text(a.toolResults[0]!.result)).toBe(
+      "The site lists subtitles for this video, but they couldn't be read. Say so, without claiming the video has no subtitles, and look at it with video_sheet instead.",
+    );
+    expect(describeError(new PorchkitError(502, "subs_unparsed", "x"))).toBe(SUBS_UNPARSED);
+  });
+
+  test("0 lines in total: the subtitles are empty, with or without a window; a window that excludes lines that exist: no lines in this window", async () => {
+    const p = porch();
+    p.subtitleLines = 0;
+    const db = memDb();
+    ownerSays(db, "what do they say?");
+    const a = await dmTurn(db, p.env({ SHUVI_WEB: "off" }), [
+      { tool: "video_subs", args: { url: VIDEO } },
+      { tool: "video_subs", args: { url: VIDEO, from: "01:00", to: "02:00" } },
+      { run: () => void (p.subtitleLines = 20) },
+      { tool: "video_subs", args: { url: VIDEO, from: "50:00" } },
+      { tool: "pass" },
+    ]);
+    expect(text(a.toolResults[0]!.result)).toBe("subtitles (en): this video's subtitles are empty.");
+    expect(text(a.toolResults[1]!.result)).toBe("subtitles (en): this video's subtitles are empty.");
+    expect(text(a.toolResults[2]!.result)).toBe("subtitles (en), 20 line(s), 50:00–end:\n(no lines in this window)");
   });
 });

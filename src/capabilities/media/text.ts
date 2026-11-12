@@ -96,6 +96,8 @@ export function subsText(s: Subs, a: { from?: number | string; to?: number | str
   const kind = s.kind === "manual" ? "subtitles" : s.kind === "auto" || s.kind === "automatic" ? "automatic captions" : s.kind;
   const window = from !== undefined || to !== undefined ? `, ${from !== undefined ? timeLabel(from) : "start"}–${to !== undefined ? timeLabel(to) : "end"}` : "";
   const head = `${kind} (${s.lang}), ${s.lines} line(s)${window}:`;
+  // Nothing at all is not the same as nothing in the window asked for: only a window can exclude lines.
+  if (!all.length) return { ok: true, text: `${kind} (${s.lang}): this video's subtitles are empty.` };
   if (!inWindow.length) return { ok: true, text: `${head}\n(no lines in this window)` };
   const out: string[] = [];
   let used = head.length;
