@@ -7,7 +7,8 @@ import type { Db } from "./db.ts";
  * before its first session callback. Only a missing conversation row is a lost session; malformed message
  * JSON stays an ordinary error. Loads read one coherent SQLite snapshot.
  * Appends, compaction, and pruning use immediate transactions; compaction advances the visible generation,
- * and retention preserves histories used by a chat or running turn.
+ * and retention preserves histories used by a chat or running turn. Cascade deletion requires
+ * `PRAGMA foreign_keys = ON`, which `openDb` sets on every connection.
  */
 
 /** A durable OpenAI-compatible conversation whose stored history no longer exists. */
@@ -56,15 +57,18 @@ export function conversationStore(db: Db, chatId: number): ConversationStore {
       db.$client.transaction(() => {
         const row = db.$client.query("select generation from conversations where id = ?").get(id) as { generation: number } | null;
         const generation = row ? row.generation + 1 : 0;
-        if (!row) {
-          db.$client.query("insert into conversations (id, chat_id, generation) values (?, ?, ?)").run(id, chatId, generation);
-        }
         const touchedAt = new Date().toISOString();
-        db.$client.query("update conversations set generation = ?, written_at = ? where id = ?").run(
-          generation,
-          touchedAt,
-          id,
-        );
+        if (!row) {
+          db.$client.query(
+            "insert into conversations (id, chat_id, generation, written_at) values (?, ?, ?, ?)",
+          ).run(id, chatId, generation, touchedAt);
+        } else {
+          db.$client.query("update conversations set generation = ?, written_at = ? where id = ?").run(
+            generation,
+            touchedAt,
+            id,
+          );
+        }
         const insert = db.$client.query(
           "insert into conversation_messages (conversation_id, generation, seq, message) values (?, ?, ?, ?)",
         );

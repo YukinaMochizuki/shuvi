@@ -97,6 +97,26 @@ describe("conversation message storage", () => {
     }
   });
 
+  test("compacting a missing conversation inserts its timestamps without updating the parent", async () => {
+    const { db, store } = database();
+    try {
+      db.$client.exec("create trigger reject_conversation_update before update on conversations begin select raise(abort, 'parent updated'); end;");
+      await store.compact!("fresh-compaction", [{ role: "user", content: "summary" }]);
+      const row = db.$client.query("select generation, created_at, written_at from conversations where id = 'fresh-compaction'").get() as {
+        generation: number;
+        created_at: string;
+        written_at: string;
+      };
+      expect(row.generation).toBe(0);
+      expect(Number.isNaN(Date.parse(row.created_at))).toBe(false);
+      expect(Number.isNaN(Date.parse(row.written_at))).toBe(false);
+      expect(row.written_at > old).toBe(true);
+      expect(await store.load("fresh-compaction")).toEqual([{ role: "user", content: "summary" }]);
+    } finally {
+      db.$client.close();
+    }
+  });
+
   test("a failed append rolls back its rows and timestamp", async () => {
     const { db, store } = database();
     try {
