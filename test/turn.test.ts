@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildSystemPrompt } from "../src/agent/prompt.ts";
 import type { AdapterRunOptions, AdapterRunResult, ToolBoundary } from "agent-runtime";
-import { isLostSession, runTurn } from "../src/agent/turn.ts";
+import { GAP_NOTE_MINUTES, isLostSession, runTurn } from "../src/agent/turn.ts";
 import { controlMessagesOf } from "../src/store/control.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
@@ -14,8 +14,9 @@ import { lastSeq, memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } fr
 
 const emptyHome = mkdtempSync(join(tmpdir(), "shuvi-home-"));
 
-async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: AbortSignal; web?: { tavilyApiKey?: string } } = {}) {
+async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: AbortSignal; web?: { tavilyApiKey?: string }; startedAt?: string } = {}) {
   const turn = claimTurn(db, ownerChatId(db))!;
+  if (opts.startedAt) db.$client.run("update turns set started_at = ? where id = ?", [opts.startedAt, turn.id]);
   let adapter!: ScriptedAdapter;
   const outcome = await runTurn({
     db,
@@ -149,7 +150,7 @@ describe("runTurn: input and the cursor", () => {
     const { adapter, turn } = await turnWith(db, [{ token: "ok" }]);
     expect(adapter.calls[0]!.prompt).toContain("first message");
     expect(adapter.calls[0]!.prompt).toContain("second message");
-    expect(adapter.calls[0]!.prompt).toMatch(/\[#\d+ · \d\d\/\d\d \d\d:\d\d · Owner\] first message/);
+    expect(adapter.calls[0]!.prompt).toMatch(/\[#\d+ · \w{3} \d\d\/\d\d \d\d:\d\d · Owner\] first message/);
     expect(turn.status).toBe("done");
     expect(getChat(db, ownerChatId(db))!.cursorSeq).toBe(second);
   });
@@ -247,6 +248,121 @@ describe("runTurn: input and the cursor", () => {
     expect(second.adapter.calls[0]!.systemPrompt).toBe(sp.replace("PRIVATE MEMORY", "EDITED MEMORY"));
   });
 });
+
+describe("runTurn: a sense of time", () => {
+  const at = (db: Db, seq: number, iso: string) => db.$client.run("update chat_events set at = ? where seq = ?", [iso, seq]);
+  const NOW = "2026-11-13T01:12:00.000Z";
+  const minutesBefore = (iso: string, m: number) => new Date(Date.parse(iso) - m * 60_000).toISOString();
+
+  /** A chat with a conversation going: one exchange at `lastAt` (her reply last), then a new message at `newAt`. */
+  async function resumedAfter(lastAt: string, newAt: string) {
+    const db = memDb();
+    const a = ownerSays(db, "see you later");
+    await turnWith(db, [{ token: "bye" }]);
+    db.$client.exec("update chat_events set status = 'sent' where kind = 'bot_message'");
+    at(db, a, minutesBefore(lastAt, 1));
+    at(db, lastSeq(db), lastAt);
+    const b = ownerSays(db, "I'm back");
+    at(db, b, newAt);
+    const { adapter } = await turnWith(db, [{ token: "welcome back" }], { startedAt: NOW });
+    expect(adapter.calls[0]!.method).toBe("continueRun");
+    return adapter.calls[0]!.prompt as string;
+  }
+
+  test(`the gap threshold: exactly ${GAP_NOTE_MINUTES} minutes since her last message is no gap; a second more is`, async () => {
+    const under = await resumedAfter(minutesBefore(NOW, GAP_NOTE_MINUTES), NOW);
+    expect(under).not.toContain("(It is now");
+    expect(under).toStartWith("[#");
+    const over = await resumedAfter(minutesBefore(NOW, GAP_NOTE_MINUTES + 1 / 60), NOW);
+    expect(over).toStartWith("(It is now Fri 13 Nov 2026 01:12 (UTC). The last message here was 1 hour ago.)\n[#");
+  });
+
+  test("the gap is measured to the turn's first input event; the elapsed time to the turn's start", async () => {
+    // The new message came 30 minutes after her reply, and the turn only started two days later: no gap
+    // between the chat's events, so no line.
+    const late = await resumedAfter(minutesBefore(NOW, 2 * 24 * 60 + 30), minutesBefore(NOW, 2 * 24 * 60));
+    expect(late).not.toContain("(It is now");
+    const days = await resumedAfter(minutesBefore(NOW, 2 * 24 * 60 + 5), minutesBefore(NOW, 1));
+    expect(days).toStartWith("(It is now Fri 13 Nov 2026 01:12 (UTC). The last message here was 2 days ago.)\n");
+  });
+
+  test("a command and its acknowledgement are not the chat's previous event: /new after three days still says three days", async () => {
+    const db = memDb();
+    const a = ownerSays(db, "see you later");
+    await turnWith(db, [{ token: "bye" }]);
+    db.$client.exec("update chat_events set status = 'sent' where kind = 'bot_message'");
+    at(db, a, minutesBefore(NOW, 3 * 24 * 60 + 1));
+    at(db, lastSeq(db), minutesBefore(NOW, 3 * 24 * 60));
+    // What /new leaves behind: the command, the server's reaction acknowledging it, and no session.
+    db.$client.run("insert into chat_events (chat_id, kind, payload, status, at) values (?, 'command', ?, 'done', ?)", [ownerChatId(db), JSON.stringify({ command: "new" }), minutesBefore(NOW, 2)]);
+    enqueueOutbound(db, { chatId: ownerChatId(db), kind: "bot_reaction", payload: { targetSeq: lastSeq(db), emoji: "👌" }, idemKey: "command:x" });
+    db.$client.exec("update chats set backend_session_id = null");
+    const b = ownerSays(db, "new topic");
+    at(db, b, minutesBefore(NOW, 1));
+    const { adapter } = await turnWith(db, [{ token: "ok" }], { startedAt: NOW });
+    expect(adapter.calls[0]!.prompt as string).toStartWith("(It is now Fri 13 Nov 2026 01:12 (UTC). The last message here was 3 days ago.)\n(A new conversation.");
+  });
+
+  test("an outbound that failed to send is not the chat's previous event: nobody saw it", async () => {
+    const db = memDb();
+    const a = ownerSays(db, "see you later");
+    await turnWith(db, [{ token: "bye" }]);
+    // Her reply, from that turn, failed to send ten minutes ago; the last thing anyone saw was three days ago.
+    db.$client.exec("update chat_events set status = 'failed' where kind = 'bot_message'");
+    at(db, a, minutesBefore(NOW, 3 * 24 * 60));
+    at(db, lastSeq(db), minutesBefore(NOW, 10));
+    const b = ownerSays(db, "hello again");
+    at(db, b, minutesBefore(NOW, 1));
+    const { adapter } = await turnWith(db, [{ token: "hi" }], { startedAt: NOW });
+    expect(adapter.calls[0]!.method).toBe("continueRun");
+    expect(adapter.calls[0]!.prompt as string).toStartWith("(It is now Fri 13 Nov 2026 01:12 (UTC). The last message here was 3 days ago.)\n[#");
+  });
+
+  test("the chat's first turn says it is the first message here", async () => {
+    const db = memDb();
+    const seq = ownerSays(db, "hello?");
+    at(db, seq, minutesBefore(NOW, 1));
+    const { adapter } = await turnWith(db, [{ token: "hi" }], { startedAt: NOW });
+    expect(adapter.calls[0]!.prompt).toBe(`(It is now Fri 13 Nov 2026 01:12 (UTC). This is the first message here.)\n[#${seq} · Fri 11/13 01:11 · Owner] hello?`);
+  });
+
+  test("a fresh conversation (/new) always opens with the line, even with no gap", async () => {
+    const db = memDb();
+    ownerSays(db, "we were just talking about headphones");
+    await turnWith(db, [{ token: "QC Ultra is good" }]);
+    db.$client.exec("update chat_events set status = 'sent' where kind = 'bot_message'");
+    db.$client.exec("update chats set backend_session_id = null"); // what /new does
+    ownerSays(db, "which colour then");
+    const { adapter } = await turnWith(db, [{ token: "black" }]);
+    const prompt = adapter.calls[0]!.prompt as string;
+    expect(prompt).toMatch(/^\(It is now \w{3} \d{1,2} \w{3} \d{4} \d\d:\d\d \(UTC\)\. The last message here was less than a minute ago\.\)\n\(A new conversation\./);
+  });
+
+  test("a lost conversation restarts with the line; the attempt to resume, with no gap, had none", async () => {
+    const db = memDb();
+    ownerSays(db, "earlier message");
+    db.$client.exec(`update chats set cursor_seq = (select max(seq) from chat_events), backend_session_id = 'gone-session'`);
+    ownerSays(db, "are you there");
+    const turn = claimTurn(db, ownerChatId(db))!;
+    let adapter!: LostSessionAdapter;
+    await runTurn({ db, turnId: turn.id, home: emptyHome, timeZone: "UTC", makeAdapter: (b) => (adapter = new LostSessionAdapter(b, [{ token: "Fresh start." }], LOST_TEXT)), capabilities: enabledCapabilities({ SHUVI_WEB: "off" }) });
+    expect(adapter.calls.map((c) => c.method)).toEqual(["continueRun", "run"]);
+    expect(adapter.calls[0]!.prompt as string).not.toContain("(It is now");
+    expect(adapter.calls[1]!.prompt as string).toMatch(/^\(It is now [^\n]*\. The last message here was less than a minute ago\.\)\n\(A new conversation\./);
+  });
+
+  test("mid-turn appends get no such line, whatever the gap", async () => {
+    const db = memDb();
+    const first = ownerSays(db, "one");
+    at(db, first, minutesBefore(new Date().toISOString(), 3 * 24 * 60));
+    const { adapter } = await turnWith(db, [{ run: () => ownerSays(db, "two") }, { tool: "say", args: { text: "x" } }, { token: "done" }]);
+    const appended = JSON.stringify(adapter.toolResults[0]!.result);
+    expect(appended).toContain("two");
+    expect(appended).not.toContain("It is now");
+  });
+});
+
+const LOST_TEXT = 'Claude Agent SDK run ended with "error_during_execution": No conversation found with session ID: 6b0b8a3e-1111-4222-8333-444455556666';
 
 /** A scripted driver whose `continueRun` fails the way a lost Claude session does (or with `error`). */
 class LostSessionAdapter extends ScriptedAdapter {

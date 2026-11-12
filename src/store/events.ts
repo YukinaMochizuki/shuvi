@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, lte, max } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, max, ne, notInArray, or } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import { asksForTurn, chatEvents, chats, kv, OUTBOUND_KINDS, TRIGGER_KINDS } from "./schema.ts";
 
@@ -267,6 +267,31 @@ export function recentHistory(db: Db, chatId: number, atOrBefore: number, limit:
     .filter((e) => e.kind === "message" || e.status === "sent")
     .slice(0, limit)
     .reverse();
+}
+
+/**
+ * The chat's newest event before `beforeSeq`, of any kind (hers included): when the chat was last active,
+ * for the "It is now…" line a turn opens with after a gap (agent/turn.ts `GAP_NOTE_MINUTES`). Skipped:
+ * an outbound row that failed (nobody saw it), and what is said to the FRAMEWORK rather than in the chat,
+ * a command (`/new`, `/stop`) and the server's reaction acknowledging it (an outbound row with no turn),
+ * so `/new` after two days still reads as two days.
+ */
+export function previousEvent(db: Db, chatId: number, beforeSeq: number): ChatEvent | undefined {
+  return db
+    .select()
+    .from(chatEvents)
+    .where(
+      and(
+        eq(chatEvents.chatId, chatId),
+        lt(chatEvents.seq, beforeSeq),
+        ne(chatEvents.kind, "command"),
+        or(notInArray(chatEvents.kind, OUTBOUND_KINDS), isNotNull(chatEvents.turnId)),
+        or(isNull(chatEvents.status), ne(chatEvents.status, "failed")),
+      ),
+    )
+    .orderBy(desc(chatEvents.seq))
+    .limit(1)
+    .get();
 }
 
 /** The newest inbound message of a chat (what a bare `pass(reaction)` reacts to). */

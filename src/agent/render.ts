@@ -5,11 +5,13 @@ import type { ApprovalPayload, ChatEvent, ExternalPayload, JobDonePayload, Messa
  * How chat events read to the model. One line per message, led by its `#seq` (the handle `react` takes),
  * the time, and who said it, so the model reads the chat roughly the way a person scrolls it:
  *
- *   [#12 · 11/11 21:03 · Alice] long day today
+ *   [#12 · Wed 11/11 21:03 · Alice] long day today
  *     ↳ replying to Alice: "that bug from yesterday..."
  *
  * The time matters more than it looks: a reply hours later is a different conversation from one a few
- * seconds later, and without it the model cannot tell.
+ * seconds later, and without it the model cannot tell. The stamp carries the weekday (`Thu 11/12 00:36`),
+ * and since models rarely compare stamps on their own, a turn that opens after a gap, or a fresh
+ * conversation, starts with a line saying what time it is now and how long it has been (`timeNote`).
  *
  * What a message SHOWS (a photo, a sticker: `perceive`, from the capabilities) follows its line as image
  * parts, so a picture is always read right after the line that says who sent it and when. With no image
@@ -18,19 +20,19 @@ import type { ApprovalPayload, ChatEvent, ExternalPayload, JobDonePayload, Messa
  * Events the FRAMEWORK perceived are shown the same way, but never as someone speaking: where a message
  * has the sender's name they have what they are (docs/design.md §6, "system events never pose as the user"):
  *
- *   [#41 · 11/11 18:30 · ⚙ schedule 3] check whether the deploy finished
- *   [#42 · 11/11 18:31 · ⚙ job 7 · workstream · done] asked: "is the widgetry PR merged?"
+ *   [#41 · Wed 11/11 18:30 · ⚙ schedule 3] check whether the deploy finished
+ *   [#42 · Wed 11/11 18:31 · ⚙ job 7 · workstream · done] asked: "is the widgetry PR merged?"
  *     Yes, merged an hour ago as #212.
- *   [#43 · 11/11 18:32 · ⚙ inbound: grafana]
+ *   [#43 · Wed 11/11 18:32 · ⚙ inbound: grafana]
  *     disk 91% on vm-3
- *   [#44 · 11/11 18:33 · ⚙ approval] Approval #5 (deploy) "Deploy to prod?": the owner answered "Yes" (yes).
+ *   [#44 · Wed 11/11 18:33 · ⚙ approval] Approval #5 (deploy) "Deploy to prod?": the owner answered "Yes" (yes).
  *
- * The assistant's own earlier messages read `[#13 · 11/11 21:04 · ⚙ you] …`.
+ * The assistant's own earlier messages read `[#13 · Wed 11/11 21:04 · ⚙ you] …`.
  *
  * In a GROUP, where many people speak, the owner's lines say so (`RenderOptions.owner`), with the same
- * unforgeable mark: `[#14 · 11/11 21:05 · Ownerly · ⚙ owner] …`. Someone who names themselves
+ * unforgeable mark: `[#14 · Wed 11/11 21:05 · Ownerly · ⚙ owner] …`. Someone who names themselves
  * "Ownerly · owner" reads as exactly that, a name. In the owner's DM nothing is marked: everyone there is.
- * Another bot's lines are marked the same way: `[#15 · 11/11 21:06 · Helper · ⚙ bot] …`.
+ * Another bot's lines are marked the same way: `[#15 · Wed 11/11 21:06 · Helper · ⚙ bot] …`.
  *
  * No label may be FORGEABLE by what people write, since authority and trust hang on telling them apart:
  *   - the framework's labels and the assistant's (`⚙ you`) carry `FRAMEWORK_MARK` (⚙), which this module
@@ -76,18 +78,68 @@ function inline(text: string): string {
   return rest.length ? `${first}\n${body(rest.join("\n"))}` : (first ?? "");
 }
 
-export function formatTime(iso: string, timeZone: string): string {
-  const d = new Date(iso);
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * The wall-clock fields of `iso` in `timeZone`. Weekday and month names come from fixed English tables,
+ * not from Intl, so they read the same whatever the runtime's locale data (`Sept` vs `Sep`).
+ */
+function zoned(iso: string, timeZone: string) {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone,
+    year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,
-  }).formatToParts(d);
+    hourCycle: "h23",
+  }).formatToParts(new Date(iso));
   const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  return `${get("month")}/${get("day")} ${get("hour")}:${get("minute")}`;
+  const [year, month, day] = [Number(get("year")), Number(get("month")), Number(get("day"))];
+  return {
+    year,
+    month: get("month"),
+    day: get("day"),
+    hour: get("hour"),
+    minute: get("minute"),
+    weekday: WEEKDAYS[new Date(Date.UTC(year, month - 1, day)).getUTCDay()]!,
+    monthName: MONTHS[month - 1]!,
+  };
+}
+
+/** An event's stamp, in the owner's zone: `Thu 11/12 00:36` (weekday, then month/day as before). */
+export function formatTime(iso: string, timeZone: string): string {
+  const z = zoned(iso, timeZone);
+  return `${z.weekday} ${z.month}/${z.day} ${z.hour}:${z.minute}`;
+}
+
+/** The current time in full, for the line a turn opens with: `Thu 13 Nov 2026 09:12 (Asia/Taipei)`. */
+export function formatNow(iso: string, timeZone: string): string {
+  const z = zoned(iso, timeZone);
+  return `${z.weekday} ${Number(z.day)} ${z.monthName} ${z.year} ${z.hour}:${z.minute} (${timeZone})`;
+}
+
+/** How long `ms` is, the way a person says it: `less than a minute`, `5 minutes`, `3 hours`, `2 days` (rounded down). */
+export function humanDuration(ms: number): string {
+  const unit = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+  const minutes = Math.floor(Math.max(0, ms) / 60_000);
+  if (minutes < 1) return "less than a minute";
+  if (minutes < 60) return unit(minutes, "minute");
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return unit(hours, "hour");
+  return unit(Math.floor(hours / 24), "day");
+}
+
+/**
+ * The line a turn's input opens with after a gap, or in a fresh conversation (agent/turn.ts
+ * `GAP_NOTE_MINUTES`): the time now (the turn's start), and how long since the chat's previous event,
+ * `lastAt` (none: this is the chat's first). It goes in the INPUT, never the system prompt, which must stay
+ * the same from turn to turn for the prompt cache.
+ */
+export function timeNote(nowIso: string, lastAt: string | undefined, timeZone: string): string {
+  const since = lastAt === undefined ? "This is the first message here." : `The last message here was ${humanDuration(Date.parse(nowIso) - Date.parse(lastAt))} ago.`;
+  return `(It is now ${formatNow(nowIso, timeZone)}. ${since})`;
 }
 
 /** A framework event, or null for a kind that is someone speaking. */
@@ -167,8 +219,10 @@ export function unreadNote(n: number): string {
 
 const note = (unread: number | undefined): PromptPart[] => (unread ? [text(unreadNote(unread))] : []);
 
-/** What a turn's input opens with: in a group, `unread` and `context` (see `InputOptions`). */
+/** What a turn's input opens with: the time line, and in a group `unread` and `context` (see `InputOptions`). */
 export interface InputOptions extends RenderOptions {
+  /** The "It is now…" line (`timeNote`), first of all, when the turn opens after a gap or a fresh start. */
+  timeNote?: string;
   /** How many older unread messages are not shown. */
   unread?: number;
   /** How many of the first events are context from before she was called (they carry no authority). */
@@ -200,12 +254,15 @@ function inputParts(events: ChatEvent[], timeZone: string, perceive: Perceive, o
  * under its own heading, the earlier messages shown as context (agent/turn.ts `GROUP_CONTEXT`).
  */
 export function renderTurnInput(events: ChatEvent[], timeZone: string, perceive: Perceive = blind, opts: InputOptions = {}): Prompt {
-  return joinParts(inputParts(events, timeZone, perceive, opts));
+  return joinParts([...timeLine(opts), ...inputParts(events, timeZone, perceive, opts)]);
 }
+
+const timeLine = (opts: InputOptions): PromptPart[] => (opts.timeNote ? [text(opts.timeNote)] : []);
 
 /** The opening of a fresh conversation: the recent exchange for context, then what to answer now. */
 export function renderWithHistory(history: ChatEvent[], input: ChatEvent[], timeZone: string, perceive: Perceive = blind, opts: InputOptions = {}): Prompt {
   return joinParts([
+    ...timeLine(opts),
     text(`(A new conversation. The last ${history.length} messages of this chat, for context:)`),
     ...eventParts(history, timeZone, perceive, opts),
     text("\n(New messages:)"),
