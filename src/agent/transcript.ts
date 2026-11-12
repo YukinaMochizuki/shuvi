@@ -25,7 +25,7 @@ import { SECTION_JOIN, type PromptSection } from "./prompt.ts";
  *                 by call id at the end (result, error, or the throw); a refusal is a row of its own;
  *       append    from the boundary's `append`: which events (from_seq, to_seq] were appended, after which
  *                 call, and the text and images the model was given;
- *       note      what the framework did to the turn (a lost conversation started over);
+ *       note      framework actions and backend notices (a restart, changed settings, compaction failures);
  *       compaction  the driver compacted the conversation (`onCompaction`): its trigger, tokens before/after.
  *   - the MODEL; usage and the outcome are on `turns` (store/turns.ts `finishTurn`).
  *

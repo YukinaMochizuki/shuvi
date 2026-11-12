@@ -83,9 +83,10 @@ same model. Cost is recorded as 0 because this backend does not report pricing; 
 last model call of the turn.
 
 Each chat resumes its own stored conversation across runner and server restarts. Switching backend,
-endpoint or OpenAI-compatible model starts a fresh conversation with the last 10 chat messages. An API
-key rotation keeps the conversation. Persona, memory and tool permissions continue to follow the chat's
-policy, and changes to `home/` reach the next turn's system prompt.
+endpoint or OpenAI-compatible model starts a fresh conversation with the last 10 chat messages; the turn
+records the settings change and the control bot alerts the owner. An API key rotation keeps the conversation.
+Persona, memory and tool permissions continue to follow the chat's policy, and changes to `home/` reach the
+next turn's system prompt.
 
 Development commands and local integration checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
 

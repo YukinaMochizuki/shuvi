@@ -144,16 +144,17 @@ export const turns = sqliteTable(
     cacheCreationTokens: integer("cache_creation_tokens"),
     /**
      * The backend conversation (agent-runtime's session id) the turn ran in: every turn of a chat resumes the
-     * same one until `/new` or a lost-session restart starts another. Null until the driver names it, and for
-     * turns recorded before this column existed.
+     * same one until `/new`, changed backend settings or a lost-session restart starts another. Null until
+     * the driver names it, and for turns recorded before this column existed.
      */
     backendSessionId: text("backend_session_id"),
     /**
      * How the turn's conversation stood when it began: `resumed` (it went on with the chat's conversation), or
      * it opened a fresh one: `first` (the chat's first turn), `new` (after `/new`), `lost` (the old one was lost
-     * and restarted). Null only for turns from before this column existed (the console infers theirs).
+     * and restarted), `changed` (backend settings changed). Null only for turns from before this column
+     * existed (the console infers theirs).
      */
-    opening: text("opening", { enum: ["first", "new", "lost", "resumed"] }),
+    opening: text("opening", { enum: ["first", "new", "lost", "changed", "resumed"] }),
     startedAt: text("started_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },

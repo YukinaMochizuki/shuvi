@@ -83,8 +83,10 @@ Everything is in one SQLite file (WAL mode).
   the latter in SQLite's `kv` table (`src/store/conversations.ts`), appending tool calls and their results
   durably and replacing history on compaction. It survives separate runner processes and is backed up
   with the database; previous conversations remain stored after `/new`.
-  Session IDs are scoped to the backend, and OpenAI-compatible sessions also to endpoint and model.
-  Switching scope starts fresh with the last 10 chat messages. Legacy untagged IDs belong to Claude.
+  Session IDs are scoped to the backend, and OpenAI-compatible sessions also to endpoint, model and chat;
+  API-key changes do not change the scope. Switching scope starts fresh with the last 10 chat messages,
+  records a `changed` opening and a transcript note, and raises a control-bot alert.
+  Legacy untagged IDs belong to Claude.
   `chat_events` is "what actually happened", for people and for retrieval tools.
 
 `home/` is a second data directory, next to the SQLite file and outside the code repository:

@@ -10,9 +10,9 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
 - **Chats, conversations, segments** (`/turns`): on the left, every chat, most recently active first. Under
   each, its latest **segments** (runs of turns with no gap over 30 minutes), under the **conversation** they
   belong to: her conversation, the turns that resumed one backend session, from the chat's first turn, a
-  `/new`, or a lost session's fresh restart, to the next. Filters (outcome, a tool used, a date range in the
-  owner's time zone) and search (thinking, text, tool arguments and results, errors, the input) keep the
-  segments holding a matching turn; a chat with none is hidden. `j` / `k` move through the segments.
+  `/new`, a lost session's fresh restart, or a backend settings change, to the next. Filters (outcome, tool
+  used, date range in the owner's time zone) and search (thinking, text, tool arguments and results, errors,
+  input) keep matching segments; a chat with none is hidden. `j` / `k` move through the segments.
 - **A segment** (`/segments/<id>`) or **a whole conversation** (`/conversations/<id>`): one continuous
   exchange, a thin divider at each turn (its outcome, duration, cost, links to the turn and its tabs), a
   dashed one where a conversation went quiet, and a prominent one where it was **compacted** (after which she
@@ -38,11 +38,13 @@ Images are stored as paths under `media/`, never as bytes. Recording is best eff
 the turn goes on.
 
 Each turn also records which backend session it ran in and how that session came to be (`turns.opening`: the
-chat's first, a fresh one after `/new`, a restart after it was lost, or resumed), which is what groups turns
-into conversations; a compaction is a `compaction` step with its trigger and the tokens before and after
-(recorded when the agent-runtime in use reports compactions through its `onCompaction` run option). Turns from
-before these were recorded have their conversation inferred from `/new` commands and lost-session alerts, and
-say so.
+chat's first, a fresh one after `/new`, a restart after it was lost, a fresh conversation after backend
+settings changed, or resumed), which is what groups turns into conversations. A backend settings change
+records a note in the transcript and raises a control-bot alert. A successful compaction is a
+`compaction` step with its trigger and the tokens before and after (recorded when the agent-runtime in use
+reports compactions through its `onCompaction` run option); a compaction summary failure or rejection is
+recorded as a generic transcript note. Turns from before these were recorded have their conversation inferred
+from `/new` commands and lost-session alerts, and say so.
 
 Turns from before recording began (it started with the console's deployment) have no transcript; the console
 shows them from the chat's log and says so, with the first recorded turn and its date. The first recorded turn
