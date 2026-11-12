@@ -88,7 +88,20 @@ records the settings change and the control bot alerts the owner. An API key rot
 Persona, memory and tool permissions continue to follow the chat's policy, and changes to `home/` reach the
 next turn's system prompt.
 
-Development commands and local integration checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Development commands and local integration checks:
+
+```bash
+bun run typecheck
+bun test                    # fresh in-memory DB per test
+bun scripts/e2e-fake.ts     # server + runner child + real Claude Code CLI, fake Telegram and Anthropic
+bun scripts/e2e-openai-compat.ts # server + runner child + existing OpenAI-compatible driver, local fake API
+bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
+bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
+bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
+bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, an unknown group approved
+```
+
+After changing `src/store/schema.ts`, regenerate the database migration with `bun run db:generate`.
 
 ## Data
 
