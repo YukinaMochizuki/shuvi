@@ -10,6 +10,8 @@
  *
  * SIGTERM is a stop (`/stop`, or `/new` while a turn runs): it aborts the driver, and the turn closes as
  * `stopped`. Usage: `bun src/runner/child.ts <turnId>`.
+ * Backend scope checks and compaction notes are passed into runTurn, which records fresh conversations
+ * caused by changed settings separately from `/new` (agent/backend.ts).
  *
  * The SIGTERM handler is installed BEFORE anything else is loaded (the modules below are imported
  * dynamically for that reason): a stop that lands while the child is still starting up would otherwise
@@ -30,7 +32,7 @@ const { ClaudeBackend } = await import("agent-runtime/claude");
 const { conversationMatchesBackend, openAICompatBackend } = await import("../agent/backend.ts");
 const { loadConfig } = await import("../env.ts");
 const { openDb } = await import("../store/db.ts");
-const { getChat, resetConversation } = await import("../store/events.ts");
+const { getChat } = await import("../store/events.ts");
 const { runTurn } = await import("../agent/turn.ts");
 const { enabledCapabilities } = await import("../capabilities/index.ts");
 const { withCapabilitySecrets } = await import("../capabilities/types.ts");
@@ -43,7 +45,6 @@ const cfg = loadConfig({ needToken: false });
 const db = openDb(cfg.dbPath);
 const turn = (await import("../store/turns.ts")).getTurn(db, turnId);
 const chat = turn ? getChat(db, turn.chatId) : undefined;
-if (turn?.status === "running" && chat?.backendSessionId && !conversationMatchesBackend(chat.backendSessionId, cfg, chat.id)) resetConversation(db, chat.id);
 // The same home/policy.yaml the server reads, the same way (a broken one: the last good, from the store);
 // and who the bot is, which the server recorded at startup (a child has no token to ask Telegram).
 const policy = loadPolicy(db, cfg.home, cfg.ownerId);
@@ -84,11 +85,12 @@ const outcome = await runTurn({
   capabilities,
   policy,
   ...(bot ? { bot } : {}),
+  conversationMatches: (id, chatId) => conversationMatchesBackend(id, cfg, chatId),
   // liveSystemPrompt: each turn's system prompt replaces the one the conversation began with, so an edit
   // to home/ is heard from the next turn (Claude Code otherwise replays the prompt it recorded).
-  makeAdapter: (boundary) =>
+  makeAdapter: (boundary, note) =>
     cfg.backend === "openai-compat"
-      ? openAICompatBackend(db, cfg, chat!.id, boundary)
+      ? openAICompatBackend(db, cfg, chat!.id, boundary, note)
       : new ClaudeBackend({ boundary, liveSystemPrompt: true, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
   signal: ac.signal,
   record: { dataDir: cfg.dataDir, redact, notes },

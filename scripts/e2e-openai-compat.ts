@@ -329,7 +329,7 @@ await until("fresh backend response", () => texts().length > before);
 check(texts().at(-1) === "Fresh OpenAI conversation.", "legacy Claude session id starts a fresh OpenAI conversation");
 await until("backend switch turn completion", idle);
 const switchedTurn = db.$client.query("select opening from turns t join chats c on c.id = t.chat_id where c.tg_chat_id = ? order by t.id desc limit 1").get(OWNER) as { opening: string };
-check(switchedTurn.opening === "new", "backend switch records a fresh conversation opening");
+check(switchedTurn.opening === "changed", "backend switch records a settings-change opening");
 check(!seenBodies.switch?.includes("LEGACY CLAUDE CONVERSATION MARKER"), "legacy Claude conversation history is absent from OpenAI requests");
 
 const previousSession = (db.$client.query("select backend_session_id from chats where tg_chat_id = ?").get(OWNER) as { backend_session_id: string }).backend_session_id;
@@ -343,7 +343,7 @@ push(dmUpdate(update++, "backend switch check"));
 await until("changed model response", () => texts().length > before);
 await until("changed model turn completion", idle);
 const changedModelTurn = db.$client.query("select opening, backend_session_id from turns order by id desc limit 1").get() as { opening: string; backend_session_id: string };
-check(changedModelTurn.opening === "new" && changedModelTurn.backend_session_id !== previousSession, "changing model starts a separate conversation");
+check(changedModelTurn.opening === "changed" && changedModelTurn.backend_session_id !== previousSession, "changing model starts a separate conversation");
 check(requests.at(-1)?.model === env.SHUVI_MODEL && !requests.at(-1)?.messages.some((m) => m.role === "tool"), "the configured model receives recent chat context without the previous tool history");
 
 db.$client.query("delete from kv where key = ?").run(`conversation:${changedModelTurn.backend_session_id}`);

@@ -1,3 +1,12 @@
+/**
+ * Backend session identity and the OpenAI-compatible driver factory. OpenAI-compatible ids are scoped
+ * to endpoint, model and chat; API key rotation keeps the same scope. Unprefixed legacy ids belong to
+ * Claude. runTurn checks this scope before resuming and records a changed opening when it differs.
+ *
+ * History lives in store/conversations.ts. Only a missing row is a lost session; provider failures keep
+ * the conversation. Constructor compaction failures become static transcript notes, never raw provider
+ * errors or rejected history. Successful compactions use the runtime's run-level callback once.
+ */
 import { createHash, randomUUID } from "node:crypto";
 import { OpenAICompatBackend } from "agent-runtime/openai-compat";
 import type { ToolBoundary } from "agent-runtime";
@@ -21,7 +30,7 @@ export function conversationMatchesBackend(sessionId: string, config: Config, ch
   return sessionId.startsWith(openAIConversationPrefix(config, chatId));
 }
 
-export function openAICompatBackend(db: Db, config: Config, chatId: number, boundary: ToolBoundary) {
+export function openAICompatBackend(db: Db, config: Config, chatId: number, boundary: ToolBoundary, note: (text: string) => void = () => {}) {
   const settings = config.openAICompat;
   const model = config.model;
   if (config.backend !== "openai-compat" || !settings || !model) throw new Error("OpenAI-compatible backend is not configured");
@@ -33,6 +42,10 @@ export function openAICompatBackend(db: Db, config: Config, chatId: number, boun
     store: conversationStore(db),
     vision: settings.vision,
     compaction: { contextWindow: settings.contextWindow },
+    onCompaction: (report) => {
+      if (report.summaryError !== undefined) note("OpenAI-compatible compaction could not summarize the conversation; the runtime kept or pruned its history.");
+      if (report.rejected !== undefined) note("OpenAI-compatible compaction rejected the replacement history; the conversation was kept unchanged.");
+    },
     newId: () => `${prefix}${randomUUID()}`,
   });
 }

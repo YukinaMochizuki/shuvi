@@ -6,7 +6,7 @@ import { CHAT_COLUMNS, turnWhere, type ConsoleChat, type TurnFilter } from "./qu
  *
  *   chat
  *   └ CONVERSATION   her conversation: the turns that share one backend session (agent-runtime's session id).
- *     │              Every turn of a chat resumes the same one until `/new`, or a lost-session restart, opens
+ *     │              Every turn of a chat resumes the same one until `/new`, changed settings or a lost session opens
  *     │              another; inside it she sees one continuous exchange, except across a compaction, after
  *     │              which she sees only a summary of what came before (a `compaction` step, shown as such).
  *     └ SEGMENT      a run of its turns with no gap longer than SEGMENT_GAP_MS between one turn's end (or
@@ -14,7 +14,7 @@ import { CHAT_COLUMNS, turnWhere, type ConsoleChat, type TurnFilter } from "./qu
  *                    exchange". The list's items are segments.
  *
  * A turn opens a new conversation when it is the chat's first, when its recorded `opening` (schema.ts
- * `turns.opening`) is `first`, `new` or `lost`, or when its backend session id differs from the previous
+ * `turns.opening`) is `first`, `new`, `changed` or `lost`, or when its backend session id differs from the previous
  * turn's. Turns recorded before `opening` existed have none: theirs is INFERRED from what was recorded anyway,
  * a `/new` command between the previous turn's trigger and this one's, or a lost-session alert raised for this
  * turn (`lost-session:<turn id>`, store/control.ts), and labelled as inferred. A conversation that began
@@ -30,7 +30,7 @@ import { CHAT_COLUMNS, turnWhere, type ConsoleChat, type TurnFilter } from "./qu
 export const SEGMENT_GAP_MS = 30 * 60_000;
 
 /** How a conversation began: recorded on its first turn, or inferred for turns from before that was recorded. */
-export type ConversationStart = "first" | "new" | "lost" | "resumed";
+export type ConversationStart = "first" | "new" | "lost" | "changed" | "resumed";
 
 /** A `turn_session` CTE definition (to follow `with`) and its parameters. */
 type Grouping = { sql: string; params: number[] };
@@ -52,7 +52,7 @@ function groupingCte(chat?: number): Grouping {
         -- why a conversation starts here (null: it does not); recorded, else inferred
         case
           when prev_id is null then coalesce(opening, 'first')
-          when opening in ('first', 'new', 'lost') then opening
+          when opening in ('first', 'new', 'lost', 'changed') then opening
           when opening is null and exists (select 1 from control_messages m where m.idem_key = 'lost-session:' || g_t.id) then 'lost'
           when opening is null and exists (select 1 from chat_events e where e.chat_id = g_t.chat_id and e.seq > g_t.prev_trig and e.seq < g_t.trig
             and e.kind = 'command' and json_extract(e.payload, '$.command') = 'new') then 'new'

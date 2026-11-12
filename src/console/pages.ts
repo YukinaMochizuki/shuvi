@@ -302,9 +302,11 @@ export function conversationLabel(c: Conversation, form: "short" | "long" = "lon
       ? form === "short" ? "first conversation" : "The chat's first conversation"
       : c.start === "new"
         ? form === "short" ? "after /new" : "A fresh conversation, after /new"
-        : c.start === "lost"
-          ? form === "short" ? "restarted (lost)" : "Restarted: the previous conversation was lost"
-          : form === "short" ? "conversation" : "A new conversation";
+        : c.start === "changed"
+          ? form === "short" ? "backend settings changed" : "A fresh conversation after backend settings changed"
+          : c.start === "lost"
+            ? form === "short" ? "restarted (lost)" : "Restarted: the previous conversation was lost"
+            : form === "short" ? "conversation" : "A new conversation";
   if (!c.inferred) return base;
   return form === "short" ? `${base} · inferred` : `${base} (inferred: these turns ran before conversations were recorded)`;
 }
