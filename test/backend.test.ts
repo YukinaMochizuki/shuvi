@@ -6,9 +6,9 @@ import { ok, type ToolBundle, type ToolBoundary } from "agent-runtime";
 import { z } from "zod";
 import { backendFromEnv, type Config } from "../src/env.ts";
 import { conversationMatchesBackend, openAICompatBackend, openAIConversationPrefix } from "../src/agent/backend.ts";
-import { conversationStore, LostConversationError } from "../src/store/conversations.ts";
+import { conversationStore } from "../src/store/conversations.ts";
 import { openDb } from "../src/store/db.ts";
-import type { ModelMessage } from "agent-runtime/openai-compat";
+import { chats } from "../src/store/schema.ts";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
@@ -32,67 +32,6 @@ describe("backend configuration", () => {
     expect(() => backendFromEnv({ SHUVI_BACKEND: "openai-compat", SHUVI_MODEL: "   ", SHUVI_OPENAI_BASE_URL: "https://example/api", SHUVI_OPENAI_CONTEXT_WINDOW: "2" })).toThrow("SHUVI_MODEL");
     expect(() => backendFromEnv({ SHUVI_BACKEND: "openai-compat", SHUVI_MODEL: "m", SHUVI_OPENAI_BASE_URL: "https://example/v1", SHUVI_OPENAI_CONTEXT_WINDOW: "1.5" })).toThrow("SHUVI_OPENAI_CONTEXT_WINDOW");
     expect(() => backendFromEnv({ SHUVI_BACKEND: "openai-compat", SHUVI_MODEL: "m", SHUVI_OPENAI_BASE_URL: "https://example/v1", SHUVI_OPENAI_CONTEXT_WINDOW: "2", SHUVI_OPENAI_VISION: "yes" })).toThrow("SHUVI_OPENAI_VISION");
-  });
-});
-
-describe("OpenAI-compatible conversation persistence", () => {
-  test("appends across DB connections and compaction replaces the durable history", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-"));
-    dirs.push(dir);
-    const db1 = openDb(join(dir, "shuvi.db"), { migrate: true });
-    const first = conversationStore(db1);
-    const id = "openai-compat:identity:42:session";
-    const old: ModelMessage = { role: "user", content: "hello" };
-    const compacted: ModelMessage = { role: "user", content: "summary" };
-    await first.append(id, [old]);
-    const db2 = openDb(join(dir, "shuvi.db"));
-    const second = conversationStore(db2);
-    await second.append(id, [{ role: "assistant", content: "hi" }]);
-    expect((await second.load(id)).map((m) => m.content)).toEqual(["hello", "hi"]);
-    await second.compact!(id, [compacted]);
-    expect(await first.load(id)).toEqual([compacted]);
-    db1.$client.close();
-    db2.$client.close();
-  });
-
-  test("missing history has a dedicated lost-conversation error; malformed history remains a parse error", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-"));
-    dirs.push(dir);
-    const db = openDb(join(dir, "shuvi.db"), { migrate: true });
-    const store = conversationStore(db);
-    await expect(store.load("missing")).rejects.toBeInstanceOf(LostConversationError);
-    db.$client.query("insert into kv (key, value) values (?, ?)").run("conversation:broken", "{");
-    await expect(store.load("broken")).rejects.toBeInstanceOf(SyntaxError);
-    db.$client.query("insert into kv (key, value) values (?, ?)").run("conversation:wrong-shape", "{}");
-    await expect(store.load("wrong-shape")).rejects.toThrow("must be an array");
-    db.$client.close();
-  });
-
-  test("separate processes append without losing concurrent writes", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-processes-"));
-    dirs.push(dir);
-    const path = join(dir, "shuvi.db");
-    const db = openDb(path, { migrate: true });
-    const script = `
-      import { openDb } from ${JSON.stringify(new URL("../src/store/db.ts", import.meta.url).href)};
-      import { conversationStore } from ${JSON.stringify(new URL("../src/store/conversations.ts", import.meta.url).href)};
-      const db = openDb(process.argv[1]);
-      const store = conversationStore(db);
-      for (let n = 0; n < 20; n++) await store.append("shared", [{ role: "user", content: process.argv[2] + ":" + n }]);
-      db.$client.close();
-    `;
-    try {
-      await Promise.all([0, 1, 2].map(async (worker) => {
-        const child = Bun.spawn([process.execPath, "-e", script, path, String(worker)], { stdout: "ignore", stderr: "pipe" });
-        const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
-        if (code !== 0) throw new Error(`conversation writer ${worker} exited ${code}: ${stderr}`);
-      }));
-      const history = await conversationStore(db).load("shared");
-      expect(history).toHaveLength(60);
-      expect(new Set(history.map((message) => message.content)).size).toBe(60);
-    } finally {
-      db.$client.close();
-    }
   });
 });
 
@@ -143,6 +82,7 @@ describe("OpenAI-compatible backend factory over mocked fetch", () => {
     const db = openDb(join(dir, "shuvi.db"), { migrate: true });
     const requests: Array<{ model: string; messages: Array<{ role: string; content?: unknown; tool_calls?: unknown[] }> }> = [];
     const responses = [toolCall("success", "run"), toolCall("refusal", "deny"), answer("finished"), answer("resumed")];
+    db.insert(chats).values({ id: 7, tgChatId: 7, kind: "private" }).run();
     const savedFetch = globalThis.fetch;
     globalThis.fetch = (async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
@@ -176,7 +116,7 @@ describe("OpenAI-compatible backend factory over mocked fetch", () => {
       expect(next.text).toBe("resumed");
       expect(requests[3]!.messages.map((m) => m.role).slice(-2)).toEqual(["assistant", "user"]);
       expect(requests[3]!.messages[0]).toMatchObject({ role: "system", content: "system two" });
-      expect((await conversationStore(db).load(sessionId)).some((m) => m.role === "system")).toBe(false);
+      expect((await conversationStore(db, 7).load(sessionId)).some((m) => m.role === "system")).toBe(false);
     } finally {
       globalThis.fetch = savedFetch;
       db.$client.close();
@@ -187,6 +127,7 @@ describe("OpenAI-compatible backend factory over mocked fetch", () => {
     const dir = mkdtempSync(join(tmpdir(), "shuvi-backend-abort-"));
     dirs.push(dir);
     const db = openDb(join(dir, "shuvi.db"), { migrate: true });
+    db.insert(chats).values({ id: 7, tgChatId: 7, kind: "private" }).run();
     const savedFetch = globalThis.fetch;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => (entered = resolve));
@@ -207,7 +148,7 @@ describe("OpenAI-compatible backend factory over mocked fetch", () => {
       await started;
       controller.abort(new Error("stopped"));
       expect(await running).toBeInstanceOf(Error);
-      expect((await conversationStore(db).load(sessionId)).map((message) => message.role)).toEqual(["user"]);
+      expect((await conversationStore(db, 7).load(sessionId)).map((message) => message.role)).toEqual(["user"]);
 
       globalThis.fetch = (async (_input, init) => {
         const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content?: unknown }> };

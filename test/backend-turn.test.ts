@@ -67,7 +67,7 @@ describe("runTurn: backend scope changes", () => {
     test(`${change} starts fresh with a recorded reason and recent history`, async () => {
       const cfg = config();
       const { db, chatId, id } = seed(cfg);
-      await conversationStore(db).append(id, [{ role: "user", content: "old model history" }]);
+      await conversationStore(db, chatId).append(id, [{ role: "user", content: "old model history" }]);
       if (change === "backend") saveSession(db, chatId, "legacy-claude-session");
       if (change === "model") cfg.model = "another-model";
       if (change === "endpoint") cfg.openAICompat!.baseURL = "http://127.0.0.1:9000/v1";
@@ -92,7 +92,7 @@ describe("runTurn: backend scope changes", () => {
         expect(conversation.start).toBe("changed");
         expect(new Set(chatGrouping(db, chatId).map((item) => item.conversationId)).size).toBe(2);
         expect(conversationLabel(conversation)).toBe("A fresh conversation after backend settings changed");
-        expect(await conversationStore(db).load(id)).toEqual([{ role: "user", content: "old model history" }]);
+        expect(await conversationStore(db, chatId).load(id)).toEqual([{ role: "user", content: "old model history" }]);
       } finally {
         db.$client.close();
       }
@@ -129,7 +129,7 @@ describe("runTurn: real OpenAI-compatible driver failures", () => {
     test(`${failure} preserves the session and resumes it on retry`, async () => {
       const cfg = config();
       const { db, chatId, id } = seed(cfg);
-      await conversationStore(db).append(id, [{ role: "user", content: "durable history" }]);
+      await conversationStore(db, chatId).append(id, [{ role: "user", content: "durable history" }]);
       // Even an API error containing the Claude CLI marker is not a missing local conversation.
       const message = "No conversation found with session ID: upstream-error";
       let requests = 0;
@@ -146,7 +146,7 @@ describe("runTurn: real OpenAI-compatible driver failures", () => {
         expect(failed.turn.backendSessionId).toBe(id);
         expect(getChat(db, chatId)!.backendSessionId).toBe(id);
         expect(controlMessagesOf(db, "alert").some((alert) => alert.idemKey?.startsWith("lost-session:"))).toBe(false);
-        expect((await conversationStore(db).load(id))[0]!.content).toBe("durable history");
+        expect((await conversationStore(db, chatId).load(id))[0]!.content).toBe("durable history");
         globalThis.fetch = (async (_url, init) => {
           expect(String(init?.body)).toContain("durable history");
           return reply();
@@ -173,10 +173,10 @@ describe("runTurn: constructor compaction reports", () => {
     test(`summary failure is a safe note ${pruned ? "with a successful prune" : "even when history is unchanged"}`, async () => {
       const cfg = config();
       cfg.openAICompat!.contextWindow = 100;
-      const { db, id } = seed(cfg);
+      const { db, chatId, id } = seed(cfg);
       const before = history();
       if (pruned) before[0] = { role: "user", content: [{ type: "file", mediaType: "image/png", data: "aGVsbG8=" }] };
-      await conversationStore(db).append(id, before);
+      await conversationStore(db, chatId).append(id, before);
       let summaries = 0;
       globalThis.fetch = (async (_url, init) => {
         const body = JSON.parse(String(init?.body)) as { stream?: boolean };
@@ -203,10 +203,10 @@ describe("runTurn: constructor compaction reports", () => {
   test("rejected compaction is noted without exposing the rejected tool call id", async () => {
     const cfg = config();
     cfg.openAICompat!.contextWindow = 100;
-    const { db, id } = seed(cfg);
+    const { db, chatId, id } = seed(cfg);
     const before = history();
     before.push({ role: "tool", content: [{ type: "tool-result", toolCallId: secret, toolName: "example", output: { type: "text", value: "orphaned result" } }] });
-    await conversationStore(db).append(id, before);
+    await conversationStore(db, chatId).append(id, before);
     globalThis.fetch = (async (_url, init) => {
       const body = JSON.parse(String(init?.body)) as { stream?: boolean };
       if (body.stream) return reply();
@@ -220,7 +220,7 @@ describe("runTurn: constructor compaction reports", () => {
       expect(notes[0]!.text).toContain("rejected the replacement history");
       expect(JSON.stringify(notes)).not.toContain(secret);
       expect(result.steps.filter((step) => step.kind === "compaction")).toHaveLength(0);
-      expect((await conversationStore(db).load(id)).slice(0, before.length)).toEqual(before);
+      expect((await conversationStore(db, chatId).load(id)).slice(0, before.length)).toEqual(before);
     } finally {
       db.$client.close();
     }

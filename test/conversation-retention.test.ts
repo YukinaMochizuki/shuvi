@@ -5,146 +5,136 @@ import { join } from "node:path";
 import { conversationStore, pruneConversations } from "../src/store/conversations.ts";
 import { openDb } from "../src/store/db.ts";
 import { resetConversation } from "../src/store/events.ts";
-import { chats, turns } from "../src/store/schema.ts";
+import { chats, conversationMessages, conversations, turns } from "../src/store/schema.ts";
 import { finishTurn, saveSession, setTurnConversation } from "../src/store/turns.ts";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
 
+function database(): ReturnType<typeof openDb> {
+  const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-retention-"));
+  dirs.push(dir);
+  return openDb(join(dir, "shuvi.db"), { migrate: true });
+}
+
 describe("conversation retention", () => {
-  test("prunes abandoned history by last write, keeps active and running sessions, and ages metadata-less rows", () => {
-    const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-retention-"));
-    dirs.push(dir);
-    const db = openDb(join(dir, "shuvi.db"), { migrate: true });
-    const old = "2020-01-01T00:00:00.000Z";
-    const recent = "2025-01-01T00:00:00.000Z";
+  test("prunes strictly older histories and preserves active and running chats with opaque ids", async () => {
+    const db = database();
     const cutoff = "2024-01-01T00:00:00.000Z";
-    const add = (key: string, value: string) => db.$client.query("insert into kv (key, value) values (?, ?)").run(key, value);
-    db.insert(chats).values({ tgChatId: 1, kind: "private", backendSessionId: "active" }).run();
-    const runningChat = db.insert(chats).values({ tgChatId: 2, kind: "private" }).returning().get();
-    const legacyChat = db.insert(chats).values({ tgChatId: 3, kind: "private" }).returning().get();
-    const oldLegacyChat = db.insert(chats).values({ tgChatId: 5, kind: "private" }).returning().get();
-    const exactRunningChat = db.insert(chats).values({ tgChatId: 4, kind: "private" }).returning().get();
-    db.insert(turns).values({ chatId: runningChat.id, status: "running", fromSeq: 0, toSeq: 0 }).run();
-    db.insert(turns).values({ chatId: exactRunningChat.id, status: "running", fromSeq: 0, toSeq: 0, backendSessionId: "running" }).run();
-    db.insert(turns).values({ chatId: legacyChat.id, status: "done", fromSeq: 0, toSeq: 0, backendSessionId: "legacy-recent", startedAt: recent, endedAt: recent }).run();
-    db.insert(turns).values({ chatId: oldLegacyChat.id, status: "done", fromSeq: 0, toSeq: 0, backendSessionId: "legacy-old", startedAt: old, endedAt: old }).run();
+    const active = db.insert(chats).values({ tgChatId: 1, kind: "private", backendSessionId: "opaque-active-A" }).returning().get();
+    const running = db.insert(chats).values({ tgChatId: 2, kind: "private" }).returning().get();
+    const abandoned = db.insert(chats).values({ tgChatId: 3, kind: "private" }).returning().get();
+    const boundary = db.insert(chats).values({ tgChatId: 4, kind: "private" }).returning().get();
+    db.insert(turns).values({ chatId: running.id, status: "running", fromSeq: 0, toSeq: 0 }).run();
+    const histories = [
+      [active.id, "opaque-active-A"],
+      [active.id, "previous-active-session"],
+      [running.id, "runner-session-without-chat-id"],
+      [abandoned.id, "opaque-abandoned-Z"],
+      [abandoned.id, "recent-session"],
+      [boundary.id, "exact-cutoff"],
+    ] as const;
+    for (const [chatId, id] of histories) await conversationStore(db, chatId).append(id, [{ role: "user", content: id }]);
+    db.$client.query("update conversations set written_at = ?").run("2020-01-01T00:00:00.000Z");
+    db.$client.query("update conversations set written_at = ? where id = ?").run(cutoff, "exact-cutoff");
 
-    add("conversation:abandoned", "[]");
-    add("conversation_retention:abandoned", old);
-    add("conversation:active", "[]");
-    add("conversation:running", "[]");
-    add("conversation_retention:running", old);
-    add("conversation:openai-compat:0123456789abcdef:2:before-callback", "[]");
-    add("conversation_retention:openai-compat:0123456789abcdef:2:before-callback", old);
-    add("conversation:orphaned-metadata", JSON.stringify([{ role: "user", content: [{ type: "image", image: "data:image/jpeg;base64,ZmFrZS1pbWFnZS1kYXRh" }] }]));
-    add("conversation_retention:orphaned-metadata", old);
-    add("conversation:legacy-recent", "[]");
-    add("conversation:legacy-old", "[]");
-    add("conversation:legacy-orphan", "[]");
-    add("conversation_retention:orphan-only", old);
-    add("unrelated-setting", "kept");
-
-    expect(pruneConversations(db, cutoff, 1)).toBe(4);
-    const keys = (db.$client.query("select key from kv order by key").all() as Array<{ key: string }>).map((row) => row.key);
-    expect(keys).toContain("conversation:active");
-    expect(keys).toContain("conversation:running");
-    expect(keys).toContain("conversation:legacy-recent");
-    expect(keys).not.toContain("conversation:abandoned");
-    expect(keys).not.toContain("conversation:orphaned-metadata");
-    expect(keys).not.toContain("conversation:legacy-old");
-    expect(keys).not.toContain("conversation:legacy-orphan");
-    expect(keys).not.toContain("conversation_retention:orphan-only");
-    expect(keys).toContain("unrelated-setting");
+    db.$client.query("update conversations set written_at = ? where id = ?").run("2025-01-01T00:00:00.000Z", "recent-session");
+    expect(pruneConversations(db, cutoff, 1)).toBe(2);
+    for (const id of ["opaque-active-A", "runner-session-without-chat-id", "exact-cutoff", "recent-session"]) {
+      const chatId = histories.find((entry) => entry[1] === id)![0];
+      expect(await conversationStore(db, chatId).load(id)).toHaveLength(1);
+    }
+    expect(db.select().from(conversations).all()).toHaveLength(4);
     db.$client.close();
   });
 
-  test("/new keeps the old history while its runner is live, then releases it", () => {
-    const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-retention-race-"));
-    dirs.push(dir);
-    const db = openDb(join(dir, "shuvi.db"), { migrate: true });
-    const chat = db.insert(chats).values({ tgChatId: 4, kind: "private" }).returning().get();
-    const turn = db.insert(turns).values({ chatId: chat.id, status: "running", fromSeq: 0, toSeq: 0 }).returning().get();
-    const scoped = `openai-compat:0123456789abcdef:${chat.id}:session`;
-    db.$client.query("insert into kv (key, value) values (?, ?)").run(`conversation:${scoped}`, "[]");
-    db.$client.query("insert into kv (key, value) values (?, ?)").run(`conversation_retention:${scoped}`, "2020-01-01T00:00:00.000Z");
+  test("pruning an image-bearing history cascades to its message rows", async () => {
+    const db = database();
+    const chat = db.insert(chats).values({ tgChatId: 5, kind: "private" }).returning().get();
+    const id = "session-with-image";
+    await conversationStore(db, chat.id).append(id, [{
+      role: "user",
+      content: [{ type: "file", data: "data:image/jpeg;base64,ZmFrZQ==", mediaType: "image/jpeg" }],
+    }]);
+    db.$client.query("update conversations set written_at = ? where id = ?").run("2020-01-01T00:00:00.000Z", id);
 
-    saveSession(db, chat.id, scoped);
+    expect(db.select().from(conversationMessages).all()).toHaveLength(1);
+    expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(1);
+    expect(db.select().from(conversationMessages).all()).toHaveLength(0);
+    await conversationStore(db, chat.id).append(id, [{ role: "user", content: "new activity" }]);
+    expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(0);
+    expect(await conversationStore(db, chat.id).load(id)).toEqual([{ role: "user", content: "new activity" }]);
+    db.$client.close();
+  });
+
+  test("/new keeps history during the running turn before its first session callback", async () => {
+    const db = database();
+    const chat = db.insert(chats).values({ tgChatId: 6, kind: "private" }).returning().get();
+    const turn = db.insert(turns).values({ chatId: chat.id, status: "running", fromSeq: 0, toSeq: 0 }).returning().get();
+    const id = "opaque-session-before-callback";
+    await conversationStore(db, chat.id).append(id, [{ role: "user", content: "in flight" }]);
+    db.$client.query("update conversations set written_at = ? where id = ?").run("2020-01-01T00:00:00.000Z", id);
+
     resetConversation(db, chat.id);
     expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(0);
-    saveSession(db, chat.id, scoped);
-    setTurnConversation(db, turn.id, { backendSessionId: scoped });
-    expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(0);
+    expect(await conversationStore(db, chat.id).load(id)).toHaveLength(1);
+
+    saveSession(db, chat.id, id);
+    setTurnConversation(db, turn.id, { backendSessionId: id });
     resetConversation(db, chat.id);
+    expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(0);
     finishTurn(db, turn.id, { status: "done" });
     expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(1);
     db.$client.close();
   });
 
-  test("append and compaction refresh retention timestamps before pruning", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-retention-order-"));
-    dirs.push(dir);
-    const db = openDb(join(dir, "shuvi.db"), { migrate: true });
-    const store = conversationStore(db);
-    const add = (id: string, value: string) => db.$client.query("insert into kv (key, value) values (?, ?) on conflict(key) do update set value = excluded.value").run(id, value);
-    const timestamp = (id: string) => (db.$client.query("select value from kv where key = ?").get(`conversation_retention:${id}`) as { value: string }).value;
+  test("append and compaction refresh written_at and compaction replaces the visible generation", async () => {
+    const db = database();
+    const chat = db.insert(chats).values({ tgChatId: 7, kind: "private" }).returning().get();
+    const store = conversationStore(db, chat.id);
+    const timestamp = (id: string) => (db.$client.query("select written_at from conversations where id = ?").get(id) as { written_at: string }).written_at;
 
-    await store.append("append", [{ role: "user", content: "first" }]);
-    add("conversation_retention:append", "2020-01-01T00:00:00.000Z");
-    await store.append("append", [{ role: "assistant", content: "second" }]);
-    expect(Date.parse(timestamp("append"))).toBeGreaterThan(Date.parse("2020-01-01T00:00:00.000Z"));
+    await store.append("append-session", [{ role: "user", content: "first" }]);
+    db.$client.query("update conversations set written_at = ? where id = ?").run("2020-01-01T00:00:00.000Z", "append-session");
+    await store.append("append-session", [{ role: "assistant", content: "second" }]);
+    expect(Date.parse(timestamp("append-session"))).toBeGreaterThan(Date.parse("2020-01-01T00:00:00.000Z"));
 
-    add("conversation:compact", JSON.stringify([{ role: "user", content: "old history" }]));
-    add("conversation_retention:compact", "2020-01-01T00:00:00.000Z");
-    await store.compact!("compact", [{ role: "user", content: "summary" }]);
-    expect(Date.parse(timestamp("compact"))).toBeGreaterThan(Date.parse("2020-01-01T00:00:00.000Z"));
+    await store.append("compact-session", [{ role: "user", content: "old history" }]);
+    db.$client.query("update conversations set written_at = ? where id = ?").run("2020-01-01T00:00:00.000Z", "compact-session");
+    await store.compact!("compact-session", [{ role: "user", content: "summary" }]);
+    expect(Date.parse(timestamp("compact-session"))).toBeGreaterThan(Date.parse("2020-01-01T00:00:00.000Z"));
+    expect((await store.load("append-session")).map((message) => message.content)).toEqual(["first", "second"]);
+    expect((await store.load("compact-session")).map((message) => message.content)).toEqual(["summary"]);
+    expect((db.$client.query("select generation from conversations where id = ?").get("compact-session") as { generation: number }).generation).toBe(1);
+    expect((db.$client.query("select count(*) as count from conversation_messages").get() as { count: number }).count).toBe(3);
     expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(0);
-    expect((await store.load("append")).map((message) => message.content)).toEqual(["first", "second"]);
-    expect((await store.load("compact")).map((message) => message.content)).toEqual(["summary"]);
     db.$client.close();
   });
 
-  test("an append after pruning recreates the conversation with current history", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-retention-order-"));
-    dirs.push(dir);
-    const db = openDb(join(dir, "shuvi.db"), { migrate: true });
-    db.$client.query("insert into kv (key, value) values (?, ?)").run("conversation:expired", "[]");
-    db.$client.query("insert into kv (key, value) values (?, ?)").run("conversation_retention:expired", "2020-01-01T00:00:00.000Z");
-    expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(1);
-
-    const store = conversationStore(db);
-    await store.append("expired", [{ role: "user", content: "new activity" }]);
-    expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(0);
-    expect((await store.load("expired")).map((message) => message.content)).toEqual(["new activity"]);
-    db.$client.close();
-  });
-
-  test("a separate pruning process preserves history while another process appends", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-retention-processes-"));
-    dirs.push(dir);
-    const path = join(dir, "shuvi.db");
-    const db = openDb(path, { migrate: true });
-    db.insert(chats).values({ tgChatId: 5, kind: "private", backendSessionId: "shared" }).run();
-    await conversationStore(db).append("shared", [{ role: "user", content: "before workers" }]);
-    db.$client.query("update kv set value = ? where key = ?").run("2020-01-01T00:00:00.000Z", "conversation_retention:shared");
+  test("a separate append process and pruning process share one durable history", async () => {
+    const db = database();
+    const path = db.$client.filename;
+    const chat = db.insert(chats).values({ tgChatId: 9, kind: "private", backendSessionId: "opaque-shared-session" }).returning().get();
+    await conversationStore(db, chat.id).append("opaque-shared-session", [{ role: "user", content: "before workers" }]);
+    db.$client.query("update conversations set written_at = ? where id = ?").run("2020-01-01T00:00:00.000Z", "opaque-shared-session");
     const script = `
       import { openDb } from ${JSON.stringify(new URL("../src/store/db.ts", import.meta.url).href)};
       import { conversationStore, pruneConversations } from ${JSON.stringify(new URL("../src/store/conversations.ts", import.meta.url).href)};
       const db = openDb(process.argv[1]);
+      const chatId = Number(process.argv[3]);
       if (process.argv[2] === "append") {
-        const store = conversationStore(db);
-        for (let n = 0; n < 20; n++) await store.append("shared", [{ role: "user", content: "worker:" + n }]);
+        const store = conversationStore(db, chatId);
+        for (let n = 0; n < 20; n++) await store.append("opaque-shared-session", [{ role: "user", content: "worker:" + n }]);
       } else pruneConversations(db, "2024-01-01T00:00:00.000Z");
       db.$client.close();
     `;
     try {
-      const workers = ["append", "prune"].map((kind) => Bun.spawn([process.execPath, "-e", script, path, kind], { stdout: "ignore", stderr: "pipe" }));
-      const results = await Promise.all(workers.map(async (worker, index) => {
+      const workers = ["append", "prune"].map((kind) => Bun.spawn([process.execPath, "-e", script, path, kind, String(chat.id)], { stdout: "ignore", stderr: "pipe" }));
+      await Promise.all(workers.map(async (worker, index) => {
         const [code, stderr] = await Promise.all([worker.exited, new Response(worker.stderr).text()]);
         if (code !== 0) throw new Error(`conversation ${index} worker exited ${code}: ${stderr}`);
       }));
-      expect(results).toHaveLength(2);
-      const history = await conversationStore(db).load("shared");
+      const history = await conversationStore(db, chat.id).load("opaque-shared-session");
       expect(history).toHaveLength(21);
       expect(new Set(history.map((message) => message.content)).size).toBe(21);
     } finally {

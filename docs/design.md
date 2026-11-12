@@ -80,17 +80,21 @@ Everything is in one SQLite file (WAL mode).
 - **jobs**, **schedules**: see §10.
 - **The conversation the model sees** is kept by agent-runtime (a Claude Code session for the Claude
   driver, the `ConversationStore` for openai-compat), not rebuilt from `chat_events`. Shuvi implements
-  the latter in SQLite's `kv` table (`src/store/conversations.ts`), appending tool calls and their results
-  durably and replacing history on compaction. It survives separate runner processes and is backed up
-  with the database; previous OpenAI-compatible histories remain stored after `/new` until retention expires.
+  the latter with `conversations` and `conversation_messages` (`src/store/conversations.ts`): each message
+  is a JSON row, including image data. Append inserts only new rows in sequence and updates `written_at`
+  in an immediate transaction. Compaction atomically advances the generation, inserts the replacement
+  messages and deletes older generations. Load reads the current generation in order from one snapshot.
+  History survives separate runner processes and is backed up with the database; previous OpenAI-compatible
+  histories remain stored after `/new` until retention expires.
   Session IDs are scoped to the backend, and OpenAI-compatible sessions also to endpoint, model and chat;
   API-key changes do not change the scope. Switching scope starts fresh with the last 10 chat messages,
   records a `changed` opening and a transcript note, and raises a control-bot alert.
   Legacy untagged IDs belong to Claude. Abandoned histories are retained for `SHUVI_TRANSCRIPT_DAYS`
   (default 30) after their last write, then pruned hourly; active sessions and sessions used by running turns
-  are preserved. Legacy histories without a retention timestamp use their latest associated turn; a history
-  with neither is eligible immediately. `/new` clears the active session but leaves its OpenAI-compatible
-  history until retention expires.
+  are preserved. Pruning uses indexed `written_at` timestamps and SQL checks of the owning chat and its
+  running turns, including a turn that has not yet recorded its session. Deleting a conversation cascades
+  to its messages. `/new` clears the active session but leaves its OpenAI-compatible history until
+  retention expires.
   `chat_events` is "what actually happened", for people and for retrieval tools.
 
 `home/` is a second data directory, next to the SQLite file and outside the code repository:

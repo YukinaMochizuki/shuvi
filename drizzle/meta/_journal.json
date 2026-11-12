@@ -71,6 +71,13 @@
       "when": 1794416665176,
       "tag": "0009_spicy_shriek",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794458830084,
+      "tag": "0010_material_killmonger",
+      "breakpoints": true
     }
   ]
 }
