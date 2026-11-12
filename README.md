@@ -51,14 +51,6 @@ commands, so a group turn has no unseen messages to open with and follow-ups nev
 
 ```bash
 bun install
-bun run typecheck
-bun test
-bun scripts/e2e-fake.ts      # the whole path against a fake Telegram and a fake Anthropic API
-bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
-bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
-bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
-bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
-bun scripts/console-fixture.ts  # the console over made-up fixture data, on 127.0.0.1:8787, to look at
 ```
 
 ```bash
@@ -68,16 +60,44 @@ SHUVI_BOT_TOKEN=… SHUVI_CONTROL_BOT_TOKEN=… SHUVI_OWNER_ID=… SHUVI_OWNER_L
 Configuration is environment variables only; `src/env.ts` lists the framework's, and each capability
 lists its own in the header of `src/capabilities/<id>/index.ts` (e.g. `SHUVI_WEB`). The code and its
 prompts are all English; `SHUVI_OWNER_LANGUAGE` is where the owner's own language is set, and the
-assistant replies in it. Turns run on the Claude login of the user the server runs as, unless
-`SHUVI_CLAUDE_CONFIG_DIR` names another.
+assistant replies in it. `SHUVI_BACKEND` defaults to `claude`: turns use the Claude login of the user
+the server runs as, unless `SHUVI_CLAUDE_CONFIG_DIR` names another. `SHUVI_MODEL` optionally selects its model.
+
+To use agent-runtime's OpenAI-compatible Chat Completions backend, set:
+
+```bash
+export SHUVI_BACKEND=openai-compat
+export SHUVI_OPENAI_BASE_URL=https://api.openai.com/v1
+export SHUVI_MODEL='<model ID supported by your endpoint>'
+export SHUVI_OPENAI_CONTEXT_WINDOW='<context window in tokens for that model>'
+# Set SHUVI_OPENAI_API_KEY in your private environment file or secret manager.
+bun run server
+```
+
+Keep the bot and owner settings above. The endpoint, model and positive integer context window are required;
+use the endpoint's API base URL, including `/v1` when required. The endpoint must support streamed Chat
+Completions and function tools. `SHUVI_OPENAI_API_KEY` supplies a bearer key; omit it only for an endpoint
+that needs no authentication. Set `SHUVI_OPENAI_VISION=true` when the model accepts image inputs (default
+`false`; otherwise images become text notices). Compaction uses the configured context window and the
+same model. Cost is recorded as 0 because this backend does not report pricing; token usage reflects the
+last model call of the turn.
+
+Each chat resumes its own stored conversation across runner and server restarts. Switching backend,
+endpoint or OpenAI-compatible model starts a fresh conversation with the last 10 chat messages. An API
+key rotation keeps the conversation. Persona, memory and tool permissions continue to follow the chat's
+policy, and changes to `home/` reach the next turn's system prompt.
+
+Development commands and local integration checks are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Data
 
 `SHUVI_DATA_DIR` (default `./data`) holds `shuvi.db`, `home/` (the assistant's persona, directives and
 memory as markdown, and `policy.yaml`) and `media/` (the photos and stickers it was sent, by `file_unique_id`;
 `media/transcript/` holds the other images turn transcripts refer to, pruned with them). All of it is
-private: it lives outside this repository and is never committed or pushed. Note that Claude Code also
-keeps a copy of each image a turn is shown, next to its session files.
+private: it lives outside this repository and is never committed or pushed. OpenAI-compatible conversation
+history, including tool results and images, is stored in `shuvi.db` and included in its backups. Resetting a
+conversation with `/new` keeps its previous stored history. Claude Code keeps its own session files,
+including copies of images a turn is shown.
 
 Once a day the server writes a consistent copy of `shuvi.db` and a `git bundle` of `home/` (when it is a
 git repo) to `$SHUVI_DATA_DIR/backups/<time>/`, keeping the last 7. They are on the same disk; copy

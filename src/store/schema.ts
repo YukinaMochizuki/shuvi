@@ -23,7 +23,7 @@ export const chats = sqliteTable("chats", {
   title: text("title"),
   /** The last event seq the assistant has SEEN. The waker opens a turn only for inbound events past it. */
   cursorSeq: integer("cursor_seq").notNull().default(0),
-  /** agent-runtime's conversation id; null = the next turn starts a fresh conversation (`/new`). */
+  /** Backend-scoped conversation id; null = the next turn starts a fresh conversation (`/new`). */
   backendSessionId: text("backend_session_id"),
   /** Context occupancy the last turn ended at, handed back to the driver on the next turn. */
   contextTokens: integer("context_tokens"),

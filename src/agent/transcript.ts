@@ -13,7 +13,7 @@ import { SECTION_JOIN, type PromptSection } from "./prompt.ts";
  * The runner child records it while the turn runs; the tables are in store/schema.ts.
  *
  * What is recorded, and from where:
- *   - the SYSTEM PROMPT the turn sent (agent/prompt.ts builds it, and the Claude driver sends it as given),
+ *   - the SYSTEM PROMPT the turn sent (agent/prompt.ts builds it, and the selected backend receives it),
  *     by hash, with where each section begins;
  *   - the INPUT, the prompt's parts in order;
  *   - the TIMELINE, numbered in the order the turn produced it:

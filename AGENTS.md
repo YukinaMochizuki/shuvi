@@ -11,6 +11,7 @@ Read [docs/design.md](docs/design.md) first. Its five invariants (§1) are what 
 bun run typecheck
 bun test                    # fresh in-memory DB per test
 bun scripts/e2e-fake.ts     # server + runner child + real Claude Code CLI, fake Telegram and Anthropic
+bun scripts/e2e-openai-compat.ts # server + runner child + existing OpenAI-compatible driver, local fake API
 bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
 bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
@@ -26,6 +27,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 |---|---|
 | what is stored, and the exactly-once keys | `src/store/schema.ts` |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
+| backend selection, session identity and persisted OpenAI-compatible history | `src/agent/backend.ts`, `src/store/conversations.ts` |
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |
 | what a capability is, what it may touch | `src/capabilities/types.ts`, `src/capabilities/index.ts` |

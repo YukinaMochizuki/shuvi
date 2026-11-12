@@ -104,6 +104,7 @@ const env = {
   SHUVI_CONTROL_API_ROOT: control.apiRoot,
   SHUVI_COMMIT: "e2e1234",
   SHUVI_TURN_MAX_MINUTES: "0.15", // 9 s
+  SHUVI_BACKEND: "claude",
   SHUVI_MODEL: "claude-sonnet-4-5",
   SHUVI_TZ: "Asia/Taipei",
   SHUVI_CONSOLE_LISTEN: "127.0.0.1:0",

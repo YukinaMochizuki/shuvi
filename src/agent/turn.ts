@@ -3,6 +3,7 @@ import type { BackendAdapter, Prompt, ToolBoundary } from "agent-runtime";
 import { capabilityHolds, capabilityOwnerOnly, capabilityPerception, capabilityTools, chatCapabilities, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
 import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
+import { LostConversationError } from "../store/conversations.ts";
 import { raiseAlert } from "../store/control.ts";
 import {
   enqueueOutbound,
@@ -51,17 +52,14 @@ export function openingTimeNote(db: Db, chatId: number, first: ChatEvent, nowIso
 }
 
 /**
- * What the driver's error says when the conversation it was asked to continue no longer exists (the
- * Claude Code session file is gone: a new machine, a cleaned config dir). It is the Claude Code CLI's own
- * text, which agent-runtime appends to its error as `Claude Agent SDK run ended with
- * "error_during_execution": No conversation found with session ID: <id>` (pinned in test/turn.test.ts).
- * Only this exact text counts: a generic failure may be an outage or an expired login, and resetting the
- * conversation on those would throw its context away for nothing.
+ * Whether the selected backend's saved conversation no longer exists. Claude reports this through its
+ * CLI error text; OpenAI-compatible history uses `LostConversationError` when its durable row is missing.
+ * Generic failures may be an outage or an expired login, so they must not discard the conversation.
  */
 export const LOST_SESSION_TEXT = "No conversation found with session ID";
 
 export function isLostSession(e: unknown): boolean {
-  return (e instanceof Error ? e.message : String(e)).includes(LOST_SESSION_TEXT);
+  return e instanceof LostConversationError || (e instanceof Error ? e.message : String(e)).includes(LOST_SESSION_TEXT);
 }
 
 /**
@@ -111,7 +109,7 @@ export function isLostSession(e: unknown): boolean {
  * one line saying what time it is (the turn's start) and how long it has been (`openingTimeNote`). It is in
  * the input, never the system prompt, so the prompt cache is unaffected.
  *
- * A LOST conversation (`continueRun` fails with `LOST_SESSION_TEXT`) is not a failure of the turn: the
+ * A LOST conversation (`isLostSession` recognises the error) is not a failure of the turn: the
  * chat's conversation is reset and the same turn runs again at once, once, as a fresh conversation that
  * opens with the last `HISTORY_ON_NEW` messages (as after `/new`). It costs no failure attempt; the owner
  * is told through the control bot.
