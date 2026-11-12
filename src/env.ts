@@ -13,10 +13,11 @@ import { join, resolve } from "node:path";
  *   SHUVI_DATA_DIR            where shuvi.db and home/ live (default ./data). Private; outside the repo.
  *   SHUVI_MODEL               the model turns run on (Claude: driver's default; openai-compat: required)
  *   SHUVI_BACKEND             turn backend: claude (default) or openai-compat
- *   SHUVI_OPENAI_BASE_URL      OpenAI-compatible API base URL (openai-compat only)
- *   SHUVI_OPENAI_API_KEY       API key (omit only for an endpoint that needs no authentication)
- *   SHUVI_OPENAI_CONTEXT_WINDOW context window in tokens, required for compaction
- *   SHUVI_OPENAI_VISION        whether the endpoint accepts image input (default false)
+ *   SHUVI_OPENAI_BASE_URL     OpenAI-compatible API base URL (openai-compat only)
+ *   SHUVI_OPENAI_API_KEY      API key (omit only for an endpoint that needs no authentication)
+ *   SHUVI_OPENAI_CONTEXT_WINDOW
+ *                             context window in tokens, required for compaction (OpenAI-compatible only)
+ *   SHUVI_OPENAI_VISION       whether the endpoint accepts image input (default false)
  *   SHUVI_TZ                  the time zone messages are shown to the model in (default: the host's)
  *   SHUVI_CLAUDE_CONFIG_DIR   which Claude login turns run on (default: the process user's)
  *   SHUVI_TELEGRAM_API_ROOT   the Bot API base URL (default Telegram's; a fake one in tests)
@@ -91,6 +92,7 @@ export function dataDirFrom(env: Record<string, string | undefined>): string {
 export function loadConfig(opts: { needToken?: boolean } = {}): Config {
   const backend = backendFromEnv(process.env);
   const dataDir = dataDirFrom(process.env);
+  const model = process.env.SHUVI_MODEL?.trim();
   const ownerId = Number(required("SHUVI_OWNER_ID"));
   if (!Number.isSafeInteger(ownerId)) throw new Error("SHUVI_OWNER_ID must be a Telegram user id");
   return {
@@ -100,7 +102,7 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     dataDir,
     dbPath: join(dataDir, "shuvi.db"),
     home: join(dataDir, "home"),
-    ...(process.env.SHUVI_MODEL ? { model: backend.backend === "openai-compat" ? process.env.SHUVI_MODEL.trim() : process.env.SHUVI_MODEL } : {}),
+    ...(model ? { model } : {}),
     backend: backend.backend,
     ...(backend.openAICompat ? { openAICompat: backend.openAICompat } : {}),
     timeZone: process.env.SHUVI_TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
