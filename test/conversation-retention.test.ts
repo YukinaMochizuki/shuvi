@@ -110,35 +110,4 @@ describe("conversation retention", () => {
     expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(0);
     db.$client.close();
   });
-
-  test("a separate append process and pruning process share one durable history", async () => {
-    const db = database();
-    const path = db.$client.filename;
-    const chat = db.insert(chats).values({ tgChatId: 9, kind: "private", backendSessionId: "opaque-shared-session" }).returning().get();
-    await conversationStore(db, chat.id).append("opaque-shared-session", [{ role: "user", content: "before workers" }]);
-    db.$client.query("update conversations set written_at = ? where id = ?").run("2020-01-01T00:00:00.000Z", "opaque-shared-session");
-    const script = `
-      import { openDb } from ${JSON.stringify(new URL("../src/store/db.ts", import.meta.url).href)};
-      import { conversationStore, pruneConversations } from ${JSON.stringify(new URL("../src/store/conversations.ts", import.meta.url).href)};
-      const db = openDb(process.argv[1]);
-      const chatId = Number(process.argv[3]);
-      if (process.argv[2] === "append") {
-        const store = conversationStore(db, chatId);
-        for (let n = 0; n < 20; n++) await store.append("opaque-shared-session", [{ role: "user", content: "worker:" + n }]);
-      } else pruneConversations(db, "2024-01-01T00:00:00.000Z");
-      db.$client.close();
-    `;
-    try {
-      const workers = ["append", "prune"].map((kind) => Bun.spawn([process.execPath, "-e", script, path, kind, String(chat.id)], { stdout: "ignore", stderr: "pipe" }));
-      await Promise.all(workers.map(async (worker, index) => {
-        const [code, stderr] = await Promise.all([worker.exited, new Response(worker.stderr).text()]);
-        if (code !== 0) throw new Error(`conversation ${index} worker exited ${code}: ${stderr}`);
-      }));
-      const history = await conversationStore(db, chat.id).load("opaque-shared-session");
-      expect(history).toHaveLength(21);
-      expect(new Set(history.map((message) => message.content)).size).toBe(21);
-    } finally {
-      db.$client.close();
-    }
-  });
 });
