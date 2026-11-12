@@ -27,7 +27,8 @@ import { join, resolve } from "node:path";
  *   SHUVI_TURN_MAX_MINUTES    a turn's wall-clock limit; past it the turn is stopped (default 15)
  *   SHUVI_ALERT_OUTBOUND_MINUTES  alert when an outbound message is still pending after this long (default 10)
  *   SHUVI_COMMIT              the deployed commit /status shows (default: `git describe` of the checkout)
- *   SHUVI_TRANSCRIPT_DAYS     how long a turn's transcript is kept after the turn ended (default 30)
+ *   SHUVI_TRANSCRIPT_DAYS     transcript retention after a turn ends and conversation history after its
+ *                             last write (default 30 days)
  *   SHUVI_SECRETS_FILE        the secret profiles (default /etc/shuvi.secrets.yaml): every value in it is
  *                             redacted from turn transcripts, and from a chat computer's output
  *   SHUVI_CONSOLE_LISTEN      where the console listens, LOOPBACK ONLY (default 127.0.0.1:8787); anything
