@@ -27,8 +27,10 @@ if (!Number.isSafeInteger(turnId)) {
 }
 
 const { ClaudeBackend } = await import("agent-runtime/claude");
+const { conversationMatchesBackend, openAICompatBackend } = await import("../agent/backend.ts");
 const { loadConfig } = await import("../env.ts");
 const { openDb } = await import("../store/db.ts");
+const { getChat, resetConversation } = await import("../store/events.ts");
 const { runTurn } = await import("../agent/turn.ts");
 const { enabledCapabilities } = await import("../capabilities/index.ts");
 const { withCapabilitySecrets } = await import("../capabilities/types.ts");
@@ -39,6 +41,9 @@ const { raiseAlert } = await import("../store/control.ts");
 
 const cfg = loadConfig({ needToken: false });
 const db = openDb(cfg.dbPath);
+const turn = (await import("../store/turns.ts")).getTurn(db, turnId);
+const chat = turn ? getChat(db, turn.chatId) : undefined;
+if (turn?.status === "running" && chat?.backendSessionId && !conversationMatchesBackend(chat.backendSessionId, cfg, chat.id)) resetConversation(db, chat.id);
 // The same home/policy.yaml the server reads, the same way (a broken one: the last good, from the store);
 // and who the bot is, which the server recorded at startup (a child has no token to ask Telegram).
 const policy = loadPolicy(db, cfg.home, cfg.ownerId);
@@ -81,7 +86,10 @@ const outcome = await runTurn({
   ...(bot ? { bot } : {}),
   // liveSystemPrompt: each turn's system prompt replaces the one the conversation began with, so an edit
   // to home/ is heard from the next turn (Claude Code otherwise replays the prompt it recorded).
-  makeAdapter: (boundary) => new ClaudeBackend({ boundary, liveSystemPrompt: true, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
+  makeAdapter: (boundary) =>
+    cfg.backend === "openai-compat"
+      ? openAICompatBackend(db, cfg, chat!.id, boundary)
+      : new ClaudeBackend({ boundary, liveSystemPrompt: true, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
   signal: ac.signal,
   record: { dataDir: cfg.dataDir, redact, notes },
 });

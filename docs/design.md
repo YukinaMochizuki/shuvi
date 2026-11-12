@@ -78,8 +78,13 @@ Everything is in one SQLite file (WAL mode).
   only by the console, pruned after `SHUVI_TRANSCRIPT_DAYS`. Nothing decides anything from it
   (src/agent/transcript.ts, docs/console.md).
 - **jobs**, **schedules**: see §10.
-- **The conversation the model sees** is kept by agent-runtime itself (a Claude Code session for the
-  Claude driver, the `ConversationStore` for openai-compat), not rebuilt from `chat_events`.
+- **The conversation the model sees** is kept by agent-runtime (a Claude Code session for the Claude
+  driver, the `ConversationStore` for openai-compat), not rebuilt from `chat_events`. Shuvi implements
+  the latter in SQLite's `kv` table (`src/store/conversations.ts`), appending tool calls and their results
+  durably and replacing history on compaction. It survives separate runner processes and is backed up
+  with the database; previous conversations remain stored after `/new`.
+  Session IDs are scoped to the backend, and OpenAI-compatible sessions also to endpoint and model.
+  Switching scope starts fresh with the last 10 chat messages. Legacy untagged IDs belong to Claude.
   `chat_events` is "what actually happened", for people and for retrieval tools.
 
 `home/` is a second data directory, next to the SQLite file and outside the code repository:
@@ -406,8 +411,8 @@ stickers:
 - **Liveness**: a turn's pid and that process's start time (`/proc/<pid>/stat`) are recorded at spawn. A
   pid counts as the turn's only while the start time still matches, so a reused pid neither keeps a dead
   turn "running" nor receives a `/stop` meant for it.
-- **A lost conversation** (the driver says "No conversation found with session ID"): the chat's
-  conversation is reset and the same turn runs again at once, once, as a fresh conversation opening with
+- **A lost conversation** (Claude reports a missing session, or the OpenAI-compatible history is absent
+  from the store): the chat's conversation is reset and the same turn runs again at once, once, opening with
   the last 10 messages, as after `/new`. It does not count as a failed attempt.
 - **Backups**: once a day a consistent copy of `shuvi.db` (`VACUUM INTO`, online) and a `git bundle` of
   `home/` go to `$SHUVI_DATA_DIR/backups/<time>/`; the last 7 are kept. A failed backup is alerted and
@@ -496,8 +501,14 @@ the owner.
 
 ## 16. Deployment assumptions
 
-- The main backend is agent-runtime's Claude driver. Each turn starts a Claude Code subprocess, so the
-  machine needs at least 4 GB of memory for 2–3 turns at once.
+- `SHUVI_BACKEND` selects agent-runtime's Claude driver (default) or its existing `openai-compat` driver.
+  Claude starts a Claude Code subprocess per turn, so the machine needs at least 4 GB of memory for 2–3
+  concurrent Claude turns. OpenAI-compatible turns call the configured Chat Completions endpoint from the
+  detached runner and pass every tool through the same policy and recording boundary.
+- OpenAI-compatible configuration requires `SHUVI_MODEL`, `SHUVI_OPENAI_BASE_URL` and
+  `SHUVI_OPENAI_CONTEXT_WINDOW`. `SHUVI_OPENAI_API_KEY` authenticates the endpoint;
+  `SHUVI_OPENAI_VISION=true` enables image inputs. Compaction uses the configured context window. The
+  backend reports the last request's tokens and no cost (recorded as 0). See the README for setup.
 - Heavy computation runs remotely.
 
 ## 17. Open questions
