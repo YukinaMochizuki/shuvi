@@ -9,6 +9,7 @@
  */
 import { allowedHosts } from "../src/console/index.ts";
 import { handleConsole, LOGIN_HEADER } from "../src/console/server.ts";
+import { chatGrouping } from "../src/console/sessions.ts";
 import { buildConsoleFixture } from "../test/console-fixture.ts";
 import { OWNER } from "../test/helpers.ts";
 
@@ -28,4 +29,8 @@ Bun.serve({
 const base = `http://127.0.0.1:${port}`;
 const ids = (f.db.$client.query("select id from turns order by id").all() as { id: number }[]).map((r) => r.id);
 console.log(`console fixture on ${base} (data in ${f.dataDir})`);
-for (const p of ["/chats", "/chats/1", "/chats/2", "/turns", ...ids.map((id) => `/turns/${id}`)]) console.log(`  ${base}${p}`);
+const chats = (f.db.$client.query("select id from chats order by id").all() as { id: number }[]).map((r) => r.id);
+const places = chats.flatMap((c) => chatGrouping(f.db, c));
+const segments = [...new Set(places.map((p) => p.sessionId))].map((id) => `/segments/${id}`);
+const conversations = [...new Set(places.map((p) => p.conversationId))].map((id) => `/conversations/${id}`);
+for (const p of ["/turns", ...conversations, ...segments, "/chats/1", ...ids.map((id) => `/turns/${id}`)]) console.log(`  ${base}${p}`);

@@ -7,7 +7,8 @@ import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { defineCapability, type EnabledCapability } from "../src/capabilities/types.ts";
 import { parsePolicy } from "../src/policy/policy.ts";
 import type { Db } from "../src/store/db.ts";
-import { ensureChat, markSent, recordInbound, type MessagePayload } from "../src/store/events.ts";
+import { ensureChat, markSent, recordInbound, resetConversation, type MessagePayload } from "../src/store/events.ts";
+import { FIRST_RECORDED_KEY } from "../src/store/transcripts.ts";
 import { claimTurn } from "../src/store/turns.ts";
 import { lastSeq, memDb, OWNER, ScriptedAdapter, type Step } from "./helpers.ts";
 
@@ -191,6 +192,24 @@ export async function buildConsoleFixture(opts: { pauses?: boolean; rich?: boole
 
   const dm = ensureChat(db, { id: OWNER, kind: "private" }).id;
   const owner = { id: OWNER, name: "Owner" };
+  const earlier: number[] = [];
+  if (opts.rich) {
+    // Before the console was deployed: turns with messages but no transcript and no recorded conversation,
+    // then a `/new`, after which the recorded turns begin.
+    say(dm, owner, "good morning! anything on today?");
+    earlier.push(await turn(dm, [{ token: "Morning! Nothing on the calendar until the evening." }]));
+    say(dm, owner, "great, remind me to call the example garage at 5");
+    earlier.push(await turn(dm, [{ token: "I'll remind you at 5." }]));
+    for (const id of earlier) {
+      db.$client.query("delete from turn_steps where turn_id = ?").run(id);
+      db.$client.query("delete from turn_transcripts where turn_id = ?").run(id);
+      db.$client.query("update turns set opening = null, backend_session_id = null where id = ?").run(id);
+    }
+    db.$client.query("delete from prompt_texts where hash not in (select prompt_hash from turn_transcripts where prompt_hash is not null)").run();
+    db.$client.query("delete from kv where key = ?").run(FIRST_RECORDED_KEY);
+    recordInbound(db, { chatId: dm, kind: "command", payload: { from: owner, command: "new" }, tgUpdateId: update++, tgMessageId: 100 + update });
+    resetConversation(db, dm);
+  }
   say(dm, owner, "[photo] what is in this picture? and remind me what we said about the trip", {
     placeholder: true,
     media: { kind: "photo", fileUniqueId: "example-photo", file: { fileId: "f-example", fileUniqueId: "example-photo" }, state: "ready", path: "media/example-photo", mimeType: "image/png" },
@@ -277,6 +296,7 @@ export async function buildConsoleFixture(opts: { pauses?: boolean; rich?: boole
         pause(90),
         { token: "Two notes cover it. The calendar should confirm the dates; the bookings table has the cabin.", thinking: true },
         { tool: "check_calendar", args: { from: "Friday", to: "Sunday" } },
+        { compaction: { trigger: "auto", tokensBefore: 167_400, tokensAfter: 12_800 } },
         pause(220),
         { tool: "run_query", args: { sql: "select place, nights, pets from bookings where place like '%Lakeside%'" } },
         pause(60),
@@ -302,6 +322,34 @@ export async function buildConsoleFixture(opts: { pauses?: boolean; rich?: boole
       undefined,
       { inputTokens: 3120, outputTokens: 742, cacheReadTokens: 38400, cacheCreationTokens: 2210, costUsd: 0.0587 },
     );
+  }
+
+  if (opts.rich) {
+    // Spread over the last days, as real use is: the conversations then fall into segments.
+    const HOUR = 3600_000;
+    const turnsOf = (title: string) => (db.$client.query("select t.id from turns t join chats c on c.id = t.chat_id where c.title = ? order by t.id").all(title) as { id: number }[]).map((r) => r.id);
+    const shift = (ids: number[], ms: number, extraSeqs: number[] = []) => {
+      const by = `${-Math.round(ms / 1000)} seconds`;
+      const seqs = new Set(extraSeqs);
+      for (const id of ids) {
+        const t = db.$client.query("select chat_id as chatId, from_seq as f, to_seq as t from turns where id = ?").get(id) as { chatId: number; f: number; t: number };
+        // Its input (what it answered, not another turn's replies in the range) and its own messages.
+        for (const r of db.$client.query("select seq from chat_events where (chat_id = ? and seq > ? and seq <= ? and turn_id is null and kind <> 'command') or turn_id = ?").all(t.chatId, t.f, t.t, id) as { seq: number }[]) seqs.add(r.seq);
+        db.$client.query("update turns set started_at = strftime('%Y-%m-%dT%H:%M:%fZ', started_at, ?), ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', ended_at, ?) where id = ?").run(by, by, id);
+        db.$client.query("update turn_steps set at = strftime('%Y-%m-%dT%H:%M:%fZ', at, ?), ended_at = strftime('%Y-%m-%dT%H:%M:%fZ', ended_at, ?) where turn_id = ?").run(by, by, id);
+      }
+      for (const s of seqs) db.$client.query("update chat_events set at = strftime('%Y-%m-%dT%H:%M:%fZ', at, ?) where seq = ?").run(by, s);
+    };
+    const newCommand = (db.$client.query("select seq from chat_events where kind = 'command' and chat_id = ?").get(dm) as { seq: number }).seq;
+    shift(earlier, 75 * HOUR);
+    shift([done], 26 * HOUR, [newCommand]);
+    shift([failed, passed], 25 * HOUR);
+    shift([groupTurn], 50 * HOUR);
+    const club = turnsOf("Book Club Example");
+    shift(club.slice(0, 5), 48 * HOUR);
+    shift(club.slice(5), 3 * HOUR);
+    shift(turnsOf("Family Example"), 22 * HOUR);
+    shift(turnsOf("Work Example"), 5 * HOUR);
   }
 
   return { db, dataDir, home, turns: { done, failed, passed, group: groupTurn } };

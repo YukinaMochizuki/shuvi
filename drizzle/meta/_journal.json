@@ -64,6 +64,13 @@
       "when": 1794412268794,
       "tag": "0008_milky_iceman",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794416665176,
+      "tag": "0009_spicy_shriek",
+      "breakpoints": true
     }
   ]
 }

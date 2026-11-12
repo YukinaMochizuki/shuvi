@@ -216,6 +216,8 @@ await until("the recovered turn's answer", () => chatTexts().filter((t) => t ===
 await until("the recovered turn to close", () => (db.$client.query("select status from turns order by id desc limit 1").get() as { status: string }).status !== "running", 15_000);
 const recovered = db.$client.query("select status from turns where id > ?").all(turnsBefore) as { status: string }[];
 check(recovered.length === 1 && recovered[0]!.status === "done", "one turn, done: the same turn recovered");
+const opened = db.$client.query("select opening, backend_session_id as sid from turns order by id desc limit 1").get() as { opening: string; sid: string | null };
+check(opened.opening === "lost" && !!opened.sid && opened.sid !== unknown, `and it records that its conversation was restarted, with the new session id (${opened.opening})`);
 check((db.$client.query("select count(*) as n from turns where status = 'failed'").get() as { n: number }).n === failedBefore, "no failure attempt was used");
 const session = (db.$client.query("select backend_session_id from chats where id = ?").get(chatId) as { backend_session_id: string }).backend_session_id;
 check(!!session && session !== unknown, "the chat has a fresh conversation");

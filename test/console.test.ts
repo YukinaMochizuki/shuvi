@@ -3,6 +3,7 @@ import { allowedHosts, checkConsole, consoleOn } from "../src/console/index.ts";
 import { diffLines, hunks } from "../src/console/diff.ts";
 import { markdown } from "../src/console/html.ts";
 import { dayStart } from "../src/console/queries.ts";
+import { conversationOf } from "../src/console/sessions.ts";
 import { handleConsole, isLoopback, LOGIN_HEADER, parseConsoleListen, SESSION_COOKIE, type ConsoleDeps } from "../src/console/server.ts";
 import { recordControlBatch } from "../src/control/bot.ts";
 import { turnSummary } from "../src/control/turn-summary.ts";
@@ -132,20 +133,23 @@ describe("who may look: the token fallback", () => {
 });
 
 describe("pages, against fixture data", () => {
-  test("the list groups turns under their chats, most recently active first; /chats leads there", async () => {
+  test("the list: chats, the conversations in them, and their segments, most recently active first; /chats leads there", async () => {
     const x = await f();
     const html = await page("/turns");
     const group = html.indexOf(">Example Group</a>");
     const dm = html.indexOf(">DM · Owner</a>");
     expect(group).toBeGreaterThan(0);
     expect(dm).toBeGreaterThan(group); // the group spoke last
-    expect(html).toContain('href="/chats/2"');
-    expect(html).toContain("4 turns in 2 chats, by last activity");
+    expect(html).toContain("2 segments, 4 turns in 2 chats, by last activity");
     expect(html).toContain('direct · 3 turns · <span class="c-failed">1 failed</span>');
-    // A turn's row sits under its chat's header.
-    expect(html.indexOf(`href="/turns/${x.turns.done}"`)).toBeGreaterThan(dm);
-    expect(html.indexOf(`href="/turns/${x.turns.group}"`)).toBeGreaterThan(group);
-    expect(html.indexOf(`href="/turns/${x.turns.group}"`)).toBeLessThan(dm);
+    // Under the chat, its conversation's header, then the segment (the DM's three turns came within minutes).
+    const conv = html.indexOf(`href="/conversations/${x.turns.done}"`);
+    const seg = html.indexOf(`href="/segments/${x.turns.done}"`);
+    expect(conv).toBeGreaterThan(dm);
+    expect(seg).toBeGreaterThan(conv);
+    expect(html).toContain('<span class="cl">first conversation</span>');
+    expect(html).toMatch(/3 turns · 5 tools · 1 refused · \$0\.0020 · <span class="c-failed">1 failed<\/span>/);
+    expect(html).toContain(`href="/segments/${x.turns.group}"`);
     const res = await handleConsole(await deps(), get("/chats"));
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/turns");
@@ -155,33 +159,101 @@ describe("pages, against fixture data", () => {
     const x = await f();
     const dmTurn = await page(`/turns/${x.turns.done}`);
     expect(dmTurn).toMatch(/<details class="group has-failed" open><summary class="ghead"><span class="gl1"><a class="gname" href="\/chats\/1"/);
+    expect(dmTurn).toContain(`class="row on bad" href="/segments/${x.turns.done}"`); // its segment is marked
+    expect(dmTurn).toContain(`In <a href="/segments/${x.turns.done}">the segment of`);
     const failed = await page("/turns?outcome=failed");
-    expect(failed).toContain("1 turn in 1 chat");
+    expect(failed).toContain("1 segment, 1 turn in 1 chat");
     expect(failed).not.toContain(">Example Group</a>");
     expect(await page("/turns?q=no-such-text-anywhere")).toContain("No turn matches that.");
   });
 
-  test("at scale: each chat shows its latest few turns, with a link to the rest, paged", async () => {
-    const x = await r();
-    const html = await page("/turns", x);
-    const club = (x.db.$client.query("select id from chats where title = 'Book Club Example'").get() as { id: number }).id;
-    expect(html).toContain(`3 more in this chat`); // 8 turns (one a retry), 5 shown
-    expect(html).toContain(`href="/turns?chat=${club}"`);
-    const one = await page(`/turns?chat=${club}`, x);
-    expect((one.match(/<a class="row/g) ?? []).length).toBe(8);
-    expect(one).toContain("← all chats");
-    // Groups past the first few start closed when nothing is selected.
-    expect((html.match(/<details class="group[^"]*" open>/g) ?? []).length).toBe(3);
+  test("a segment: one continuous exchange, a thin divider per turn with its outcome and links to its tabs", async () => {
+    const x = await f();
+    const html = await page(`/segments/${x.turns.done}`);
+    expect(html).toContain(`The only segment of <a href="/conversations/${x.turns.done}">the chat&#39;s first conversation</a>`);
+    for (const id of [x.turns.done, x.turns.failed, x.turns.passed]) {
+      expect(html).toContain(`<a href="/turns/${id}"><span class="dot`);
+      expect(html).toContain(`href="/turns/${id}?tab=prompt"`);
+      expect(html).toContain(`href="/turns/${id}?tab=raw"`);
+    }
+    expect(html).toContain('<span class="c-failed">failed</span>');
+    expect(html).toContain("Failed: Claude Agent SDK run ended with");
+    expect(html).toContain('<span class="tag">retry</span>'); // the turn after the failure answered its message again
+    expect((html.match(/>book the train for it<\/div>/g) ?? []).length).toBe(1); // shown once, not per attempt
+    expect((html.match(/class="tdiv/g) ?? []).length).toBe(3);
+    expect(html).not.toContain("Resumed conversation"); // said once by the segment, not per turn
+    expect((await handleConsole(await deps(), get("/segments/99999"))).status).toBe(404);
+    // The first address of a segment leads to the new one, filters kept.
+    const old = await handleConsole(await deps(), get(`/sessions/${x.turns.done}?tool=look_at`));
+    expect(old.status).toBe(301);
+    expect(old.headers.get("location")).toBe(`/segments/${x.turns.done}?tool=look_at`);
+    // Any turn of it names it too.
+    expect(await page(`/segments/${x.turns.passed}`)).toContain(`<a href="/turns/${x.turns.done}"><span class="dot`);
   });
 
-  test("many chats stay fast: 400 chats of 20 turns render with 5 turns each", async () => {
+  test("filters keep the segments holding a matching turn, and mark that turn in it", async () => {
+    const x = await f();
+    const list = await page("/turns?tool=look_at");
+    expect(list).toContain("1 segment, 1 turn in 1 chat");
+    expect(list).toContain('<span class="c-accent">1 of 3 match</span>');
+    const seg = await page(`/segments/${x.turns.done}?tool=look_at`);
+    expect((seg.match(/class="tdiv match"/g) ?? []).length).toBe(1);
+    expect(seg).toContain('<span class="c-accent">1 of 3 turns</span> match the filter');
+  });
+
+  test("a conversation: its segments with the time between them, and a compaction marked where it happened", async () => {
+    const x = await r();
+    const [last] = x.db.$client.query("select id from turns where chat_id = 1 order by id desc limit 1").all() as { id: number }[];
+    const conv = conversationOf(x.db, 1, last!.id)!;
+    const html = await page(`/conversations/${conv.id}`, x);
+    expect(html).toContain("<h1>A fresh conversation, after /new</h1>");
+    expect(html).toContain("3 segments");
+    expect((html.match(/class="gapdiv"/g) ?? []).length).toBe(2);
+    expect(html).toMatch(/1h 00m later|1d 1h later/);
+    expect(html).toContain('<b>Compacted</b><span class="tag">auto</span><span class="num">167k tokens before → 13k after</span>');
+    expect(html).toContain("From here on she sees only a summary of what came before.");
+    // The list says so too.
+    const list = await page("/turns", x);
+    expect(list).toContain('<span class="cl">after /new</span>');
+    expect(list).toContain('<span class="c-lost">1 compaction</span>');
+    expect(list).toContain('<span class="c-lost">compacted</span>');
+  });
+
+  test("turns from before the console: their messages from the chat's log, and one plain sentence why there is no more", async () => {
+    const x = await r();
+    const first = (x.db.$client.query("select id from turns where chat_id = 1 order by id limit 1").get() as { id: number }).id;
+    const html = await page(`/segments/${first}`, x);
+    expect(html).toContain("the chat&#39;s first conversation (inferred: these turns ran before conversations were recorded)");
+    expect(html).toContain('<p class="note left">These turns ran before transcripts were recorded');
+    expect(html).toContain("good morning! anything on today?");
+    expect(html).toContain("Morning! Nothing on the calendar until the evening.");
+    expect(html).toContain('<span class="tag" title="This turn ran before transcripts were recorded');
+    expect(html).toContain("recording started with the console&#39;s deployment, and the first recorded turn is turn");
+    const prompt = await page(`/turns/${first}?tab=prompt`, x);
+    expect(prompt).toContain("This turn ran before transcripts were recorded");
+    expect(prompt).not.toContain("pruned");
+    expect(await page(`/turns/${first}?tab=raw`, x)).toContain("This turn ran before transcripts were recorded");
+  });
+
+  test("at scale: each chat shows its latest few segments, with a link to the rest, paged", async () => {
+    const x = await r();
+    const html = await page("/turns", x);
+    // Groups past the first few start closed when nothing is selected.
+    expect((html.match(/<details class="group[^"]*" open>/g) ?? []).length).toBe(3);
+    const club = (x.db.$client.query("select id from chats where title = 'Book Club Example'").get() as { id: number }).id;
+    const one = await page(`/turns?chat=${club}`, x);
+    expect(one).toContain("← all chats");
+    expect((one.match(/<a class="row/g) ?? []).length).toBe(2); // two days apart: two segments
+  });
+
+  test("many chats stay fast: 400 chats of 20 hour-apart turns render with 5 segments each and a link to the rest", async () => {
     const db = (await buildConsoleFixture()).db;
     const insertChat = db.$client.prepare("insert into chats (tg_chat_id, kind, title) values (?, 'group', ?)");
     const insertTurn = db.$client.prepare("insert into turns (chat_id, status, from_seq, to_seq, started_at, ended_at) values (?, 'done', 0, 0, ?, ?)");
     db.$client.transaction(() => {
       for (let i = 0; i < 400; i++) {
         const id = Number(insertChat.run(-200000 - i, `Load Example ${i}`).lastInsertRowid);
-        for (let k = 0; k < 20; k++) insertTurn.run(id, new Date(Date.now() - k * 1000).toISOString(), new Date().toISOString());
+        for (let k = 19; k >= 0; k--) insertTurn.run(id, new Date(Date.now() - k * 3600_000).toISOString(), new Date(Date.now() - k * 3600_000 + 1000).toISOString());
       }
     })();
     const fx = await f();
@@ -192,6 +264,7 @@ describe("pages, against fixture data", () => {
     expect(res.status).toBe(200);
     expect(html).toContain("in 402 chats");
     expect((html.match(/<a class="row/g) ?? []).length).toBeLessThanOrEqual(402 * 5);
+    expect(html).toContain("15 more in this chat");
     console.log(`grouped list, 402 chats: ${ms.toFixed(0)} ms`);
     expect(ms).toBeLessThan(3000);
   });
@@ -210,23 +283,23 @@ describe("pages, against fixture data", () => {
     expect(dm).not.toContain('class="tag owner"'); // not in a DM
   });
 
-  test("turns: the list beside the newest turn, and its filters (outcome, chat, tool, date) and search", async () => {
+  test("turns: the newest segment beside the list, and the filters (outcome, chat, tool, date) and search", async () => {
     const x = await f();
     const all = await page("/turns");
-    for (const id of Object.values(x.turns)) expect(all).toContain(`href="/turns/${id}"`);
-    expect(all).toContain("4 turns in 2 chats");
-    expect(all).toContain(`<h1>Turn ${x.turns.group}</h1>`); // the newest, shown beside the list
+    expect(all).toContain(`href="/segments/${x.turns.done}"`);
+    expect(all).toContain(`href="/segments/${x.turns.group}"`);
+    expect(all).toContain("2 segments, 4 turns in 2 chats");
+    expect(all).toContain(`<a href="/turns/${x.turns.group}"><span class="dot`); // the newest segment, beside the list
     const failed = await page("/turns?outcome=failed");
-    expect(failed).toContain(`href="/turns/${x.turns.failed}?outcome=failed"`);
+    expect(failed).toContain(`href="/segments/${x.turns.done}?outcome=failed"`);
     expect((failed.match(/<a class="row/g) ?? []).length).toBe(1);
-    expect(failed).toContain("overloaded");
     expect(failed).toContain('class="row on auto bad"');
-    expect(await page("/turns?tool=look_at")).toContain("1 turn in 1 chat");
+    expect(await page("/turns?tool=look_at")).toContain("1 segment, 1 turn in 1 chat");
     expect(await page("/turns?chat=2")).toContain("← all chats");
-    expect(await page("/turns?q=checkerboard")).toContain("1 turn in 1 chat");
+    expect(await page("/turns?q=checkerboard")).toContain("1 segment, 1 turn in 1 chat");
     expect(await page("/turns?from=2001-01-01&to=2001-01-02")).toContain("No turn matches that.");
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei" }).format(new Date());
-    expect(await page(`/turns?from=${today}&to=${today}`)).toContain("4 turns in 2 chats");
+    expect(await page(`/turns?from=${today}&to=${today}`)).toContain("2 segments, 4 turns in 2 chats");
   });
 
   test("date filters are read in the owner's time zone", () => {

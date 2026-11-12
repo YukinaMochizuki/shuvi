@@ -46,7 +46,7 @@ export function allowedHosts(c: ConsoleSettings, port: number): Set<string> {
 }
 
 /** Serve the console until `signal` aborts. */
-export function startConsole(c: ConsoleSettings, base: { db: Db; timeZone: string; dataDir: string; ownerId: number }, signal: AbortSignal): ReturnType<typeof serveConsole> {
+export function startConsole(c: ConsoleSettings, base: { db: Db; timeZone: string; dataDir: string; ownerId: number; transcriptDays?: number }, signal: AbortSignal): ReturnType<typeof serveConsole> {
   const deps: Omit<ConsoleDeps, "allowedHosts"> = {
     ...base,
     ...(c.users?.length ? { users: new Set(c.users) } : c.token ? { token: c.token } : {}),

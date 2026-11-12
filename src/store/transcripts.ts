@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, eq, inArray, isNotNull, lt, notInArray, sql } from "drizzle-orm";
 import type { Db } from "./db.ts";
-import { promptTexts, turns, turnSteps, turnTranscripts, type TranscriptPart } from "./schema.ts";
+import { kv, promptTexts, turns, turnSteps, turnTranscripts, type TranscriptPart } from "./schema.ts";
 
 /**
  * Turn transcripts in the store (schema.ts `prompt_texts`, `turn_transcripts`, `turn_steps`): written by
@@ -16,7 +16,47 @@ import { promptTexts, turns, turnSteps, turnTranscripts, type TranscriptPart } f
  * and its `turn_transcripts` row), then every prompt text no transcript points at. It never touches
  * `chat_events`, and keeps the `turns` row itself, with its usage: the console still lists the turn, with
  * no timeline.
+ *
+ * WHY A TURN HAS NO TRANSCRIPT (`transcriptAbsence`): the first turn ever recorded is kept in `kv`
+ * (FIRST_RECORDED_KEY), set by the first transcript written and, for a store recorded before that key
+ * existed, by the first pruning pass, from the oldest transcript left (nothing had been pruned before then).
+ * So a turn before it ran before recording began; one after it whose transcript is gone and that ended
+ * past the retention window was pruned; any other was not recorded (it never reached the model).
  */
+
+/** `kv` key: the id of the first turn whose transcript was ever recorded. */
+export const FIRST_RECORDED_KEY = "transcripts.first_turn";
+
+/** Note that recording has begun, at turn `turnId`, if it was not noted already. */
+export function markRecordingStarted(db: Db, turnId: number): void {
+  // Through the query builder, not `$client`: this runs inside the recorder's transaction, whose handle has none.
+  db.insert(kv).values({ key: FIRST_RECORDED_KEY, value: String(turnId) }).onConflictDoNothing().run();
+}
+
+/** The first turn whose transcript was ever recorded, with when it started; null before any was. */
+export function firstRecordedTurn(db: Db): { id: number; startedAt: string } | null {
+  const kv = db.$client.query("select value from kv where key = ?").get(FIRST_RECORDED_KEY) as { value: string } | null;
+  const id = kv ? Number(kv.value) : (db.$client.query("select min(turn_id) as id from turn_transcripts").get() as { id: number | null }).id;
+  if (id === null || !Number.isSafeInteger(id)) return null;
+  const t = db.$client.query("select started_at as startedAt from turns where id = ?").get(id) as { startedAt: string } | null;
+  return t ? { id, startedAt: t.startedAt } : null;
+}
+
+/**
+ * Why turn `turn` has no transcript: it ran `before` recording began (with the first recorded turn), its
+ * transcript was `pruned` (it ended more than `days` ago), or it was `missing` (never recorded).
+ */
+export function transcriptAbsence(
+  db: Db,
+  turn: { id: number; endedAt: string | null },
+  days: number,
+  now = Date.now(),
+): { why: "before"; first: { id: number; startedAt: string } | null } | { why: "pruned"; days: number } | { why: "missing" } {
+  const first = firstRecordedTurn(db);
+  if (!first || turn.id < first.id) return { why: "before", first };
+  if (turn.endedAt && Date.parse(turn.endedAt) < now - days * 24 * 3600_000) return { why: "pruned", days };
+  return { why: "missing" };
+}
 
 export type Step = typeof turnSteps.$inferSelect;
 export type Transcript = typeof turnTranscripts.$inferSelect;
@@ -104,6 +144,8 @@ export interface Pruned {
  */
 export function pruneTranscripts(db: Db, before: string, batch = 500): Pruned {
   const out: Pruned = { transcripts: 0, steps: 0, prompts: 0 };
+  // Before anything is pruned, note where recording began (a store recorded before the key existed).
+  db.$client.exec(`insert into kv (key, value) select '${FIRST_RECORDED_KEY}', cast(min(turn_id) as text) from turn_transcripts where true having min(turn_id) is not null on conflict (key) do nothing`);
   for (;;) {
     const ids = db
       .select({ id: turns.id })

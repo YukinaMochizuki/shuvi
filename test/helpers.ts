@@ -78,7 +78,9 @@ export type Step =
   | { run: () => void }
   | { fail: string }
   /** Block until the turn's signal aborts, then throw like the SDK does. */
-  | { waitForAbort: true };
+  | { waitForAbort: true }
+  /** The driver compacts the conversation here (agent-runtime's `onCompaction`). */
+  | { compaction: { trigger: "auto" | "manual"; tokensBefore: number; tokensAfter?: number } };
 
 /**
  * A BackendAdapter that plays a script through the same callbacks and the same tool boundary the Claude
@@ -118,6 +120,7 @@ export class ScriptedAdapter implements BackendAdapter {
         const result = await runAtBoundary(this.boundary, { name: step.tool, recordedName: step.tool, args: step.args ?? {} }, () => def.handler(step.args ?? {}));
         this.toolResults.push({ name: step.tool, result });
       } else if ("run" in step) step.run();
+      else if ("compaction" in step) (opts as { onCompaction?: (e: unknown) => void }).onCompaction?.(step.compaction);
       else if ("fail" in step) throw new Error(step.fail);
       else {
         await new Promise<void>((resolve) => {

@@ -142,6 +142,18 @@ export const turns = sqliteTable(
     outputTokens: integer("output_tokens"),
     cacheReadTokens: integer("cache_read_tokens"),
     cacheCreationTokens: integer("cache_creation_tokens"),
+    /**
+     * The backend conversation (agent-runtime's session id) the turn ran in: every turn of a chat resumes the
+     * same one until `/new` or a lost-session restart starts another. Null until the driver names it, and for
+     * turns recorded before this column existed.
+     */
+    backendSessionId: text("backend_session_id"),
+    /**
+     * How the turn's conversation stood when it began: `resumed` (it went on with the chat's conversation), or
+     * it opened a fresh one: `first` (the chat's first turn), `new` (after `/new`), `lost` (the old one was lost
+     * and restarted). Null only for turns from before this column existed (the console infers theirs).
+     */
+    opening: text("opening", { enum: ["first", "new", "lost", "resumed"] }),
     startedAt: text("started_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },
@@ -207,11 +219,13 @@ export const STEP_KINDS = [
   "append",
   /** Something the framework did to the turn itself (a lost conversation restarted). */
   "note",
+  /** The driver compacted the conversation: from here on the model sees a summary of what came before. */
+  "compaction",
 ] as const;
 
 /**
  * A turn's timeline, in the order the turn produced it (`n`). One row per thinking stretch, text block,
- * tool call, append or note. A tool call's row is written as `running` when it starts and completed in
+ * tool call, append, note or compaction (its trigger in `name`, `auto` or `manual`). A tool call's row is written as `running` when it starts and completed in
  * place by `call_id` when it returns, so a call that hangs is visible while it hangs, and parallel calls
  * cannot be mixed up.
  */
@@ -244,6 +258,9 @@ export const turnSteps = sqliteTable(
     /** append: the events appended, (from_seq, to_seq]. */
     fromSeq: integer("from_seq"),
     toSeq: integer("to_seq"),
+    /** compaction: the context before and after, in tokens (after only when the driver reports it). */
+    tokensBefore: integer("tokens_before"),
+    tokensAfter: integer("tokens_after"),
     at: text("at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },

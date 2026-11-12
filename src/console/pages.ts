@@ -14,10 +14,11 @@ import type {
   ScheduledPayload,
 } from "../store/events.ts";
 import { OUTBOUND_KINDS, TRIGGER_KINDS, type TranscriptPart } from "../store/schema.ts";
-import { getPromptText, getTranscript, previousPrompt, stepsOf, type PromptText, type Step, type Transcript } from "../store/transcripts.ts";
+import { getPromptText, getTranscript, previousPrompt, stepsOf, transcriptAbsence, type PromptText, type Step, type Transcript } from "../store/transcripts.ts";
 import type { Turn } from "../store/turns.ts";
 import { diffLines, hunks } from "./diff.ts";
 import { ago, badge, block, clock, dot, empty, excerpt, href, html, markdown, page, raw, resetBlocks, secs, short, size, tokens, usd, wall, when, type Raw } from "./html.ts";
+import { conversationOf, matchingTurns, segmentList, segmentOf, type Conversation, type SegmentRow, type Span } from "./sessions.ts";
 import {
   chatById,
   chatEventsPage,
@@ -28,16 +29,15 @@ import {
   outboundOf,
   toolNames,
   turnById,
-  turnList,
-  turnTree,
   type ConsoleChat,
   type TurnFilter,
-  type TurnRow,
 } from "./queries.ts";
 
 /**
- * The console's pages (DESIGN.md): one navigation, chat → turn. The left pane lists the chats, each with its
- * latest turns; the right shows the selected turn, or a chat as a conversation. Read-only: nothing here writes.
+ * The console's pages (DESIGN.md): one navigation, chat → conversation → segment → turn (sessions.ts). The left
+ * pane lists the chats, each with its latest segments under the conversation they belong to; the right shows
+ * the selected segment or conversation as one exchange, a single turn, or a chat's whole log. Read-only:
+ * nothing here writes.
  */
 
 export interface PageContext {
@@ -48,6 +48,8 @@ export interface PageContext {
   /** The owner's id: their lines in a group are marked. */
   ownerId?: number;
   now?: number;
+  /** How long transcripts are kept (SHUVI_TRANSCRIPT_DAYS), to say why one is gone. */
+  transcriptDays?: number;
 }
 
 export const TURNS_PER_PAGE = 50;
@@ -281,71 +283,106 @@ function toFilter(f: Filters, q: URLSearchParams, timeZone: string): TurnFilter 
   };
 }
 
-/** What is selected in the list: a turn (shown on the right), or a chat (its conversation on the right). */
+/** What is selected: a turn, a segment, a conversation, or a chat (its full log), shown on the right. */
 interface Selection {
   turn?: Turn;
+  segment?: number;
+  conversation?: number;
+  /** The chat's whole log is shown (its header is marked). */
   chat?: number;
+  /** The chat the selection is in (its group is open). */
+  inChat?: number;
 }
 
-/**
- * What started a turn, as its row says it under the chat's header: in a direct chat the header already names
- * the person, so just the words; in a group, who said them. A leading mention of the bot is dropped (every
- * group turn starts with one).
- */
-function rowPreview(t: TurnRow): string {
-  const p = parsePayload(t.triggerPayload);
-  if (t.triggerKind !== "message" || !p) return eventPreview(t.triggerKind, p);
+/** A conversation's label: how it began (recorded, or inferred for turns from before that was recorded). */
+export function conversationLabel(c: Conversation, form: "short" | "long" = "long"): string {
+  const base =
+    c.start === "first"
+      ? form === "short" ? "first conversation" : "The chat's first conversation"
+      : c.start === "new"
+        ? form === "short" ? "after /new" : "A fresh conversation, after /new"
+        : c.start === "lost"
+          ? form === "short" ? "restarted (lost)" : "Restarted: the previous conversation was lost"
+          : form === "short" ? "conversation" : "A new conversation";
+  if (!c.inferred) return base;
+  return form === "short" ? `${base} · inferred` : `${base} (inferred: these turns ran before conversations were recorded)`;
+}
+
+/** A label that opens a sentence, put inside one. */
+const inSentence = (label: string) => label.charAt(0).toLowerCase() + label.slice(1);
+
+/** What started a segment, as its row says it under the chat: the words, and in a group who said them. */
+function rowPreview(kind: string | null, payload: string | null, chatKind: string): string {
+  const p = parsePayload(payload);
+  if (kind !== "message" || !p) return eventPreview(kind, p);
   const m = p as unknown as MessagePayload;
   const text = excerpt(m.text.replace(/^\s*@\w+[\s,:]*/, ""), 160) || m.text;
-  return t.chatKind === "private" ? text : `${m.from.name}: ${text}`;
+  return chatKind === "private" ? text : `${m.from.name}: ${text}`;
 }
 
-/** One turn under its chat's header: the chat is the header's, so a row is what started the turn. */
-function turnRow(t: TurnRow, f: Filters, on: { id?: number; auto: boolean }, now: number): Raw {
-  const w = wall(t.startedAt, t.endedAt);
+/** The worst outcome among a segment's turns: what its dot shows. */
+function worst(s: { failed: number; running: number; stopped: number }): string {
+  return s.failed ? "failed" : s.running ? "running" : s.stopped ? "stopped" : "done";
+}
+
+/** A span of time, shortly: 40s, 3 min, 1h 05m, 2d 3h. */
+function span(ms: number): string {
+  const m = Math.round(ms / 60_000);
+  if (m < 1) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  if (m < 60) return `${m} min`;
+  if (m < 24 * 60) return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+  return `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
+}
+
+/** One segment in the list: the exchange it was, when, how long, and what it cost. */
+function segmentRow(s: SegmentRow, f: Filters, on: { id?: number; auto: boolean }, filtered: boolean, ctx: PageContext, now: number): Raw {
   const meta = [
-    `#${t.id}`,
-    t.toolCalls ? `${t.toolCalls} tool${t.toolCalls === 1 ? "" : "s"}` : "no tools",
-    ...(t.refused ? [`${t.refused} refused`] : []),
-    ...(t.failedCalls ? [`${t.failedCalls} failed`] : []),
-    ...(w !== null ? [secs(w)] : []),
-    ...(t.costMicroUsd ? [usd(t.costMicroUsd / 1e6)] : []),
+    clock(s.startedAt, ctx.timeZone),
+    span(Date.parse(s.endedAt) - Date.parse(s.startedAt)),
+    `${s.turns} turn${s.turns === 1 ? "" : "s"}`,
+    ...(s.toolCalls ? [`${s.toolCalls} tool${s.toolCalls === 1 ? "" : "s"}`] : []),
+    ...(s.refused ? [`${s.refused} refused`] : []),
+    ...(s.failedCalls ? [`${s.failedCalls} tool error${s.failedCalls === 1 ? "" : "s"}`] : []),
+    ...(s.costMicroUsd ? [usd(s.costMicroUsd / 1e6)] : []),
   ];
-  const bad = t.status === "failed";
-  return html`<a class="row${t.id === on.id ? ` on${on.auto ? " auto" : ""}` : ""}${bad ? " bad" : ""}" href="${href(`/turns/${t.id}`, f)}">
-<div class="l1">${dot(t.status)}<span class="what">${rowPreview(t) || "—"}</span><span class="when" title="${t.startedAt}">${ago(t.startedAt, now)}</span></div>
-<div class="l3 num">${meta.join(" · ")}</div>${bad && t.error ? html`<div class="err">${excerpt(t.error, 120)}</div>` : ""}
+  const bad = s.failed > 0;
+  return html`<a class="row${s.id === on.id ? ` on${on.auto ? " auto" : ""}` : ""}${bad ? " bad" : ""}" href="${href(`/segments/${s.id}`, f)}">
+<div class="l1">${dot(worst(s))}<span class="what">${rowPreview(s.triggerKind, s.triggerPayload, s.chatKind) || "—"}</span><span class="when" title="${s.startedAt}">${ago(s.startedAt, now)}</span></div>
+<div class="l3 num">${meta.join(" · ")}${s.compactions ? html` · <span class="c-lost">compacted</span>` : ""}${s.failed ? html` · <span class="c-failed">${s.failed} failed</span>` : ""}${
+    filtered && s.matching < s.turns ? html` · <span class="c-accent">${s.matching} of ${s.turns} match</span>` : ""
+  }</div>
 </a>`;
 }
 
 /**
- * The left pane: the filters, then the turns grouped under their chats, most recently active chat first, each
- * with its latest PER_CHAT matching turns ("n more" opens the chat's own list, paged). With a chat filter, that
- * one chat, paged. The chat holding the selection is open; with nothing selected, the first OPEN_GROUPS are.
+ * The left pane: the filters, then each chat (most recently active first), its latest PER_CHAT segments
+ * newest first, under the header of the conversation each belongs to ("n more" opens the chat's own list,
+ * paged). The chat holding the selection is open; with nothing selected, the first OPEN_GROUPS are.
  */
 function listPane(ctx: PageContext, q: URLSearchParams, sel: Selection): { pane: Raw; first?: number } {
   const f = currentFilters(q);
   const filter = toFilter(f, q, ctx.timeZone);
+  const filtered = Object.keys(f).some((k) => k !== "chat");
   const now = ctx.now ?? Date.now();
   const single = filter.chat !== undefined;
-  const tree = turnTree(ctx.db, filter, single ? 0 : PER_CHAT);
-  let paged: { more: boolean } = { more: false };
-  if (single) {
-    const l = turnList(ctx.db, filter, TURNS_PER_PAGE);
-    paged = l;
-    for (const g of tree.groups) g.rows = l.rows;
-  }
-  const selChat = sel.chat ?? sel.turn?.chatId;
-  // A selected turn older than its chat's latest few is shown in its place, so the list says where you are.
-  if (sel.turn) {
-    const g = tree.groups.find((x) => x.chat.id === sel.turn!.chatId);
-    if (g && !g.rows.some((r) => r.id === sel.turn!.id)) {
-      const row = turnList(ctx.db, { id: sel.turn.id }, 1).rows[0];
-      if (row) g.rows = [...g.rows, row].sort((a, b) => b.id - a.id);
+  const tree = segmentList(ctx.db, filter, single ? TURNS_PER_PAGE : PER_CHAT);
+  const selChat = sel.inChat ?? sel.chat ?? sel.turn?.chatId;
+  // The segment to mark: the one selected, or the one holding the selected turn or conversation's start.
+  const selSegment = sel.segment ?? (sel.turn ? segmentOf(ctx.db, sel.turn.chatId, sel.turn.id)?.id : undefined);
+  // A selected segment older than its chat's latest few is shown in its place, so the list says where you are.
+  if (selSegment !== undefined && selChat !== undefined) {
+    const g = tree.groups.find((x) => x.chat.id === selChat);
+    if (g && !g.segments.some((s) => s.id === selSegment)) {
+      const one = segmentList(ctx.db, { ...filter, chat: selChat, before: selSegment + 1 }, 1);
+      const row = one.groups[0]?.segments[0];
+      if (row && row.id === selSegment) {
+        g.segments = [...g.segments, row].sort((a, b) => b.id - a.id);
+        for (const [k, v] of one.conversations) tree.conversations.set(k, v);
+      }
     }
   }
-  const first = tree.groups.find((g) => g.rows.length)?.rows[0]?.id;
-  const on = { ...(sel.turn ? { id: sel.turn.id } : sel.chat === undefined && first !== undefined ? { id: first } : {}), auto: !sel.turn };
+  const first = tree.groups.find((g) => g.segments.length)?.segments[0]?.id;
+  const on = { ...(selSegment !== undefined ? { id: selSegment } : sel.chat === undefined && sel.conversation === undefined && first !== undefined ? { id: first } : {}), auto: selSegment === undefined };
 
   const tools = toolNames(ctx.db);
   const seg = (o: string | undefined, label: string) => html`<a class="${f.outcome === o ? "on" : ""}" href="${href("/turns", { ...f, outcome: o })}">${label}</a>`;
@@ -365,20 +402,36 @@ ${f.outcome ? html`<input type="hidden" name="outcome" value="${f.outcome}">` : 
   const groups = tree.groups.map((g, i) => {
     const c = g.chat;
     const open = single || c.id === selChat || (selChat === undefined && i < OPEN_GROUPS);
-    const hidden = c.matching - g.rows.length;
-    const head = html`<summary class="ghead${sel.chat === c.id ? " on" : ""}"><span class="gl1"><a class="gname" href="${href(`/chats/${c.id}`, f)}" title="the chat as a conversation">${chatName(c)}</a><span class="gwhen">${ago(c.lastEventAt, now)}</span></span>
-<span class="gmeta">${c.kind === "group" ? "group" : "direct"} · ${c.matching} turn${c.matching === 1 ? "" : "s"}${c.failed ? html` · <span class="c-failed">${c.failed} failed</span>` : ""}</span></summary>`;
-    const rows = g.rows.length ? html`<div class="rows">${g.rows.map((t) => turnRow(t, f, on, now))}</div>` : html`<p class="none">No turns yet.</p>`;
+    const hidden = c.segments - g.segments.length;
+    const head = html`<summary class="ghead${sel.chat === c.id ? " on" : ""}"><span class="gl1"><a class="gname" href="${href(`/chats/${c.id}`, f)}" title="the chat's whole log">${chatName(c)}</a><span class="gwhen">${ago(c.lastEventAt, now)}</span></span>
+<span class="gmeta">${c.kind === "group" ? "group" : "direct"} · ${c.turns} turn${c.turns === 1 ? "" : "s"}${c.failed ? html` · <span class="c-failed">${c.failed} failed</span>` : ""}</span></summary>`;
+    // Segments newest first, each conversation's header above its first (newest) segment shown.
+    const rows: Raw[] = [];
+    let conv: number | null = null;
+    for (const s of g.segments) {
+      if (s.conversationId !== conv) {
+        conv = s.conversationId;
+        const cv = tree.conversations.get(conv);
+        if (cv) {
+          rows.push(html`<a class="conv${sel.conversation === cv.id ? " on" : ""}" href="${href(`/conversations/${cv.id}`, f)}" title="${conversationLabel(cv)}"><span class="cl">${conversationLabel(cv, "short")}</span><span class="cm">${when(cv.startedAt, ctx.timeZone)} · ${cv.turns} turn${cv.turns === 1 ? "" : "s"}${
+            cv.compactions ? html` · <span class="c-lost">${cv.compactions} compaction${cv.compactions === 1 ? "" : "s"}</span>` : ""
+          }</span></a>`);
+        }
+      }
+      rows.push(segmentRow(s, f, on, filtered, ctx, now));
+    }
+    const body = g.segments.length ? html`<div class="rows">${rows}</div>` : html`<p class="none">No turns yet.</p>`;
     const more = single
-      ? paged.more
-        ? html`<a class="more-link" href="${href("/turns", { ...f, before: g.rows.at(-1)!.id })}">Older turns</a>`
+      ? g.segments.length >= TURNS_PER_PAGE
+        ? html`<a class="more-link" href="${href("/turns", { ...f, before: g.segments.at(-1)!.id })}">Older segments</a>`
         : ""
       : hidden > 0
         ? html`<a class="more-link" href="${href("/turns", { ...f, chat: c.id })}">${hidden} more in this chat</a>`
         : "";
-    return html`<details class="group${c.failed ? " has-failed" : ""}" ${open ? "open" : ""}>${head}${rows}${more}</details>`;
+    return html`<details class="group${c.failed ? " has-failed" : ""}" ${open ? "open" : ""}>${head}${body}${more}</details>`;
   });
-  const count = html`<div class="count">${single ? html`<a href="${href("/turns", { ...f, chat: undefined })}">← all chats</a> · ` : ""}${tree.total} turn${tree.total === 1 ? "" : "s"}${single ? "" : ` in ${tree.groups.length} chat${tree.groups.length === 1 ? "" : "s"}, by last activity`}</div>`;
+  const n = tree.segments;
+  const count = html`<div class="count">${single ? html`<a href="${href("/turns", { ...f, chat: undefined })}">← all chats</a> · ` : ""}${n} segment${n === 1 ? "" : "s"}, ${tree.turns} turn${tree.turns === 1 ? "" : "s"}${single ? "" : ` in ${tree.groups.length} chat${tree.groups.length === 1 ? "" : "s"}, by last activity`}</div>`;
   const list = tree.groups.length ? html`${groups}` : empty("No turn matches that.");
   return { pane: html`${filters}${count}<nav class="tree">${list}</nav>`, ...(first !== undefined ? { first } : {}) };
 }
@@ -428,7 +481,56 @@ function toolChip(s: Step, shownBelow = false): Raw {
   }<span class="dur">${d}</span></summary><div class="inner">${block("arguments", pretty(s.args) || "(none)")}${outcome}</div></details>${reason}`;
 }
 
-function conversation(ctx: PageContext, turn: Turn, transcript: Transcript | undefined, steps: Step[], group: boolean): Raw {
+/**
+ * Why a turn has no transcript, in one plain sentence (store/transcripts.ts `transcriptAbsence`): it ran before
+ * recording began, its transcript was pruned, or it was never recorded.
+ */
+function absenceText(ctx: PageContext, turn: Turn): string {
+  return absenceOf(ctx, [turn]);
+}
+
+/** Why `turns` have no transcript, in a sentence or two; `of`: how many turns are shown, when not only these. */
+function absenceOf(ctx: PageContext, turns: Turn[], of = turns.length): string {
+  const one = turns.length === 1;
+  const reasons = turns.map((t) => transcriptAbsence(ctx.db, t, ctx.transcriptDays ?? 30, ctx.now));
+  const a = reasons[0]!;
+  const some = turns.length < of ? `${turns.length} of these ${of} turns have no transcript. ` : "";
+  if (reasons.some((r) => r.why !== a.why)) return `${turns.length} of these turns have no transcript, not all for the same reason: each one's "messages only" tag says why.`;
+  return some + absenceSentence(ctx, a, one);
+}
+
+function absenceSentence(ctx: PageContext, a: ReturnType<typeof transcriptAbsence>, one: boolean): string {
+  const their = one ? "Its" : "Their";
+  if (a.why === "before") {
+    return a.first
+      ? `${one ? "This turn" : "These turns"} ran before transcripts were recorded: recording started with the console's deployment, and the first recorded turn is turn ${a.first.id}, on ${when(a.first.startedAt, ctx.timeZone)}. ${their} messages are shown from the chat's log.`
+      : `No turn has been recorded yet: recording starts with the console's deployment. ${their} messages are shown from the chat's log.`;
+  }
+  if (a.why === "pruned") return `${one ? "This turn's transcript was" : "These turns' transcripts were"} pruned: transcripts are kept for ${a.days} days after a turn ends. ${their} messages are still in the chat's log.`;
+  return `No transcript was recorded for ${one ? "this turn: it" : "these turns: each"} ended before its prompt reached the model, or recording failed.`;
+}
+
+/** A compaction: the point after which she sees only a summary of what came before. */
+function compactionDivider(s: Step): Raw {
+  const tokensBefore = s.tokensBefore ? `${short(s.tokensBefore)} tokens before` : "";
+  const tokensAfter = s.tokensAfter ? ` → ${short(s.tokensAfter)} after` : "";
+  return html`<div class="compaction"><div class="ct"><b>Compacted</b><span class="tag">${s.name === "manual" ? "manual" : "auto"}</span><span class="num">${tokensBefore}${tokensAfter}</span>${
+    s.text ? html`<span class="faint">${s.text}</span>` : ""
+  }</div><div class="cs">From here on she sees only a summary of what came before.</div></div>`;
+}
+
+/** How a turn's rows are drawn inside a session (`turnTrace`). */
+interface InSession {
+  /** The incoming events already shown by an earlier turn of the session (a retry shows them again). */
+  seen: Set<number>;
+}
+
+/**
+ * A turn's rows in the trace: what opened it, then its steps, her messages, what arrived mid-turn, and how it
+ * ended. Alone (the turn's own view) it says everything; inside a session (`inSession`) it leaves out what the
+ * session's divider already says (a resumed conversation, a clean end) and what an earlier turn already showed.
+ */
+function turnTrace(ctx: PageContext, turn: Turn, transcript: Transcript | undefined, steps: Step[], group: boolean, inSession?: InSession): Raw[] {
   const t0 = Date.parse(turn.startedAt);
   const owner = group && ctx.ownerId !== undefined ? { ownerId: ctx.ownerId } : {};
   const lookup = (seq: number) => eventBySeq(ctx.db, seq);
@@ -437,14 +539,16 @@ function conversation(ctx: PageContext, turn: Turn, transcript: Transcript | und
   const appended = steps.filter((s) => s.kind === "append" && s.fromSeq !== null && s.toSeq !== null);
   const inAppend = (seq: number) => appended.some((a) => seq > a.fromSeq! && seq <= a.toSeq!);
   const events = eventsBetween(ctx.db, turn.chatId, turn.fromSeq, turn.toSeq);
-  const shown = events.filter((e) => (TRIGGER_KINDS as string[]).includes(e.kind) && !inAppend(e.seq)).slice(shape.unread ?? 0);
+  const shown = events.filter((e) => (TRIGGER_KINDS as string[]).includes(e.kind) && !inAppend(e.seq) && !inSession?.seen.has(e.seq)).slice(shape.unread ?? 0);
+  for (const e of shown) inSession?.seen.add(e.seq);
   const firstCalled = shape.called?.[0];
   const trigger = turn.triggerSeq ?? turn.toSeq;
   const rows: Raw[] = [];
 
+  if (!transcript && !inSession) rows.push(tr("", html`<p class="note">${absenceText(ctx, turn)}</p>`));
   if (shape.history) rows.push(tr("", html`<p class="marker">A fresh conversation, opened with the chat's last ${shape.history} messages (see Raw input)</p>`));
-  else if (transcript?.resumed) rows.push(tr("", html`<p class="marker">Resumed conversation</p>`));
-  if (shape.unread) rows.push(tr("", html`<p class="marker">${shape.unread} earlier unread message${shape.unread === 1 ? "" : "s"} not shown to her</p>`));
+  else if (transcript?.resumed && !inSession) rows.push(tr("", html`<p class="marker">Resumed conversation</p>`));
+  if (shape.unread) rows.push
   for (const e of shown) {
     const context = shape.hasContext && firstCalled !== undefined && e.seq < firstCalled;
     const trig = e.seq === trigger;
@@ -509,24 +613,34 @@ function conversation(ctx: PageContext, turn: Turn, transcript: Transcript | und
         if (!added.length && s.text) rows.push(tr(at(s.at), html`<p class="note">appended after ${after ?? "a call"}: ${excerpt(s.text, 120)}</p>`));
         break;
       }
+      case "compaction":
+        rows.push(tr(at(s.at), compactionDivider(s)));
+        break;
       default:
         rows.push(tr(at(s.at), html`<p class="marker">${s.text ?? ""}</p>`));
     }
   }
   for (const e of outbound) if (!claimed.has(e.seq)) rows.push(tr(at(e.at), outgoing(e, ctx.timeZone, { lookup })));
+  for (const e of appended.flatMap((s) => eventsBetween(ctx.db, turn.chatId, s.fromSeq ?? 0, s.toSeq ?? 0))) inSession?.seen.add(e.seq);
 
   const w = wall(turn.startedAt, turn.endedAt);
   const end = turn.endedAt ? at(turn.endedAt) : "";
   if (turn.status === "running") rows.push(tr("", html`<p class="marker c-running">still running</p>`));
-  else rows.push(tr(end, html`<p class="marker"><span class="c-${turn.status}">ended ${turn.status}</span>${w !== null ? html`<span class="sep"></span>${secs(w)}` : ""}</p>`));
-  if (!steps.length && !shown.length) rows.unshift(tr("", empty("Nothing recorded for this turn: the transcript was pruned, or the turn never reached the model.")));
-  return html`<div class="trace">${rows}</div>`;
+  else if (inSession) {
+    // The divider already says how it ended; what went wrong is said here, where it happened.
+    if (turn.error) rows.push(tr(end, html`<p class="why c-${turn.status === "failed" ? "failed" : "stopped"}">${turn.status === "failed" ? "Failed" : "Stopped"}: ${excerpt(turn.error, 240)}</p>`));
+  } else rows.push(tr(end, html`<p class="marker"><span class="c-${turn.status}">ended ${turn.status}</span>${w !== null ? html`<span class="sep"></span>${secs(w)}` : ""}</p>`));
+  return rows;
+}
+
+function conversation(ctx: PageContext, turn: Turn, transcript: Transcript | undefined, steps: Step[], group: boolean): Raw {
+  return html`<div class="trace">${turnTrace(ctx, turn, transcript, steps, group)}</div>`;
 }
 
 // ---- one turn: the system prompt and the raw input --------------------------------------------------------
 
 function promptTab(ctx: PageContext, turn: Turn, prompt: PromptText | undefined, showDiff: boolean, link: (q: Record<string, string>) => string): Raw {
-  if (!prompt) return empty("No system prompt recorded: the transcript was pruned, or the turn never reached the model.");
+  if (!prompt) return empty(absenceText(ctx, turn));
   const prev = previousPrompt(ctx.db, turn.chatId, turn.id);
   const changed = prev && prev.prompt.hash !== prompt.hash;
   const sizes = prompt.sections.map((s) => s.end - s.start);
@@ -551,8 +665,8 @@ function promptTab(ctx: PageContext, turn: Turn, prompt: PromptText | undefined,
   return html`${summary}${diff}<div class="sections">${sections}</div>`;
 }
 
-function rawTab(turn: Turn, transcript: Transcript | undefined, steps: Step[]): Raw {
-  if (!transcript) return empty("No input recorded: the transcript was pruned, or the turn never reached the model.");
+function rawTab(ctx: PageContext, turn: Turn, transcript: Transcript | undefined, steps: Step[]): Raw {
+  if (!transcript) return empty(absenceText(ctx, turn));
   const t0 = Date.parse(turn.startedAt);
   const parts = (label: string, ps: readonly TranscriptPart[]) => {
     const text = ps.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("\n");
@@ -587,6 +701,7 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
   const tools = steps.filter((s) => s.kind === "tool");
   const refused = tools.filter((s) => s.status === "refused").length;
   const failedCalls = tools.filter((s) => s.status === "error" || s.status === "threw").length;
+  const place = segmentOf(ctx.db, turn.chatId, turn.id);
 
   const facts = [
     ...(w !== null ? [html`<b>${secs(w)}</b>`] : turn.status === "running" ? [html`running for <b>${secs((Date.now() - Date.parse(turn.startedAt)) / 1000)}</b>`] : []),
@@ -601,14 +716,119 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
 <div class="title">${badge(turn.status)}<h1>Turn ${turn.id}</h1><a href="/chats/${chat.id}#e${turn.toSeq}">${chatName(chat)}</a><span class="meta" title="${when(turn.startedAt, ctx.timeZone, true)}">${when(turn.startedAt, ctx.timeZone)} · ${ago(turn.startedAt, ctx.now)}</span>
 <span class="nav">${prev ? html`<a href="${href(`/turns/${prev}`, f)}" title="the chat's previous turn">‹ turn ${prev}</a>` : ""}${next ? html`<a href="${href(`/turns/${next}`, f)}" title="the chat's next turn">turn ${next} ›</a>` : ""}</span></div>
 ${trigger ? html`<p class="trigger">Triggered by ${eventPreview(trigger.kind, trigger.payload)} <span class="mono">#${trigger.seq}</span></p>` : ""}
-<p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span>` : ""}${x}`)}</p>
+${place ? html`<p class="trigger context">In <a href="${href(`/segments/${place.id}`, f)}">the segment of ${when(turnById(ctx.db, place.id)?.startedAt, ctx.timeZone)}</a> (turn ${place.turnIds.indexOf(turn.id) + 1} of ${place.turnIds.length}), of <a href="${href(`/conversations/${place.conversation.id}`, f)}">${inSentence(conversationLabel(place.conversation))}</a></p>` : ""}
+<p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
 ${turn.error ? html`<div class="banner">${turn.status === "stopped" ? "Stopped" : "Why it ended that way"}<span class="mono">${turn.error}</span></div>` : ""}
 </div>`;
   const tabs = html`<nav class="tabs">${TABS.map((t) => html`<a class="${t.id === tab ? "on" : ""}" href="${link(t.id === "conversation" ? {} : { tab: t.id })}">${t.label}${t.id === "prompt" && prompt ? html` <span class="meta">${size(prompt.text)}</span>` : ""}</a>`)}<span class="aside"><a href="${link(expandAll ? (tab === "conversation" ? {} : { tab }) : { ...(tab === "conversation" ? {} : { tab }), expand: "1" })}">${expandAll ? "collapse all" : "expand all"}</a> · j / k: next / previous turn</span></nav>`;
   const body =
-    tab === "prompt" ? promptTab(ctx, turn, prompt, q.get("diff") === "1", link) : tab === "raw" ? rawTab(turn, transcript, steps) : conversation(ctx, turn, transcript, steps, chat.kind === "group");
+    tab === "prompt" ? promptTab(ctx, turn, prompt, q.get("diff") === "1", link) : tab === "raw" ? rawTab(ctx, turn, transcript, steps) : conversation(ctx, turn, transcript, steps, chat.kind === "group");
   return html`<div class="detail">${head}${tabs}<div class="panel">${body}</div></div>`;
 }
+
+// ---- a segment, or a whole conversation ------------------------------------------------------------------------
+
+/**
+ * A segment, or a conversation, as one continuous exchange: each turn opens with a thin divider (its number,
+ * outcome, duration, cost, and a link to the turn's own view), then its rows; in a conversation, a time gap
+ * between segments is a divider too, and a compaction is marked where it happened.
+ */
+function spanDetail(ctx: PageContext, sp: Span, level: "segment" | "conversation", q: URLSearchParams, f: Filters): Raw {
+  const chat = chatById(ctx.db, sp.chatId)!;
+  const turns = sp.turnIds.map((id) => turnById(ctx.db, id)!).filter(Boolean);
+  const first = turns[0]!;
+  const last = turns.at(-1)!;
+  const conv = sp.conversation;
+  const filter = toFilter(f, q, ctx.timeZone);
+  const filtered = Object.keys(f).some((k) => k !== "chat");
+  const matches = filtered ? matchingTurns(ctx.db, filter, sp.turnIds) : new Set<number>();
+  const endOf = (t: Turn) => t.endedAt ?? t.startedAt;
+  const sum = (k: "inputTokens" | "outputTokens" | "costMicroUsd") => turns.reduce((n, t) => n + (t[k] ?? 0), 0);
+  const failed = turns.filter((t) => t.status === "failed").length;
+  // A segment shows its worst outcome, as its row's dot does; a conversation goes on past a failure, so it
+  // shows where it stands now (its latest turn), and its failures are counted in the facts.
+  const outcome =
+    level === "conversation" ? last.status : worst({ failed, running: turns.filter((t) => t.status === "running").length, stopped: turns.filter((t) => t.status === "stopped").length });
+  const allSteps = new Map(turns.map((t) => [t.id, stepsOf(ctx.db, t.id)]));
+  const tools = [...allSteps.values()].flat().filter((s) => s.kind === "tool");
+  const refused = tools.filter((s) => s.status === "refused").length;
+  const toolErrors = tools.filter((s) => s.status === "error" || s.status === "threw").length;
+  const compactions = [...allSteps.values()].flat().filter((s) => s.kind === "compaction").length;
+  const base = level === "segment" ? "/sessions" : "/conversations";
+
+  // A segment is named by when it happened: its start, and its end when that is another minute.
+  const endClock = clock(endOf(last), ctx.timeZone);
+  const title =
+    level === "segment"
+      ? `${when(first.startedAt, ctx.timeZone)}${endClock !== clock(first.startedAt, ctx.timeZone) ? ` – ${endClock}` : ""}`
+      : conversationLabel(conv);
+  const part = sp.segmentIds.indexOf(sp.id) + 1;
+  const context =
+    level === "segment"
+      ? html`<p class="trigger context">${sp.segmentIds.length > 1 ? `Segment ${part} of ${sp.segmentIds.length} of ` : "The only segment of "}<a href="${href(`/conversations/${conv.id}`, f)}">${inSentence(conversationLabel(conv))}</a>, which began ${when(conv.startedAt, ctx.timeZone)}${
+          conv.compactions ? ` · ${conv.compactions} compaction${conv.compactions === 1 ? "" : "s"} in it` : ""
+        }</p>`
+      : html`<p class="trigger context">Began ${when(conv.startedAt, ctx.timeZone)}${conv.backendSessionId ? html` · session <span class="mono">${conv.backendSessionId.slice(0, 8)}</span>` : ""} · ${conv.segments} segment${conv.segments === 1 ? "" : "s"}${
+          conv.compactions ? html` · <span class="c-lost">${conv.compactions} compaction${conv.compactions === 1 ? "" : "s"}</span>` : ""
+        }</p>`;
+  const facts = [
+    html`<b>${span(Date.parse(endOf(last)) - Date.parse(first.startedAt))}</b>`,
+    html`<b>${turns.length}</b> turn${turns.length === 1 ? "" : "s"}${failed ? html`, <span class="c-failed">${failed} failed</span>` : ""}`,
+    html`<b>${tokens(sum("inputTokens"))}</b> in / <b>${tokens(sum("outputTokens"))}</b> out`,
+    ...(sum("costMicroUsd") ? [html`<b>${usd(sum("costMicroUsd") / 1e6)}</b>`] : []),
+    html`${tools.length} tool call${tools.length === 1 ? "" : "s"}${refused ? html`, <span class="c-refused">${refused} refused</span>` : ""}${toolErrors ? html`, <span class="c-failed">${toolErrors} failed</span>` : ""}`,
+    ...(level === "segment" && compactions ? [html`<span class="c-lost">compacted</span>`] : []),
+  ];
+  const missing = turns.filter((t) => !getTranscript(ctx.db, t.id));
+  const head = html`<div class="head">
+<a class="back" href="${href("/turns", f)}">← All chats</a>
+<div class="title">${badge(outcome)}<h1>${title}</h1><a href="${href(`/chats/${chat.id}`, f)}#e${first.toSeq}">${chatName(chat)}</a>
+<span class="nav">${sp.prev ? html`<a href="${href(`${base}/${sp.prev}`, f)}" title="the chat's previous ${level}">‹ earlier</a>` : ""}${sp.next ? html`<a href="${href(`${base}/${sp.next}`, f)}" title="the chat's next ${level}">later ›</a>` : ""}</span></div>
+${context}
+<p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
+${filtered ? html`<p class="trigger context"><span class="c-accent">${matches.size} of ${turns.length} turns</span> match the filter; they are marked below.</p>` : ""}
+${missing.length ? html`<p class="note left">${absenceOf(ctx, missing, turns.length)}</p>` : ""}
+</div>`;
+  const aside = html`<nav class="tabs"><span class="on">${level === "segment" ? "Segment" : "Conversation"}</span><span class="aside"><a href="${href(`${base}/${sp.id}`, expandAll ? f : { ...f, expand: "1" })}">${expandAll ? "collapse all" : "expand all"}</a> · j / k: next / previous segment</span></nav>`;
+
+  const group = chat.kind === "group";
+  const seen = new Set<number>();
+  const rows: Raw[] = [];
+  let prevTurn: Turn | null = null;
+  for (const t of turns) {
+    if (prevTurn && sp.segmentOf.get(t.id) !== sp.segmentOf.get(prevTurn.id)) {
+      rows.push(html`<div class="gapdiv"><span>${span(Date.parse(t.startedAt) - Date.parse(endOf(prevTurn)))} later · ${when(t.startedAt, ctx.timeZone)}</span></div>`);
+    }
+    const steps = allSteps.get(t.id) ?? [];
+    const transcript = getTranscript(ctx.db, t.id);
+    const w = wall(t.startedAt, t.endedAt);
+    const retry = eventsBetween(ctx.db, t.chatId, t.fromSeq, t.toSeq).some((e) => seen.has(e.seq));
+    rows.push(
+      html`<div class="tdiv${matches.has(t.id) ? " match" : ""}"><a href="${href(`/turns/${t.id}`, f)}">${dot(t.status)}turn ${t.id}</a><span class="c-${t.status}">${t.status}</span>${w !== null ? html`<span>${secs(w)}</span>` : ""}${
+        t.costMicroUsd ? html`<span>${usd(t.costMicroUsd / 1e6)}</span>` : ""
+      }${retry ? html`<span class="tag">retry</span>` : ""}${transcript ? "" : html`<span class="tag" title="${absenceText(ctx, t)}">messages only</span>`}${matches.has(t.id) ? html`<span class="tag trig">match</span>` : ""}<span class="tlinks"><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "prompt" })}">prompt</a><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "raw" })}">raw</a></span></div>`,
+    );
+    rows.push(...turnTrace(ctx, t, transcript, steps, group, { seen }));
+    prevTurn = t;
+  }
+  return html`<div class="detail">${head}${aside}<div class="panel"><div class="trace">${rows}</div></div></div>`;
+}
+
+/** A segment (`level` segment) or a conversation, by id or by any turn in it. Null: no such thing. */
+function spanPage(ctx: PageContext, q: URLSearchParams, id: number, level: "segment" | "conversation"): string | null {
+  resetBlocks();
+  expandAll = q.get("expand") === "1";
+  const t = turnById(ctx.db, id);
+  if (!t) return null;
+  const sp = level === "segment" ? segmentOf(ctx.db, t.chatId, id) : conversationOf(ctx.db, t.chatId, id);
+  if (!sp) return null;
+  const f = currentFilters(q);
+  const { pane } = listPane(ctx, q, level === "segment" ? { segment: sp.id, inChat: sp.chatId } : { conversation: sp.id, inChat: sp.chatId });
+  return page(level === "segment" ? "Segment" : "Conversation", split(pane, spanDetail(ctx, sp, level, q, f), true), ctx.who);
+}
+
+export const segmentPage = (ctx: PageContext, q: URLSearchParams, id: number) => spanPage(ctx, q, id, "segment");
+export const conversationPage = (ctx: PageContext, q: URLSearchParams, id: number) => spanPage(ctx, q, id, "conversation");
 
 /** The left pane beside `detail`, one pane at a time on a narrow screen (`selected`: the detail's). */
 function split(pane: Raw, detail: Raw, selected: boolean): Raw {
@@ -623,8 +843,14 @@ export function turnsPage(ctx: PageContext, q: URLSearchParams, id?: number): st
   if (id !== undefined && !turn) return null;
   const f = currentFilters(q);
   const { pane, first } = listPane(ctx, q, turn ? { turn } : {});
-  const shown = turn ?? (first !== undefined ? turnById(ctx.db, first) : undefined);
-  const detail = shown ? turnDetail(ctx, shown, q, f) : empty("No turn to show.");
+  let detail: Raw = empty("No turn to show.");
+  if (turn) detail = turnDetail(ctx, turn, q, f);
+  else if (first !== undefined) {
+    // Nothing selected: the newest segment in the list, beside it.
+    const t = turnById(ctx.db, first);
+    const sp = t ? segmentOf(ctx.db, t.chatId, first) : null;
+    if (sp) detail = spanDetail(ctx, sp, "segment", q, f);
+  }
   return page(turn ? `Turn ${turn.id}` : "Turns", split(pane, detail, !!turn), ctx.who);
 }
 
@@ -678,6 +904,6 @@ export function chatPage(ctx: PageContext, chatId: number, q: URLSearchParams = 
 ${more && first ? html`<p class="note"><a href="${href(`/chats/${chat.id}`, { ...currentFilters(q), before: first })}">Earlier events</a></p>` : ""}
 ${events.length ? html`<div class="convo">${items}</div>` : empty("Nothing recorded in this chat.")}
 </div></div>`;
-  const { pane } = listPane(ctx, q, { chat: chat.id });
+  const { pane } = listPane(ctx, q, { chat: chat.id, inChat: chat.id });
   return page(chatName(chat), split(pane, detail, true), ctx.who);
 }

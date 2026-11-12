@@ -136,6 +136,27 @@ export function extendTurn(db: Db, id: number, toSeq: number): void {
   if (t && toSeq > t.toSeq) db.update(turns).set({ toSeq }).where(eq(turns.id, id)).run();
 }
 
+/** How a turn's conversation stood when it began (schema.ts `turns.opening`). */
+export type Opening = "first" | "new" | "lost" | "resumed";
+
+/**
+ * Note on the turn which backend conversation it ran in, and how that conversation opened: the console groups
+ * a chat's turns by it (src/console/sessions.ts). Bookkeeping, best effort: a failure here is logged, never
+ * the turn's.
+ */
+export function setTurnConversation(db: Db, id: number, patch: { backendSessionId?: string; opening?: Opening }): void {
+  try {
+    db.update(turns).set(patch).where(eq(turns.id, id)).run();
+  } catch (e) {
+    console.error(`turn ${id}: could not note its conversation:`, e instanceof Error ? e.message : e);
+  }
+}
+
+/** Whether the chat had a turn before `turnId` (a fresh conversation then follows a reset, not the first ever). */
+export function hadEarlierTurn(db: Db, chatId: number, turnId: number): boolean {
+  return !!db.$client.query("select 1 from turns where chat_id = ? and id < ? limit 1").get(chatId, turnId);
+}
+
 export function saveSession(db: Db, chatId: number, backendSessionId: string): void {
   db.update(chats).set({ backendSessionId }).where(eq(chats.id, chatId)).run();
 }

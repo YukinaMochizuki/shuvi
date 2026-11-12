@@ -6,7 +6,7 @@ import { sameSecret } from "../secrets/compare.ts";
 import type { Db } from "../store/db.ts";
 import { sniffImage } from "../store/media.ts";
 import { cardPage, html } from "./html.ts";
-import { chatPage, turnsPage, type PageContext } from "./pages.ts";
+import { chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
 
 /**
  * The console's HTTP side: who may look, and which page answers which URL.
@@ -46,6 +46,8 @@ export interface ConsoleDeps {
   token?: string;
   /** The owner's id, whose lines are marked in a group. */
   ownerId?: number;
+  /** How long transcripts are kept (SHUVI_TRANSCRIPT_DAYS), to say why one is gone. Default 30. */
+  transcriptDays?: number;
   now?: () => number;
 }
 
@@ -190,7 +192,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   try {
     const auth = await authenticate(deps, req, path);
     if (!auth.ok) return auth.response;
-    const ctx: PageContext = { db: deps.db, timeZone: deps.timeZone, ...(auth.who ? { who: auth.who } : {}), ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}), now: (deps.now ?? Date.now)() };
+    const ctx: PageContext = { db: deps.db, timeZone: deps.timeZone, ...(auth.who ? { who: auth.who } : {}), ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}), ...(deps.transcriptDays ? { transcriptDays: deps.transcriptDays } : {}), now: (deps.now ?? Date.now)() };
     if (path === "/" || path === "/login") return respond(null, 302, "text/plain", { location: "/turns" });
     if (path === "/media") return media(deps, url.searchParams.get("ref"));
     // Chats and turns are one navigation now (the list groups turns by chat); the old address leads there.
@@ -199,6 +201,15 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     const chat = /^\/chats\/(\d+)$/.exec(path);
     if (chat) {
       const out = chatPage(ctx, Number(chat[1]), url.searchParams);
+      return out ? htmlResponse(out) : notFound(ctx.who);
+    }
+    // Segments were first served at /sessions/<id>; an old link still finds its segment.
+    const oldSegment = /^\/sessions\/(\d+)$/.exec(path);
+    if (oldSegment) return respond(null, 301, "text/plain", { location: `/segments/${oldSegment[1]}${url.search}` });
+    // A segment or a whole conversation, named by its first turn (or any turn in it).
+    const span = /^\/(segments|conversations)\/(\d+)$/.exec(path);
+    if (span) {
+      const out = (span[1] === "segments" ? segmentPage : conversationPage)(ctx, url.searchParams, Number(span[2]));
       return out ? htmlResponse(out) : notFound(ctx.who);
     }
     const turn = /^\/turns\/(\d+)$/.exec(path);

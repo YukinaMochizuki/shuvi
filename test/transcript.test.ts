@@ -9,8 +9,8 @@ import { runTurn } from "../src/agent/turn.ts";
 import { LiveRedaction, redactor } from "../src/secrets/redaction.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { defineCapability } from "../src/capabilities/types.ts";
-import { getChat } from "../src/store/events.ts";
-import { getPromptText, getTranscript, pruneTranscripts, stepsOf } from "../src/store/transcripts.ts";
+import { getChat, resetConversation } from "../src/store/events.ts";
+import { firstRecordedTurn, getPromptText, getTranscript, pruneTranscripts, stepsOf, transcriptAbsence } from "../src/store/transcripts.ts";
 import { claimTurn, getTurn } from "../src/store/turns.ts";
 import { buildConsoleFixture } from "./console-fixture.ts";
 import { memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./helpers.ts";
@@ -308,6 +308,63 @@ describe("the turn transcript", () => {
     const chat = getChat(db, ownerChatId(db))!;
     expect(sent).toBe(buildSystemPrompt(home, chat, { name: "Owner" }, enabledCapabilities(CAPS)));
     expect(getPromptText(db, getTranscript(db, turn.id)!.promptHash!)!.text).toBe(sent);
+  });
+});
+
+describe("which conversation a turn ran in", () => {
+  test("each turn records its backend session and how it opened: first, resumed, then new after a reset; a compaction is a step", async () => {
+    const db = memDb();
+    const home = mkdtempSync(join(tmpdir(), "shuvi-home-"));
+    const run = async (text: string, script: Step[] = [{ token: "ok" }]) => {
+      ownerSays(db, text);
+      const t = claimTurn(db, ownerChatId(db))!;
+      await runTurn({ db, turnId: t.id, home, timeZone: "UTC", capabilities: enabledCapabilities(CAPS), makeAdapter: (b) => new ScriptedAdapter(b, script) });
+      return getTurn(db, t.id)!;
+    };
+    const a = await run("hello");
+    expect([a.opening, a.backendSessionId]).toEqual(["first", "fake-session"]);
+    const b = await run("again", [{ token: "thinking it over", thinking: true }, { compaction: { trigger: "auto", tokensBefore: 150_000, tokensAfter: 9_000 } }, { token: "ok" }]);
+    expect([b.opening, b.backendSessionId]).toEqual(["resumed", "fake-session"]);
+    expect(stepsOf(db, b.id).map((s) => [s.kind, s.name, s.tokensBefore, s.tokensAfter])).toEqual([
+      ["thinking", null, null, null],
+      ["compaction", "auto", 150_000, 9_000],
+      ["text", null, null, null],
+    ]);
+    resetConversation(db, ownerChatId(db)); // what /new does
+    const c = await run("fresh start");
+    expect(c.opening).toBe("new");
+  });
+});
+
+describe("why a turn has no transcript", () => {
+  test("the first recorded turn is noted with the first transcript; earlier turns ran before, later ones were pruned or missing", async () => {
+    const db = memDb();
+    const home = mkdtempSync(join(tmpdir(), "shuvi-home-"));
+    const run = async (text: string) => {
+      ownerSays(db, text);
+      const t = claimTurn(db, ownerChatId(db))!;
+      await runTurn({ db, turnId: t.id, home, timeZone: "UTC", capabilities: enabledCapabilities(CAPS), makeAdapter: (b) => new ScriptedAdapter(b, [{ token: "ok" }]) });
+      return t.id;
+    };
+    // A turn from before recording: it has no transcript (as if the console were not deployed yet).
+    const before = await run("old");
+    db.$client.exec("delete from turn_steps; delete from turn_transcripts; delete from prompt_texts; delete from kv where key = 'transcripts.first_turn'");
+    const first = await run("first recorded");
+    expect(firstRecordedTurn(db)?.id).toBe(first);
+    expect(getTranscript(db, first)).toBeTruthy(); // recorded, and the marker written in the same transaction
+    const later = await run("later");
+    expect(transcriptAbsence(db, getTurn(db, before)!, 30)).toEqual({ why: "before", first: { id: first, startedAt: getTurn(db, first)!.startedAt } });
+    db.$client.query("delete from turn_transcripts where turn_id = ?").run(later);
+    expect(transcriptAbsence(db, getTurn(db, later)!, 30)).toEqual({ why: "missing" });
+    db.$client.query("update turns set ended_at = '2020-01-01T00:00:00.000Z' where id = ?").run(later);
+    expect(transcriptAbsence(db, getTurn(db, later)!, 30)).toEqual({ why: "pruned", days: 30 });
+  });
+
+  test("a store recorded before the marker existed gets it from its oldest transcript at the first pruning", async () => {
+    const f = await buildConsoleFixture();
+    f.db.$client.exec("delete from kv where key = 'transcripts.first_turn'");
+    pruneTranscripts(f.db, "2000-01-01T00:00:00.000Z"); // prunes nothing, notes the marker
+    expect((f.db.$client.query("select value from kv where key = 'transcripts.first_turn'").get() as { value: string }).value).toBe(String(f.turns.done));
   });
 });
 
