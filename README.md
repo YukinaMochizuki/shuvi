@@ -111,10 +111,11 @@ After changing `src/store/schema.ts`, regenerate the database migration with `bu
 memory as markdown, and `policy.yaml`) and `media/` (the photos and stickers it was sent, by `file_unique_id`;
 `media/transcript/` holds the other images turn transcripts refer to, pruned with them). All of it is
 private: it lives outside this repository and is never committed or pushed. OpenAI-compatible conversation
-history, including tool results and images, is stored in `shuvi.db` and included in its backups. Abandoned
-histories are pruned after `SHUVI_TRANSCRIPT_DAYS` (default 30) from their last write; active sessions and
-sessions used by running turns are preserved. Resetting a conversation with `/new` leaves its previous
-OpenAI-compatible history until retention expires. Pruning the live database does not remove copies from
+history is stored in `shuvi.db` in `conversations` and `conversation_messages`, with each message
+(including tool results and base64 images) in its own row, and included in database backups. The server
+applies the table migration at startup. Abandoned histories are pruned after `SHUVI_TRANSCRIPT_DAYS`
+(default 30) from their last write; active sessions and sessions used by running turns are preserved.
+Resetting a conversation with `/new` leaves its previous OpenAI-compatible history until retention expires. Pruning the live database does not remove copies from
 existing backups; those follow the snapshot rotation below. Claude Code keeps its own session files,
 including copies of images a turn is shown.
 

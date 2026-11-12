@@ -1,5 +1,6 @@
 import { and, inArray, sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import type { ModelMessage } from "agent-runtime/openai-compat";
 
 /**
  * The store. One SQLite file, shared by the server and every runner child (WAL, so a child writing its
@@ -15,9 +16,9 @@ import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqli
  *     (one `scheduled` per firing), `inbound:<source>:<key>` (an inbound POST retried with the same
  *     Idempotency-Key).
  *
- * `kv` also holds OpenAI-compatible model histories (`conversation:<session>`), including image data, and
- * their last-write retention timestamps (`conversation_retention:<session>`). The server prunes abandoned
- * histories with the same retention window as turn transcripts; active chat and running-turn sessions stay.
+ * OpenAI-compatible histories live in `conversations` and `conversation_messages`, one JSON model message
+ * per row. The server prunes abandoned histories with the same retention window as turn transcripts; active
+ * chat and running-turn histories stay.
  */
 
 export const chats = sqliteTable("chats", {
@@ -33,6 +34,35 @@ export const chats = sqliteTable("chats", {
   contextTokens: integer("context_tokens"),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
+
+/** Durable model histories, scoped to the chat that created them and aged by their latest write. */
+export const conversations = sqliteTable(
+  "conversations",
+  {
+    id: text("id").primaryKey(),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id),
+    generation: integer("generation").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+    writtenAt: text("written_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [index("conversations_written_at").on(t.writtenAt)],
+);
+
+/** One model message per row; compaction advances the conversation generation. */
+export const conversationMessages = sqliteTable(
+  "conversation_messages",
+  {
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    generation: integer("generation").notNull(),
+    seq: integer("seq").notNull(),
+    message: text("message", { mode: "json" }).notNull().$type<ModelMessage>(),
+  },
+  (t) => [primaryKey({ columns: [t.conversationId, t.generation, t.seq] })],
+);
 
 export const EVENT_KINDS = [
   /** Someone wrote in the chat (text, or a placeholder for what this slice cannot read yet). */

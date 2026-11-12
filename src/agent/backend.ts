@@ -39,7 +39,7 @@ export function openAICompatBackend(db: Db, config: Config, chatId: number, boun
     provider: { name: "openai-compat", baseURL: settings.baseURL, ...(settings.apiKey ? { apiKey: settings.apiKey } : {}) },
     defaultModel: model,
     boundary,
-    store: conversationStore(db),
+    store: conversationStore(db, chatId),
     vision: settings.vision,
     compaction: { contextWindow: settings.contextWindow },
     onCompaction: (report) => {

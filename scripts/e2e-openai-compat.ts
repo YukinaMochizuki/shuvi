@@ -318,9 +318,10 @@ await until("group visibility turn completion", idle);
 
 // 4. A preexisting Claude backend session id is not sent as OpenAI conversation history.
 const legacySession = "claude-session-from-previous-backend";
-db.$client.query("insert into kv (key, value) values (?, ?) on conflict(key) do update set value = excluded.value").run(
-  `conversation:${legacySession}`,
-  JSON.stringify([{ role: "user", content: "LEGACY CLAUDE CONVERSATION MARKER" }]),
+db.$client.query("insert into conversations (id, chat_id) select ?, id from chats where tg_chat_id = ?").run(legacySession, OWNER);
+db.$client.query("insert into conversation_messages (conversation_id, generation, seq, message) values (?, 0, 0, ?)").run(
+  legacySession,
+  JSON.stringify({ role: "user", content: "LEGACY CLAUDE CONVERSATION MARKER" }),
 );
 db.$client.query("update chats set backend_session_id = ? where tg_chat_id = ?").run(legacySession, OWNER);
 before = texts().length;
@@ -346,7 +347,7 @@ const changedModelTurn = db.$client.query("select opening, backend_session_id fr
 check(changedModelTurn.opening === "changed" && changedModelTurn.backend_session_id !== previousSession, "changing model starts a separate conversation");
 check(requests.at(-1)?.model === env.SHUVI_MODEL && !requests.at(-1)?.messages.some((m) => m.role === "tool"), "the configured model receives recent chat context without the previous tool history");
 
-db.$client.query("delete from kv where key = ?").run(`conversation:${changedModelTurn.backend_session_id}`);
+db.$client.query("delete from conversations where id = ?").run(changedModelTurn.backend_session_id);
 before = texts().length;
 push(dmUpdate(update++, "lost history check"));
 await until("missing history response", () => texts().length > before);
