@@ -252,6 +252,11 @@ export function getEvent(db: Db, seq: number): ChatEvent | undefined {
   return db.select().from(chatEvents).where(eq(chatEvents.seq, seq)).get();
 }
 
+/** The inbound event recorded for Telegram update `updateId`. */
+export function eventOfUpdate(db: Db, updateId: number): ChatEvent | undefined {
+  return db.select().from(chatEvents).where(eq(chatEvents.tgUpdateId, updateId)).get();
+}
+
 /**
  * The last `limit` things said in the chat at or before `atOrBefore`, by anyone, oldest first: what a
  * fresh conversation is shown so it knows what was just being talked about. Outbound messages count only

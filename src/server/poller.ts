@@ -4,7 +4,7 @@ import { entryToDoc, proposedGroupEntry, type Policy } from "../policy/policy.ts
 import { requestPolicyChange } from "../policy/write.ts";
 import { raiseAlert } from "../store/control.ts";
 import type { Db } from "../store/db.ts";
-import { ensureChat, kvGet, kvSet, recordInbound, type Speaker } from "../store/events.ts";
+import { ensureChat, eventOfUpdate, kvGet, kvSet, recordInbound, type ChatEvent, type Speaker } from "../store/events.ts";
 import { classify } from "../telegram/inbound.ts";
 import { IMMEDIATE } from "../store/turns.ts";
 
@@ -30,6 +30,11 @@ export interface InboundContext {
   policy?: Policy;
   /** For the diff on the unknown-group card. */
   home?: string;
+  /**
+   * Called with the events a batch newly recorded, once its transaction has committed (and before the poller
+   * yields, so before the waker can start a turn for them): the capabilities' inbound hooks (main.ts).
+   */
+  onRecorded?: (events: ChatEvent[]) => void;
 }
 
 const who = (s: Speaker) => `${s.name}${s.username ? ` (@${s.username})` : ""}, user id ${s.id}`;
@@ -75,6 +80,7 @@ export function recordBatch(db: Db, updates: Update[], ownerId: number, ctx: Inb
   let recorded = 0;
   let ignored = 0;
   if (!updates.length) return { recorded, ignored };
+  const fresh: ChatEvent[] = [];
   db.transaction((tx) => {
     const tdb = tx as unknown as Db;
     for (const u of updates) {
@@ -86,11 +92,22 @@ export function recordBatch(db: Db, updates: Update[], ownerId: number, ctx: Inb
       }
       const chat = ensureChat(tdb, c.chat.type === "private" ? { id: c.chat.id, kind: "private" } : { id: c.chat.id, kind: "group", title: c.chat.title });
       const base = { chatId: chat.id, tgUpdateId: u.update_id, tgMessageId: c.tgMessageId };
-      const fresh = c.kind === "command" ? recordInbound(tdb, { ...base, kind: "command", payload: c.payload }) : recordInbound(tdb, { ...base, kind: "message", payload: c.payload });
-      if (fresh) recorded++;
+      const isNew = c.kind === "command" ? recordInbound(tdb, { ...base, kind: "command", payload: c.payload }) : recordInbound(tdb, { ...base, kind: "message", payload: c.payload });
+      if (isNew) {
+        recorded++;
+        const e = ctx.onRecorded && eventOfUpdate(tdb, u.update_id);
+        if (e) fresh.push(e);
+      }
     }
     kvSet(tdb, OFFSET_KEY, String(updates.at(-1)!.update_id + 1));
   }, IMMEDIATE);
+  if (fresh.length) {
+    try {
+      ctx.onRecorded?.(fresh);
+    } catch (e) {
+      console.error(`poller: inbound hooks failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   return { recorded, ignored };
 }
 

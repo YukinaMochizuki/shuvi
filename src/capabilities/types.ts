@@ -1,8 +1,8 @@
 import type { ToolBundle, ToolContent } from "agent-runtime";
 import type { TurnState } from "../agent/turn.ts";
-import type { ChatPolicy, Policy, ToolParams } from "../policy/policy.ts";
+import { resolveChat, type ChatPolicy, type Policy, type ToolParams } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
-import type { Chat, ChatEvent } from "../store/events.ts";
+import { getChat, type Chat, type ChatEvent } from "../store/events.ts";
 import type { JobKind } from "../store/jobs.ts";
 import type { TelegramFiles } from "../telegram/files.ts";
 
@@ -27,6 +27,12 @@ import type { TelegramFiles } from "../telegram/files.ts";
  *     owner himself is in the turn so far (agent/turn.ts `ownerAuthority`). A capability
  *     does not check authority itself, and does not hide its tools to get the same effect.
  *   - Its prompt `section` only reads (PromptContext): building the prompt never changes anything.
+ *   - A tool that acts for the owner only in SOME calls (video_sheet on a file of the computer, but not on a
+ *     link) names the calls in `ownerOnlyWhen`; the boundary decides those the same way. A refusal can say
+ *     why and what to offer instead (`ownerOnlyNote`), in words the model can pass on.
+ *   - Its `inbound` hook (the server's, for each new message in a chat whose policy enables it) only starts
+ *     work and returns: it never delays recording or the turn.
+ *   - A credential it holds (`secrets`) is redacted from turn transcripts like the secret profiles' values.
  *
  * PER-CHAT POLICY (home/policy.yaml, src/policy/, design §8) sits in front of all this: a turn uses only
  * the capabilities its chat's policy enables (`chatCapabilities`), so only those give it tools, prompt
@@ -87,6 +93,17 @@ export interface ServerContext {
   signal: AbortSignal;
   /** Every enabled capability's job kinds (`jobKinds`), filled by `capabilityLoops`. */
   jobKinds?: readonly JobKind[];
+}
+
+/** What a capability's `perceive` may read besides the event: the store (read only). */
+export interface PerceiveContext {
+  db?: Db;
+}
+
+/** What the server hands a capability's `inbound` hook. No Telegram API, as for a loop. */
+export interface InboundHookContext {
+  db: Db;
+  ownerId: number;
 }
 
 /**
@@ -154,8 +171,23 @@ export interface Capability<C = unknown> {
    * a short wait: a held event is then shown as it is.
    */
   holds?(event: ChatEvent, now: number, config: C): boolean;
-  /** What the model is shown of `event` beyond its text line (an image), in a turn's input or an append. */
-  perceive?(event: ChatEvent, config: C): ToolContent[];
+  /**
+   * What the model is shown of `event` beyond its text line (an image, a note), in a turn's input or an
+   * append. It only reads: `ctx.db` is there to read what the server recorded about the event.
+   */
+  perceive?(event: ChatEvent, config: C, ctx: PerceiveContext): ToolContent[];
+  /**
+   * The server's hook for each NEW inbound message or command, right after it is recorded and before any
+   * turn for it can start, in chats whose policy enables this capability. It may write rows (synchronously,
+   * so a turn rendered after it sees them) and start async work, which it must not await: it returns at
+   * once. A throw is logged and ignored.
+   */
+  inbound?(event: ChatEvent, ctx: InboundHookContext, config: C): void;
+  /**
+   * Credentials this capability holds (a service token), by a label: redacted from turn transcripts as
+   * `[REDACTED:<label>]`, like the secret profiles' values.
+   */
+  secrets?(config: C): Record<string, string>;
   /** The kinds of job it starts (store/jobs.ts): how the jobs watcher polls them. */
   jobKinds?(config: C): JobKind[];
   /**
@@ -163,6 +195,16 @@ export interface Capability<C = unknown> {
    * owner himself is in the turn (agent/turn.ts `ownerAuthority`).
    */
   ownerOnly?: readonly string[];
+  /**
+   * Tools that act for the owner only in some calls, with which: `video_sheet: (a) => a.path !== undefined`.
+   * Decided by the same boundary, at call time, from the call's arguments.
+   */
+  ownerOnlyWhen?: Readonly<Record<string, (args: Record<string, unknown>) => boolean>>;
+  /**
+   * For an owner-only tool (or call), what a refusal adds: why only the owner may ask, and what can be done
+   * instead, in a sentence the model can relay. Absent: the boundary's general advice.
+   */
+  ownerOnlyNote?: Readonly<Record<string, string>>;
 }
 
 /** A capability that is on in this process, with the configuration it read. */
@@ -229,14 +271,71 @@ export function capabilityOwnerOnly(enabled: readonly EnabledCapability[]): Set<
   return new Set(enabled.flatMap(({ capability }) => capability.ownerOnly ?? []));
 }
 
+/** The tools owner-only in some calls (`ownerOnlyWhen`), with the test saying which. */
+export function capabilityOwnerOnlyWhen(enabled: readonly EnabledCapability[]): Map<string, (args: Record<string, unknown>) => boolean> {
+  return new Map(enabled.flatMap(({ capability }) => Object.entries(capability.ownerOnlyWhen ?? {})));
+}
+
+/** What a refusal of each owner-only tool adds (`ownerOnlyNote`). */
+export function capabilityOwnerOnlyNotes(enabled: readonly EnabledCapability[]): Map<string, string> {
+  return new Map(enabled.flatMap(({ capability }) => Object.entries(capability.ownerOnlyNote ?? {})));
+}
+
+/** Every enabled capability's credentials (`secrets`), value → label, for the transcript's redaction. */
+export function capabilitySecrets(enabled: readonly EnabledCapability[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const { capability, config } of enabled) for (const [label, value] of Object.entries(capability.secrets?.(config) ?? {})) if (value) out.set(value, label);
+  return out;
+}
+
+/** `redact`, then every capability credential replaced by `[REDACTED:<label>]` (raw, and as JSON escapes it). */
+export function withCapabilitySecrets(redact: (s: string) => string, enabled: readonly EnabledCapability[]): (s: string) => string {
+  const pairs = [...capabilitySecrets(enabled)].flatMap(([v, l]) => {
+    const json = JSON.stringify(v).slice(1, -1);
+    return json === v ? [[v, l] as const] : [[v, l] as const, [json, l] as const];
+  });
+  if (!pairs.length) return redact;
+  return (s) => {
+    let out = redact(s);
+    for (const [v, l] of pairs) if (out.includes(v)) out = out.split(v).join(`[REDACTED:${l}]`);
+    return out;
+  };
+}
+
+/**
+ * The server's inbound hooks for newly recorded events: each event goes to the `inbound` of every capability
+ * its chat's policy enables (a chat policy no longer lists: none). A hook that throws is logged; the rest run.
+ */
+export function capabilityInbound(enabled: readonly EnabledCapability[], events: readonly ChatEvent[], policy: Policy, ctx: InboundHookContext): void {
+  if (!enabled.some(({ capability }) => capability.inbound)) return;
+  for (const event of events) {
+    const chat = getChat(ctx.db, event.chatId);
+    const chatPolicy = chat ? resolveChat(policy, chat, ctx.ownerId) : null;
+    if (!chatPolicy) continue;
+    for (const { capability, config } of chatCapabilities(enabled, chatPolicy.tools)) {
+      if (!capability.inbound) continue;
+      try {
+        capability.inbound(event, ctx, config);
+      } catch (e) {
+        console.error(`${capability.id}: inbound hook failed on #${event.seq}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+}
+
+/** Does this chat's policy enable capability `id`? (No policy at all: the default, every capability.) */
+export function policyEnables(chatPolicy: ChatPolicy | undefined, id: string): boolean {
+  return !chatPolicy || chatPolicy.tools === "all" || chatPolicy.tools[id] !== undefined;
+}
+
 /** Whether any enabled capability holds `event` back for now (see `Capability.holds`). */
 export function capabilityHolds(enabled: readonly EnabledCapability[], event: ChatEvent, now: number): boolean {
   return enabled.some(({ capability, config }) => capability.holds?.(event, now, config) ?? false);
 }
 
 /** Everything the enabled capabilities show of `event` beyond its text, in registry order. */
-export function capabilityPerception(enabled: readonly EnabledCapability[], event: ChatEvent): ToolContent[] {
-  return enabled.flatMap(({ capability, config }) => capability.perceive?.(event, config) ?? []);
+export function capabilityPerception(enabled: readonly EnabledCapability[], event: ChatEvent, ctx: PerceiveContext = {}): ToolContent[] {
+  return enabled.flatMap(({ capability, config }) => capability.perceive?.(event, config, ctx) ?? []);
 }
 
 export function capabilityJobKinds(enabled: readonly EnabledCapability[]): JobKind[] {

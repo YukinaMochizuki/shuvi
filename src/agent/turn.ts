@@ -1,6 +1,16 @@
 import { dirname } from "node:path";
 import type { BackendAdapter, Prompt, ToolBoundary } from "agent-runtime";
-import { capabilityHolds, capabilityOwnerOnly, capabilityPerception, capabilityTools, chatCapabilities, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
+import {
+  capabilityHolds,
+  capabilityOwnerOnly,
+  capabilityOwnerOnlyNotes,
+  capabilityOwnerOnlyWhen,
+  capabilityPerception,
+  capabilityTools,
+  chatCapabilities,
+  type EnabledCapability,
+  type OwnerInfo,
+} from "../capabilities/types.ts";
 import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
@@ -205,6 +215,20 @@ export function untilHeld(events: ChatEvent[], capabilities: readonly EnabledCap
 export interface TurnAuthority {
   ownerId?: number;
   ownerOnly: ReadonlySet<string>;
+  /** Tools owner-only in some calls, and which (capabilities/types.ts `ownerOnlyWhen`). */
+  ownerOnlyWhen?: ReadonlyMap<string, (args: Record<string, unknown>) => boolean>;
+  /** What a refusal of a tool adds: why, and what to offer instead (`ownerOnlyNote`). */
+  notes?: ReadonlyMap<string, string>;
+}
+
+/** The authority rules the enabled capabilities declare, for `ownerId`. */
+export function turnAuthority(capabilities: readonly EnabledCapability[], ownerId?: number): TurnAuthority {
+  return {
+    ...(ownerId !== undefined ? { ownerId } : {}),
+    ownerOnly: capabilityOwnerOnly(capabilities),
+    ownerOnlyWhen: capabilityOwnerOnlyWhen(capabilities),
+    notes: capabilityOwnerOnlyNotes(capabilities),
+  };
 }
 
 /**
@@ -268,15 +292,17 @@ export function turnBoundary(
   s: TurnState,
   timeZone: string,
   capabilities: readonly EnabledCapability[] = [],
-  authority: TurnAuthority = { ownerOnly: capabilityOwnerOnly(capabilities) },
+  authority: TurnAuthority = turnAuthority(capabilities),
 ): ToolBoundary {
-  const perceive: Perceive = (e) => capabilityPerception(capabilities, e);
+  const perceive: Perceive = (e) => capabilityPerception(capabilities, e, { db });
   return {
     refuse(call) {
       if (s.passed && call.name !== "pass") return "This turn has already passed. End it now; call no more tools.";
-      if (authority.ownerOnly.has(call.name)) {
+      const args = (call.args ?? {}) as Record<string, unknown>;
+      if (authority.ownerOnly.has(call.name) || authority.ownerOnlyWhen?.get(call.name)?.(args)) {
         const why = ownerAuthority(db, s.chat.id, s.fromSeq, s.toSeq, authority.ownerId);
-        if (why) return `Refused: \`${call.name}\` acts for the owner, and only the owner may ask for it; ${why}. Nothing was done. If someone asked for this, tell them only the owner can.`;
+        const note = authority.notes?.get(call.name) ?? "If someone asked for this, tell them only the owner can.";
+        if (why) return `Refused: \`${call.name}\` acts for the owner, and only the owner may ask for it; ${why}. Nothing was done. ${note}`;
       }
       return null;
     },
@@ -321,7 +347,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const group = chat.kind === "group";
 
   const unseen = untilHeld(triggersAfter(db, chat.id, turn.fromSeq), deps.capabilities, Date.now(), turn.toSeq);
-  const perceive: Perceive = (e) => capabilityPerception(capabilities, e);
+  const perceive: Perceive = (e) => capabilityPerception(capabilities, e, { db });
   // A fresh conversation (the first turn, or after `/new`) opens with the chat's last few exchanges, so
   // starting over forgets the model's context, not what was just being talked about.
   if (!unseen.length) {
@@ -367,7 +393,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     buf = "";
   };
 
-  const authority: TurnAuthority = { ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}), ownerOnly: capabilityOwnerOnly(capabilities) };
+  const authority = turnAuthority(capabilities, deps.ownerId);
   const adapter = deps.makeAdapter(
     recordingBoundary(turnBoundary(db, s, deps.timeZone, capabilities, authority), rec, () => s.toSeq, (seq) => triggersAfter(db, chat.id, seq)[0]?.seq),
   );

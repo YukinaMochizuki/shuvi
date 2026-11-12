@@ -3,7 +3,8 @@
  * The shuvi server: the always-on process (docs/design.md §2). It owns the conversation with Telegram
  * and decides when to think; it never thinks itself. Its loops:
  *
- *   poller    long-poll Telegram, record updates, advance the offset (poller.ts)
+ *   poller    long-poll Telegram, record updates, advance the offset (poller.ts); then hand the new events
+ *             to the capabilities' inbound hooks (a media prewarm), before any turn for them can start
  *   waker     reap dead turns, start a turn where one is due (waker.ts)
  *   commands  /stop, /new (commands.ts)
  *   sender    deliver what turns queued (sender.ts)
@@ -32,12 +33,12 @@ import { backupPass } from "../control/backup.ts";
 import { checkConsole, consoleOn, startConsole } from "../console/index.ts";
 import { CONTROL_COMMANDS, controlPollOnce, controlSendPass, deployedCommit, outboundAlertPass } from "../control/bot.ts";
 import { enabledCapabilities } from "../capabilities/index.ts";
-import { capabilityLoops } from "../capabilities/types.ts";
+import { capabilityInbound, capabilityLoops } from "../capabilities/types.ts";
 import { loadConfig } from "../env.ts";
 import { PolicyWatch } from "../policy/load.ts";
 import { applyPolicyApprovals } from "../policy/write.ts";
 import { openDb } from "../store/db.ts";
-import { getChat } from "../store/events.ts";
+import { getChat, type ChatEvent } from "../store/events.ts";
 import { pruneTranscripts } from "../store/transcripts.ts";
 import { runningTurns } from "../store/turns.ts";
 import { telegramFiles } from "../telegram/files.ts";
@@ -70,7 +71,8 @@ const stop = new AbortController();
 const loop = (name: string, body: () => Promise<number | void>, everyMs: number) => runLoop(name, body, everyMs, stop.signal);
 
 // The poller's own long poll is its wait; it loops straight back.
-void loop("poller", async () => void (await pollOnce(db, api, cfg.ownerId, () => ({ botUsername: me.username, policy: policies.current(), home: cfg.home }), 25, stop.signal)), 0);
+const onRecorded = (events: ChatEvent[]) => capabilityInbound(capabilities, events, policies.current(), { db, ownerId: cfg.ownerId });
+void loop("poller", async () => void (await pollOnce(db, api, cfg.ownerId, () => ({ botUsername: me.username, policy: policies.current(), home: cfg.home, onRecorded }), 25, stop.signal)), 0);
 void loop(
   "waker",
   async () => {
