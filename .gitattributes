@@ -1,0 +1,2 @@
+# Prompt snapshots are compared byte-for-byte.
+test/fixtures/owner-dm-prompt.*.txt text eol=lf
