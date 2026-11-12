@@ -428,8 +428,8 @@ belongs to the chat:
 - **One computer, three ways to run**, following workstream's box tools: `exec(cmd)` (synchronous,
   time-limited), `exec(cmd, background: true)` (asynchronous; the result returns to the chat as an
   event), and `boost: { cpu, memory }` (on a larger short-lived copy with the same home). Framework media
-  tools (evenly spaced frames) are prepared `exec` calls. Transcription is not one: it is to come from a
-  shared platform service (§11), which the computer does not install.
+  tools (`video_sheet`: contact sheets with each frame's time) are prepared `exec` calls. Transcription
+  is not one: it is to come from a shared platform service (§11), which the computer does not install.
 - **Visibility follows §6**: the owner's DM may read other chats' homes; a group sees only its own. Only
   a turn the owner triggered gets `exec`.
 

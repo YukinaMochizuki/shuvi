@@ -29,7 +29,10 @@ import { MachineExecRequestSchema, MachineExecResponseSchema } from "../src/capa
  *
  * `failNext(method, code)` makes the next call of a method fail with a Connect error (e.g.
  * resource_exhausted). `shims` puts stand-in `ffmpeg` / `ffprobe` and `apt-get` on the commands' PATH, so
- * the media tools' scripts and an apply of ~/.computer.yaml run without the real tools. The `apt-get` stand-in
+ * the media tools' scripts and an apply of ~/.computer.yaml run without the real tools; with
+ * `{ realMedia: true }` the real ffmpeg and ffprobe on this machine's PATH are used instead (the e2e's
+ * video_sheet step, on a generated video). The `ffprobe` stand-in describes a 12 s 640x360 video; the `ffmpeg`
+ * one writes a tiny JPEG to its last argument (and finds no scene changes). The `apt-get` stand-in
  * "downloads" a package (prints `Get: <pkg>`) only when its .deb is not in the archives directory it is given
  * (`-o Dir::Cache::Archives=`), "installs" it into the root disk (`<rootfs>/installed/<pkg>`), and fails like
  * apt for a package whose name starts with `fake-missing`.
@@ -72,8 +75,8 @@ export class FakeHangar {
   private server: ReturnType<typeof Bun.serve<ExecData, never>>;
   private shimDir: string;
 
-  constructor() {
-    this.shimDir = this.makeShims();
+  constructor(opts: { realMedia?: boolean } = {}) {
+    this.shimDir = this.makeShims(!opts.realMedia);
     this.server = Bun.serve<ExecData, never>({
       port: 0,
       fetch: async (req, server) => {
@@ -314,16 +317,18 @@ export class FakeHangar {
 
   // ---- stand-ins for the media tools --------------------------------------------------------------
 
-  private makeShims(): string {
+  private makeShims(media: boolean): string {
     const dir = join(this.root, "shims");
     mkdirSync(dir, { recursive: true });
     const sh = (name: string, body: string) => {
       writeFileSync(join(dir, name), `#!/bin/bash\n${body}\n`);
       chmodSync(join(dir, name), 0o755);
     };
-    sh("ffprobe", 'echo "12.000000"');
-    // The last argument is the output file: write a tiny JPEG there.
-    sh("ffmpeg", 'out="${@: -1}"; printf "\\xff\\xd8\\xff\\xe0fakejpeg\\xff\\xd9" > "$out"');
+    if (media) {
+      sh("ffprobe", 'printf "width=640\\nheight=360\\nsample_aspect_ratio=1:1\\nduration=12.000000\\n"');
+      // The last argument is the output file: write a tiny JPEG there ("-" is a scene search's null output).
+      sh("ffmpeg", 'out="${@: -1}"; [ "$out" = - ] && exit 0; printf "\\xff\\xd8\\xff\\xe0fakejpeg\\xff\\xd9" > "$out"');
+    }
     sh(
       "apt-get",
       [

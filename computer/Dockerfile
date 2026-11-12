@@ -23,14 +23,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # The tools the assistant's prompt names (python3 and pip, node and npm, ffmpeg, git, curl, jq, sqlite3),
 # plus what the framework's own scripts use: bash, coreutils (timeout, stat, base64), util-linux (setsid
 # for background jobs, flock for applying ~/.computer.yaml), time (GNU time: a job's peak memory and
-# CPU), ca-certificates; and procps, so `ps` can show what runs.
+# CPU), ca-certificates; and procps, so `ps` can show what runs. fonts-dejavu-core is the font video_sheet
+# labels its frames with (ffmpeg's drawtext); ffmpeg's fontconfig already pulls it in, named so it stays.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash ca-certificates coreutils util-linux procps time \
       curl git jq sqlite3 \
       python3 python3-pip python3-venv \
       nodejs npm \
-      ffmpeg \
+      ffmpeg fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
 
 # The user every exec runs as, whose home the chat's disk is mounted over.

@@ -15,6 +15,9 @@
  *      in home, then setup) and records its hash on the root disk
  *   5. the idle computer is stopped (an apply of STOPPED, never a delete)
  *   6. the next command starts it again, and the file, its hash matching, is not applied again
+ *   7. video_sheet in the background, with the real ffmpeg on a generated 40 s testsrc video: the job's
+ *      result carries the index (two 4x4 sheets, every 2 s), and the job_done turn gets both sheets as
+ *      images (skipped, saying so, where ffmpeg is not installed)
  *
  *   bun scripts/e2e-computer.ts
  */
@@ -43,6 +46,8 @@ async function until(what: string, cond: () => boolean, ms = 60_000): Promise<vo
 }
 
 const SECRET = "fake-e2e-secret-value-0123456789";
+const HAS_FFMPEG = Bun.spawnSync(["sh", "-c", "command -v ffmpeg && command -v ffprobe"]).exitCode === 0;
+let videoStep = false;
 
 // ---- fake Anthropic: answers by what the newest user message holds -----------------------------------
 const ev = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`;
@@ -77,7 +82,9 @@ const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
   [/run something on your computer/, () => use("exec", { command: "echo computer-says-$((6*7)); whoami >/dev/null" })],
   [/exit 0 · [^"]*computer-says-42/, () => say("The computer says 42.")],
   [/start the long job/, () => use("exec", { command: "sleep 2; echo bg-finished", background: true, expect_seconds: 10 })],
-  [/Started job \d+ in the background/, () => say("Started it in the background.")],
+  [/sheet the test video/, () => use("video_sheet", { path: "~/inbox/test.mp4", every: 2 })],
+  [/Started job \d+ in the background/, () => say(videoStep ? "Sheeting it in the background." : "Started it in the background.")],
+  [/· ⚙ job \d+ · computer · done\] asked: \\"video_sheet [^\n]*20 frame\(s\), every 2s, on 2 sheet\(s\) of 4x4:/, (t) => say(`I saw ${t.split('"type":"image"').length - 1} sheet(s).`)],
   [/· ⚙ job \d+ · computer · done\] asked: [^\n]*\\n  exit 0 · ran [^"]*bg-finished/, () => say("The job finished: bg-finished.")],
   [/deploy with modal/, () => use("exec", { command: 'echo "token=[$MODAL_TOKEN]"' })],
   [/token=\[\[REDACTED:modal\]\]/, () => say("Deployed; the token stayed hidden.")],
@@ -114,7 +121,7 @@ const anthropic = Bun.serve({
 // ---- the world ---------------------------------------------------------------------------------------
 const tg = new FakeTelegram();
 const control = new FakeTelegram();
-const hangar = new FakeHangar();
+const hangar = new FakeHangar({ realMedia: HAS_FFMPEG });
 const dataDir = mkdtempSync(join(tmpdir(), "shuvi-e2e-computer-"));
 mkdirSync(join(dataDir, "home"), { recursive: true });
 const secretsFile = join(mkdtempSync(join(tmpdir(), "shuvi-e2e-secrets-")), "shuvi.secrets.yaml");
@@ -231,6 +238,29 @@ await replied("Back after the restart.", "the next command started the computer 
 check(hangar.applies().at(-1) === "shuvi-1001 RUNNING 2/2Gi", "it was started again");
 check(rootRuns() === 1, "~/.computer.yaml, unchanged on the same root disk, was not applied again");
 await until("the turn to close", turnsIdle);
+
+// ---- 7. video_sheet, with the real ffmpeg ------------------------------------------------------------
+if (!HAS_FFMPEG) {
+  log("SKIP 7. video_sheet: no ffmpeg/ffprobe on this machine (install ffmpeg to run it)");
+} else {
+  const inbox = join(hangar.home("shuvi-1001"), "inbox");
+  mkdirSync(inbox, { recursive: true });
+  const gen = Bun.spawnSync(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=d=40:s=640x360:r=25", "-pix_fmt", "yuv420p", join(inbox, "test.mp4")], { stderr: "pipe" });
+  check(gen.exitCode === 0, `a 40 s test video was generated${gen.exitCode ? `: ${gen.stderr.toString()}` : ""}`);
+  videoStep = true;
+  tg.updates.push(dmUpdate(6, "sheet the test video"));
+  await replied("Sheeting it in the background.", "video_sheet started a background job and the turn ended");
+  await replied("I saw 2 sheet(s).", "the job's end came back with its index, and the turn got both sheets as images");
+  const sheetJob = db.$client.query("select state, title, result from jobs where kind = 'computer' order by id desc").get() as { state: string; title: string; result: string };
+  check(sheetJob.state === "done" && sheetJob.title === "video_sheet ~/inbox/test.mp4 (every 2s)", `the sheets job is done (${sheetJob.state}, ${sheetJob.title})`);
+  check(
+    sheetJob.result.includes("video: test.mp4 · 00:40 (40.0s) · 640x360") &&
+      sheetJob.result.includes("sheet-01.jpg: 00:00 00:02 00:04 00:06 00:08 00:10 00:12 00:14 00:16 00:18 00:20 00:22 00:24 00:26 00:28 00:30") &&
+      sheetJob.result.includes("sheet-02.jpg: 00:32 00:34 00:36 00:38"),
+    "its result is the index: duration, resolution, each sheet's times",
+  );
+  await until("the turn to close", turnsIdle);
+}
 
 log("PASS");
 cleanup();
