@@ -133,6 +133,10 @@ export class PorchkitError extends Error {
 export const UNAVAILABLE =
   "This video can't be had: it is behind a login (members-only, age-restricted or private), or removed or region-locked, and videos are only ever fetched anonymously, without anyone's account. Say so plainly rather than guessing at what it shows.";
 
+/** What the model is told when the site lists subtitles that cannot be read (502 `subs_unparsed`). */
+export const SUBS_UNPARSED =
+  "The site lists subtitles for this video, but they couldn't be read. Say so, without claiming the video has no subtitles, and look at it with video_sheet instead.";
+
 /** A wait, said the way a person would: "about 40 seconds", "about 3 minutes". */
 export function waitLabel(sec: number): string {
   const s = Math.max(1, Math.round(sec));
@@ -176,6 +180,9 @@ export function describe(e: unknown): string {
             : "that budget is used up for now";
       return `Not now: videos are fetched through the owner's home connection, which keeps a request budget for each site, and ${why}. It should free up in ${wait}. Tell whoever asked that it is busy right now and roughly how long, rather than trying again and again.`;
     }
+    case "subs_unparsed":
+      // A 502 too, but not a passing failure: the track is there and cannot be read (X's HLS subtitles).
+      return SUBS_UNPARSED;
     case "upstream_failed":
       return `The site (or the downloader) failed: ${detail} Trying again later may work.`;
     case "upstream_timeout":
