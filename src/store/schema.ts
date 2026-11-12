@@ -543,3 +543,36 @@ export const stickerLibrary = sqliteTable(
   },
   (t) => [uniqueIndex("sticker_library_pack_n").on(t.pack, t.n), index("sticker_library_file").on(t.file)],
 );
+
+/**
+ * Prewarms (src/capabilities/media/): a link to a known video host in an OWNER's message, probed through
+ * porchkit as soon as the message is recorded, alongside the turn being spawned. One row per link of a
+ * message (`seq`, `n`); the row keeps the link's hash (`url_hash`, the key a `video_probe` call joins by) and
+ * host, not the URL. `result` is the probe's answer as video_probe shows it (title, uploader, length,
+ * chapters, subtitle languages; media/text.ts `storedProbe`, no URL), kept FOR AN HOUR so a `video_probe` of
+ * the same link needs no second request; media's prune then drops it and the accounting stays. `used_turn_id`:
+ * the first turn that called `video_probe` with the link (the console's "prewarmed: used / unused").
+ */
+export const mediaPrewarms = sqliteTable(
+  "media_prewarms",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id),
+    seq: integer("seq").notNull(),
+    /** The link's place among the message's prewarmed links, from 1. */
+    n: integer("n").notNull(),
+    urlHash: text("url_hash").notNull(),
+    /** The link's host, for the console (`youtu.be`). */
+    host: text("host").notNull(),
+    startedAt: text("started_at").notNull(),
+    finishedAt: text("finished_at"),
+    /** ok, or porchkit's error code (`rate_limited`, `unavailable`, …), `unreachable`, `timeout`. Null while in flight. */
+    outcome: text("outcome"),
+    result: text("result", { mode: "json" }).$type<Record<string, unknown>>(),
+    usedTurnId: integer("used_turn_id"),
+    usedAt: text("used_at"),
+  },
+  (t) => [uniqueIndex("media_prewarms_seq_n").on(t.seq, t.n), index("media_prewarms_hash").on(t.chatId, t.urlHash)],
+);

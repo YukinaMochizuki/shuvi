@@ -1,4 +1,5 @@
 import { DEFAULT_SECRETS_FILE, dataDirFrom } from "../../env.ts";
+import { porchkitConfig } from "../../porchkit/client.ts";
 import type { Env } from "../types.ts";
 import type { HangarConfig } from "./hangar/client.ts";
 
@@ -43,6 +44,11 @@ export interface ComputerConfig {
   applyStepSec: number;
   /** How long a turn waits for a file someone sent to land in ~/inbox before showing it anyway. */
   inboxWaitMs: number;
+  /**
+   * porchkit is set up (SHUVI_PORCHKIT_URL / _TOKEN), so the media capability is on: in a chat whose policy
+   * enables it, `video_sheet` is media's (a link or a file), not this capability's (a file only).
+   */
+  mediaOn: boolean;
 }
 
 /** Where the chat's home is mounted, and whose it is, in the base image. */
@@ -83,6 +89,7 @@ export function computerConfig(env: Env): ComputerConfig | null {
     secretsFile: env.SHUVI_SECRETS_FILE || DEFAULT_SECRETS_FILE,
     applyStepSec: positive(env.SHUVI_COMPUTER_APPLY_STEP_SEC, 900),
     inboxWaitMs: positive(env.SHUVI_COMPUTER_INBOX_WAIT_SEC, 30) * 1000,
+    mediaOn: porchkitConfig(env) !== null,
   };
 }
 

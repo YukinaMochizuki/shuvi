@@ -135,6 +135,17 @@ export function outboundOf(db: Db, turnId: number): ChatEvent[] {
   return (db.$client.query(`select ${EVENT_COLUMNS} from chat_events where turn_id = ? order by seq`).all(turnId) as EventRow[]).map(eventRow);
 }
 
+/**
+ * The media prewarms of the messages a turn answered (its chat's, in (from, to]): how many, and how many a
+ * turn then used (`video_probe` of the same link). The console's "prewarmed: used / unused".
+ */
+export function turnPrewarms(db: Db, chatId: number, fromSeq: number, toSeq: number): { used: number; unused: number } {
+  const r = db.$client
+    .query(`select count(*) as n, count(used_turn_id) as used from media_prewarms where chat_id = ? and seq > ? and seq <= ?`)
+    .get(chatId, fromSeq, toSeq) as { n: number; used: number } | null;
+  return { used: r?.used ?? 0, unused: (r?.n ?? 0) - (r?.used ?? 0) };
+}
+
 /** One event by seq. */
 export function eventBySeq(db: Db, seq: number): ChatEvent | undefined {
   const r = db.$client.query(`select ${EVENT_COLUMNS} from chat_events where seq = ?`).get(seq) as EventRow | null;

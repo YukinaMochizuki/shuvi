@@ -71,6 +71,13 @@
       "when": 1794416665176,
       "tag": "0009_spicy_shriek",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794480021791,
+      "tag": "0010_late_machine_man",
+      "breakpoints": true
     }
   ]
 }
