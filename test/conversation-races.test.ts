@@ -26,7 +26,9 @@ const summary: ModelMessage[] = [{ role: "user", content: "summary one" }, { rol
 const append = `await store.append("session", ${JSON.stringify(appended)}); return "appended";`;
 const compact = `await store.compact("session", ${JSON.stringify(summary)}); return "compacted";`;
 const prune = `return pruneConversations(db, ${JSON.stringify(future)});`;
-const messagePause = "after insert on conversation_messages when new.seq = 1";
+// Pause on the second new row so an earlier batch row must still be invisible to readers.
+const appendPause = "after insert on conversation_messages when new.seq = 2";
+const compactPause = "after insert on conversation_messages when new.seq = 1";
 
 async function database() {
   const dir = mkdtempSync(join(tmpdir(), "shuvi-conversation-race-"));
@@ -140,7 +142,7 @@ for (const appendFirst of [true, false]) {
   test(`unprotected append/prune serializes with ${appendFirst ? "append" : "prune"} holding the lock first`, async () => {
     const world = await database();
     const before = world.db.$client.query("select * from conversations").all();
-    const { first, second } = await contend(world, appendFirst ? append : prune, appendFirst ? messagePause : "after delete on conversations", appendFirst ? prune : append);
+    const { first, second } = await contend(world, appendFirst ? append : prune, appendFirst ? appendPause : "after delete on conversations", appendFirst ? prune : append);
     expect(await world.store.load("session")).toEqual(original);
     expect(world.db.$client.query("select * from conversations").all()).toEqual(before);
     first.release("locked");
@@ -161,7 +163,7 @@ for (const appendFirst of [true, false]) {
 
   test(`compact/append serializes with ${appendFirst ? "append" : "compact"} holding the lock first`, async () => {
     const world = await database();
-    const { first, second } = await contend(world, appendFirst ? append : compact, messagePause, appendFirst ? compact : append);
+    const { first, second } = await contend(world, appendFirst ? append : compact, appendFirst ? appendPause : compactPause, appendFirst ? compact : append);
     expect(await world.store.load("session")).toEqual(original);
     expect(world.db.$client.query("select generation from conversations").get()).toEqual({ generation: 0 });
     first.release("locked");
