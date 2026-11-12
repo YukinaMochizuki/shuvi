@@ -84,7 +84,7 @@ describe("configuration", () => {
   test("every computer tool acts for the owner", () => {
     const t = setup();
     const owner = capabilityOwnerOnly(enabledCapabilities(t.env));
-    for (const name of ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "video_frames", "apply_computer_config"]) expect(owner.has(name)).toBe(true);
+    for (const name of ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "video_sheet", "apply_computer_config"]) expect(owner.has(name)).toBe(true);
     expect(owner.has("transcribe")).toBe(false);
     expect(COMPUTER).not.toMatch(/transcri|whisper/i);
   });
@@ -465,25 +465,38 @@ describe("files", () => {
 });
 
 describe("media tools", () => {
-  test("video_frames: synchronous frames come back as images; in the background they follow the job's result", async () => {
+  test("video_sheet: synchronous sheets come back as images with the index; in the background they follow the job's result", async () => {
     const t = setup();
     mkdirSync(join(t.fake.home("shuvi-1001"), "inbox"), { recursive: true });
     writeFileSync(join(t.fake.home("shuvi-1001"), "inbox", "clip.mp4"), "not really a video");
     ownerSays(t.db, "what happens in the clip?");
+    // The stand-in ffprobe describes a 12 s video: 24 frames every 0.5 s are two 4x4 sheets; 6 frames one.
     const a = await turn(t, [
-      { tool: "video_frames", args: { path: "~/inbox/clip.mp4", n: 3, background: false } },
-      { tool: "video_frames", args: { path: "~/inbox/clip.mp4", n: 2 } },
+      { tool: "video_sheet", args: { path: "~/inbox/clip.mp4", every: 0.5, background: false } },
+      { tool: "video_sheet", args: { path: "~/inbox/clip.mp4", count: 6, grid: "3x2" } },
+      { tool: "video_sheet", args: { path: "~/inbox/clip.mp4", every: 0.1, background: false } },
+      { tool: "video_sheet", args: { path: "~/inbox/clip.mp4", every: 2, count: 4 } },
     ]);
     const sync = a.toolResults[0]!.result.content;
-    expect(sync.filter((c) => c.type === "image")).toHaveLength(3);
+    expect(sync.filter((c) => c.type === "image")).toHaveLength(2);
+    expect(text(a, 0)).toContain("video: clip.mp4 · 00:12 (12.0s) · 640x360");
+    expect(text(a, 0)).toContain("24 frame(s), every 0.5s, on 2 sheet(s) of 4x4:");
+    expect(text(a, 0)).toContain("sheet-02.jpg: 00:08.0 00:08.5");
     expect(text(a, 1)).toMatch(/^Started job \d+/);
+    // Over the cap: the script refuses it with how to narrow it; two spacings are refused before anything runs.
+    expect(isErr(a, 2)).toBe(true);
+    expect(text(a, 2)).toContain("120 frames, more than 64. Use a larger every (at least 0.2s here)");
+    expect(isErr(a, 3)).toBe(true);
+    expect(text(a, 3)).toContain("Give one spacing, not every and count");
     const [job] = runningJobs(t.db);
+    expect(job!.title).toBe("video_sheet ~/inbox/clip.mp4 (6 frames, 3x2)");
     await untilDone(t, job!.id);
-    expect(getJob(t.db, job!.id)!.result).toContain("2 frame(s)");
+    const result = getJob(t.db, job!.id)!.result!;
+    expect(result).toContain("6 frame(s), spread evenly, on 1 sheet(s) of 3x2:\nsheet-01.jpg: 00:01 00:03 00:05 00:07 00:09 00:11\n1 sheet(s), shown after this line.");
     const b = await turn(t, [{ tool: "pass" }]);
     const parts = b.calls[0]!.prompt as { type: string }[];
     expect(Array.isArray(parts)).toBe(true);
-    expect(parts.filter((p) => p.type === "image")).toHaveLength(2);
+    expect(parts.filter((p) => p.type === "image")).toHaveLength(1);
   });
 });
 
@@ -578,7 +591,7 @@ describe("secrets, continued", () => {
     await grant(t);
     mkdirSync(join(t.fake.home("shuvi-1001"), "inbox"), { recursive: true });
     writeFileSync(join(t.fake.home("shuvi-1001"), "inbox", "clip.mp4"), "x");
-    await turn(t, [{ tool: "video_frames", args: { path: "~/inbox/clip.mp4", n: 1 } }]);
+    await turn(t, [{ tool: "video_sheet", args: { path: "~/inbox/clip.mp4", count: 1 } }]);
     const launches = t.fake.execs.filter((e) => e.command.join(" ").includes("setsid"));
     expect(launches).toHaveLength(1);
     expect(launches[0]!.env.MODAL_TOKEN).toBeUndefined();

@@ -256,7 +256,7 @@ export async function runSync(
 
 // ---- background jobs --------------------------------------------------------------------------------
 
-export type JobTool = "exec" | "video_frames";
+export type JobTool = "exec" | "video_sheet";
 
 export interface JobSpec {
   tool: JobTool;
@@ -265,8 +265,6 @@ export interface JobSpec {
   expectSeconds?: number;
   /** The boost it runs on, if any. */
   boost?: Size;
-  /** video_frames: how many frames. */
-  frames?: number;
   /** When it was started (ISO). */
   startedAt?: string;
 }
@@ -408,10 +406,10 @@ export const killScript = (jobId: number, extra = 0) =>
 export const statusScript = (jobId: number, extra = 0) =>
   `cd ~/.jobs 2>/dev/null || { echo "|0||"; exit 0; }; printf '%s|%s|%s|%s\\n' "$(cat ${jobId}.exit 2>/dev/null)" "$(stat -c %s ${jobId}.log 2>/dev/null || echo 0)" "$(tail -n 1 ${jobId}.usage 2>/dev/null)" "$([ -s ${jobId}.pgid ] && echo y)"; [ -f ${jobId}.exit ] && tail -c ${JOB_TAIL_BYTES + extra} ${jobId}.log 2>/dev/null; true`;
 
-/** Read frames a job left in ~/.jobs/<id>.frames (or `dir`) as `@@ name` lines, each followed by its base64. */
-export const framesScript = (dir: string) => `d=${dir}; for f in "$d"/*.jpg; do [ -f "$f" ] || continue; echo "@@ $(basename "$f")"; base64 -w0 "$f"; echo; done`;
+/** Read the sheets and the index a job left in ~/.jobs/<id>.sheets (or `dir`) as `@@ name` lines, each followed by its base64. */
+export const sheetsScript = (dir: string) => `d=${dir}; for f in "$d"/*.jpg "$d"/index.txt; do [ -f "$f" ] || continue; echo "@@ $(basename "$f")"; base64 -w0 "$f"; echo; done`;
 
-export function parseFrames(text: string): { name: string; data: string }[] {
+export function parseSheets(text: string): { name: string; data: string }[] {
   const out: { name: string; data: string }[] = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -421,13 +419,19 @@ export function parseFrames(text: string): { name: string; data: string }[] {
   return out;
 }
 
-/** Where a frames job's frames are kept for the model, by job id. */
-export const framesDir = (dataDir: string, jobId: number) => join(dataDir, "computer", "frames", String(jobId));
+/** Where a sheets job's sheets are kept for the model, by job id. */
+export const sheetsDir = (dataDir: string, jobId: number) => join(dataDir, "computer", "sheets", String(jobId));
+
+/** The index a sheets job (or call) printed, from its parsed files; "" without one. */
+export const sheetsIndex = (files: { name: string; data: string }[]) => {
+  const f = files.find((x) => x.name === "index.txt");
+  return f ? Buffer.from(f.data, "base64").toString("utf8").trimEnd() : "";
+};
 
 /**
  * The `computer` job kind: how the server's jobs watcher polls a background job. It reads the status
  * without starting the computer (a stopped computer means the job died with it), and on the job's end
- * returns its exit and log tail, redacted; a frames job's frames are copied into the data dir first. Past
+ * returns its exit and log tail, redacted; a sheets job's sheets are copied into the data dir first. Past
  * its deadline, a job still running is killed and reported as stopped.
  */
 export function computerJobKind(cfg: ComputerConfig, computersOf: (db: Db) => Computers): JobKind {
@@ -462,14 +466,16 @@ export function computerJobKind(cfg: ComputerConfig, computersOf: (db: Db) => Co
         if (exitStr) {
           const exit = Number.parseInt(exitStr, 10);
           let extra = "";
-          if (spec.tool === "video_frames" && exit === 0) {
-            const f = await sh(framesScript(`$HOME/.jobs/${job.id}.frames`));
-            const frames = parseFrames(Buffer.from(f.stdout).toString("utf8"));
-            const dir = framesDir(cfg.dataDir, job.id);
+          if (spec.tool === "video_sheet" && exit === 0) {
+            const f = await sh(sheetsScript(`$HOME/.jobs/${job.id}.sheets`));
+            const files = parseSheets(Buffer.from(f.stdout).toString("utf8"));
+            const sheets = files.filter((x) => x.name.endsWith(".jpg"));
+            const dir = sheetsDir(cfg.dataDir, job.id);
             rmSync(dir, { recursive: true, force: true });
             mkdirSync(dir, { recursive: true });
-            for (const fr of frames) writeFileSync(join(dir, fr.name), Buffer.from(fr.data, "base64"));
-            extra = `${frames.length} frame(s), shown after this line.`;
+            for (const s of sheets) writeFileSync(join(dir, s.name), Buffer.from(s.data, "base64"));
+            const index = sheetsIndex(files);
+            extra = `${index ? `${index}\n` : ""}${sheets.length} sheet(s), shown after this line.`;
           }
           return jobResult(job, Number.isFinite(exit) ? exit : 1, log, red, extra, parseUsage(usageStr ?? ""));
         }
