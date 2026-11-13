@@ -85,7 +85,7 @@ describe("runTurn after a switch", () => {
     enterChatModel(db, getChat(db, chatId)!);
     const first = claimTurn(db, chatId)!;
     finishTurn(db, first.id, { status: "done" });
-    expect(switchModel(db, chatId, "local/test-model", "lossless")).toEqual({ mode: "lossless", changed: true, from: "claude/opus", to: "local/test-model", carried: 2, compacted: false });
+    expect(switchModel(db, chatId, "local/test-model", "lossless")).toEqual({ mode: "lossless", changed: true, from: "claude/opus", to: "local/test-model", carried: 2, compacted: false, resumed: false });
     ownerSays(db, "now on the endpoint");
     let body = "";
     globalThis.fetch = (async (_url, init) => ((body = String(init?.body)), reply())) as typeof fetch;

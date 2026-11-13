@@ -78,8 +78,11 @@ function openAICompatDriver(o: DriverOptions): BackendAdapter {
   });
 }
 
-/** The key `<profile>.<VAR>` names in the secrets file. Throws, naming only the reference, when it is not there. */
-function providerKey(ref: string, file: string): string {
+/**
+ * The key `<profile>.<VAR>` names in the secrets file. Throws, naming only the reference, when it is not there.
+ * Also what the server's probes and `/models` listings send (server/probes.ts).
+ */
+export function providerKey(ref: string, file: string): string {
   const dot = ref.indexOf(".");
   const loaded = loadProfiles(file);
   if ("error" in loaded) throw new Error(`the key ${ref} cannot be read: ${loaded.error}`);

@@ -75,6 +75,12 @@ export const modelProviders = sqliteTable("model_providers", {
  * The models of a provider a chat may run on, by the provider's own id for it (`model`). `context_window`
  * and `vision` say what an OpenAI-compatible one can do (a Claude model's are the CLI's to know). At most one
  * row is the default, which chats without a model of their own run on.
+ *
+ * An OpenAI-compatible model's PROBE (server/probes.ts) is stored here too: `probe_status` is `checking` while
+ * one runs (one left `checking` by a restart runs again), then `ok` (a structured tool call came back),
+ * `text-instead` (it answered in text: without tools she cannot speak) or `failed` (`probe_error` says why).
+ * `probe_vision` is whether the last probe that tried saw a picture accepted (null: not known); it sets
+ * `vision` unless the owner set `vision` himself (`vision_set`).
  */
 export const models = sqliteTable(
   "models",
@@ -87,7 +93,15 @@ export const models = sqliteTable(
     label: text("label"),
     contextWindow: integer("context_window"),
     vision: integer("vision", { mode: "boolean" }).notNull().default(false),
+    /** The owner set `vision` himself: a probe no longer changes it. */
+    visionSet: integer("vision_set", { mode: "boolean" }).notNull().default(false),
     isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+    /** Null: never probed (a Claude model never is). */
+    probeStatus: text("probe_status", { enum: ["checking", "ok", "text-instead", "failed"] }),
+    probeError: text("probe_error"),
+    probeLatencyMs: integer("probe_latency_ms"),
+    probedAt: text("probed_at"),
+    probeVision: integer("probe_vision", { mode: "boolean" }),
     createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
   (t) => [uniqueIndex("models_provider_model").on(t.providerId, t.model), uniqueIndex("models_one_default").on(t.isDefault).where(sql`is_default = 1`)],
@@ -451,13 +465,19 @@ export const controlMessages = sqliteTable(
   "control_messages",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    /** alert | reply (to a control command; reply_html: its text is Telegram HTML) | approval (a card) | approval_closed (edit a card once answered or expired). */
-    kind: text("kind", { enum: ["alert", "reply", "reply_html", "approval", "approval_closed"] }).notNull(),
+    /**
+     * alert | reply (to a control command; reply_html: its text is Telegram HTML) | approval (a card) |
+     * approval_closed (edit a card once answered or expired) | card (send a `control_cards` card as it is
+     * then) | card_edit (edit that card's message to what the card is then).
+     */
+    kind: text("kind", { enum: ["alert", "reply", "reply_html", "approval", "approval_closed", "card", "card_edit"] }).notNull(),
     text: text("text").notNull(),
     idemKey: text("idem_key").unique(),
     topic: text("topic"),
     /** For `approval` / `approval_closed`: the approval it belongs to. */
     approvalId: integer("approval_id"),
+    /** For `card` / `card_edit`: the card it belongs to. */
+    cardId: integer("card_id"),
     status: text("status", { enum: ["pending", "sent", "failed", "suppressed"] }).notNull(),
     tgMessageId: integer("tg_message_id"),
     note: text("note"),
@@ -488,6 +508,33 @@ export const approvals = sqliteTable("approvals", {
   answer: text("answer"),
   answeredAt: text("answered_at"),
   expiresAt: text("expires_at"),
+  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
+
+/**
+ * The control bot's cards about models (src/control/model-cards.ts): one control-bot message, edited in
+ * place, whose steps are the owner's button presses. A row per card, so a restart in the middle of its steps
+ * loses nothing. `state` is where the card is (its kind's business); `text` and `keyboard` are what it shows
+ * now, rendered from that state whenever it changes (and when what it shows changed: a probe finished).
+ * `version` counts the owner's steps: a button carries the version it was drawn at, and a press from an
+ * older one, or on a card no longer `open`, changes nothing. `waiting`: a switch was asked for and the card
+ * waits for its result (`switch_request_id`).
+ */
+export const controlCards = sqliteTable("control_cards", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind", { enum: ["switch", "models", "provider_add", "provider_remove"] }).notNull(),
+  status: text("status", { enum: ["open", "waiting", "closed"] }).notNull().default("open"),
+  /** For `switch`: the chat whose model it switches. */
+  chatId: integer("chat_id").references(() => chats.id),
+  /** What opened it (`command:<seq>`, `update:<id>`), so the same command never opens two. */
+  idemKey: text("idem_key").unique(),
+  state: text("state", { mode: "json" }).notNull().$type<Record<string, unknown>>(),
+  text: text("text").notNull(),
+  keyboard: text("keyboard", { mode: "json" }).notNull().$type<{ text: string; callback_data: string }[][]>(),
+  version: integer("version").notNull().default(0),
+  /** Bumped on every change of `text` / `keyboard`: each edit row is keyed on it. */
+  rev: integer("rev").notNull().default(0),
+  switchRequestId: integer("switch_request_id"),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
 
