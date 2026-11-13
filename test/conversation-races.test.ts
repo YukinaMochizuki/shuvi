@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "agent-runtime/openai-compat";
-import { conversationStore, LostConversationError } from "../src/store/conversations.ts";
+import { conversationStore } from "../src/store/conversations.ts";
 import { openDb, type Db } from "../src/store/db.ts";
 import { resetConversation } from "../src/store/events.ts";
 import { claimTurn, saveSession } from "../src/store/turns.ts";
@@ -148,11 +148,11 @@ for (const appendFirst of [true, false]) {
     first.release("locked");
     await first.result(appendFirst ? "appended" : 1);
     if (appendFirst) expect(await world.store.load("session")).toEqual([...original, ...appended]);
-    else await expect(world.store.load("session")).rejects.toBeInstanceOf(LostConversationError);
+    else await expect(world.store.load("session")).resolves.toBeNull();
     second.release("busy");
     await second.result(appendFirst ? 1 : "appended");
     if (appendFirst) {
-      await expect(world.store.load("session")).rejects.toBeInstanceOf(LostConversationError);
+      await expect(world.store.load("session")).resolves.toBeNull();
       expect(world.db.$client.query("select * from conversations").all()).toEqual([]);
       checkRows(world, [], 0);
     } else {
@@ -192,7 +192,7 @@ for (const finishing of [false, true]) {
     second.release("busy");
     await second.result(finishing ? 1 : 0);
     if (finishing) {
-      await expect(world.store.load("session")).rejects.toBeInstanceOf(LostConversationError);
+      await expect(world.store.load("session")).resolves.toBeNull();
       checkRows(world, [], 0);
     } else {
       expect(await world.store.load("session")).toEqual(original);
@@ -239,6 +239,6 @@ test("/new and pruning before a runner's first session callback preserve its his
   await expired.wait("ready");
   expired.release("ready");
   await expired.result(1);
-  await expect(world.store.load("session")).rejects.toBeInstanceOf(LostConversationError);
+  await expect(world.store.load("session")).resolves.toBeNull();
   checkRows(world, [], 0);
 });

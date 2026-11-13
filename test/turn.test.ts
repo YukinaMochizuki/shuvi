@@ -3,10 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildSystemPrompt } from "../src/agent/prompt.ts";
-import type { AdapterRunOptions, AdapterRunResult, ToolBoundary } from "agent-runtime";
+import { LostSessionError, type AdapterRunOptions, type AdapterRunResult, type ToolBoundary } from "agent-runtime";
 import { GAP_NOTE_MINUTES, isLostSession, runTurn } from "../src/agent/turn.ts";
 import { controlMessagesOf } from "../src/store/control.ts";
-import { LostConversationError } from "../src/store/conversations.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
 import { enqueueOutbound, getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
@@ -346,7 +345,7 @@ describe("runTurn: a sense of time", () => {
     ownerSays(db, "are you there");
     const turn = claimTurn(db, ownerChatId(db))!;
     let adapter!: LostSessionAdapter;
-    await runTurn({ db, turnId: turn.id, home: emptyHome, timeZone: "UTC", makeAdapter: (b) => (adapter = new LostSessionAdapter(b, [{ token: "Fresh start." }], LOST_TEXT)), capabilities: enabledCapabilities({ SHUVI_WEB: "off" }) });
+    await runTurn({ db, turnId: turn.id, home: emptyHome, timeZone: "UTC", makeAdapter: (b) => (adapter = new LostSessionAdapter(b, [{ token: "Fresh start." }], LOST_ERROR)), capabilities: enabledCapabilities({ SHUVI_WEB: "off" }) });
     expect(adapter.calls.map((c) => c.method)).toEqual(["continueRun", "run"]);
     expect(adapter.calls[0]!.prompt as string).not.toContain("(It is now");
     expect(adapter.calls[1]!.prompt as string).toMatch(/^\(It is now [^\n]*\. The last message here was less than a minute ago\.\)\n\(A new conversation\./);
@@ -363,7 +362,11 @@ describe("runTurn: a sense of time", () => {
   });
 });
 
-const LOST_TEXT = 'Claude Agent SDK run ended with "error_during_execution": No conversation found with session ID: 6b0b8a3e-1111-4222-8333-444455556666';
+/** What agent-runtime's Claude driver throws when the session it resumes no longer exists. */
+const LOST_ERROR = new LostSessionError(
+  "6b0b8a3e-1111-4222-8333-444455556666",
+  'Claude Agent SDK run ended with "error_during_execution": No conversation found with session ID: 6b0b8a3e-1111-4222-8333-444455556666',
+);
 
 /** A scripted driver whose `continueRun` fails the way a lost Claude session does (or with `error`). */
 class LostSessionAdapter extends ScriptedAdapter {
@@ -382,9 +385,7 @@ class LostSessionAdapter extends ScriptedAdapter {
 }
 
 describe("runTurn: a lost conversation", () => {
-  // The exact text agent-runtime's Claude driver produces when the session no longer exists: its own
-  // prefix, then the SDK result's `errors` (the Claude Code CLI's message) after a colon.
-  const LOST = 'Claude Agent SDK run ended with "error_during_execution": No conversation found with session ID: 6b0b8a3e-1111-4222-8333-444455556666';
+  const LOST = LOST_ERROR;
 
   async function lostTurn(db: Db, error: string | Error) {
     const turn = claimTurn(db, ownerChatId(db))!;
@@ -393,9 +394,10 @@ describe("runTurn: a lost conversation", () => {
     return { outcome, adapter, turn: getTurn(db, turn.id)! };
   }
 
-  test("the pinned driver text is recognised, and nothing else is", () => {
-    expect(isLostSession(new Error(LOST))).toBe(true);
-    expect(isLostSession(new LostConversationError())).toBe(true);
+  test("only agent-runtime's LostSessionError is a lost conversation: not its text in a plain Error, not another failure", () => {
+    expect(isLostSession(LOST)).toBe(true);
+    expect(isLostSession(new LostSessionError("openai-compat:identity:1:gone"))).toBe(true);
+    expect(isLostSession(new Error(LOST.message))).toBe(false);
     expect(isLostSession(new Error('Claude Agent SDK run ended with "error_during_execution"'))).toBe(false);
   });
 
@@ -404,7 +406,7 @@ describe("runTurn: a lost conversation", () => {
     ownerSays(db, "earlier API context");
     db.$client.exec(`update chats set cursor_seq = (select max(seq) from chat_events), backend_session_id = 'openai-compat:identity:1:gone'`);
     ownerSays(db, "continue please");
-    const { outcome, adapter, turn } = await lostTurn(db, new LostConversationError());
+    const { outcome, adapter, turn } = await lostTurn(db, new LostSessionError("openai-compat:identity:1:gone"));
     expect(outcome).toBe("done");
     expect(turn.opening).toBe("lost");
     expect(adapter.calls.map((call) => call.method)).toEqual(["continueRun", "run"]);

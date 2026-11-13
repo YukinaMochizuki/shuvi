@@ -1,5 +1,5 @@
 import { dirname } from "node:path";
-import type { BackendAdapter, Prompt, ToolBoundary } from "agent-runtime";
+import { LostSessionError, type BackendAdapter, type Prompt, type ToolBoundary } from "agent-runtime";
 import {
   capabilityHolds,
   capabilityOwnerOnly,
@@ -13,7 +13,6 @@ import {
 } from "../capabilities/types.ts";
 import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
-import { LostConversationError } from "../store/conversations.ts";
 import { raiseAlert } from "../store/control.ts";
 import {
   enqueueOutbound,
@@ -63,15 +62,13 @@ export function openingTimeNote(db: Db, chatId: number, first: ChatEvent, nowIso
 }
 
 /**
- * Whether the selected backend's saved conversation no longer exists. Claude reports this through its
- * CLI error text; OpenAI-compatible history uses `LostConversationError` when its durable row is missing.
- * Generic failures may be an outage or an expired login, so they must not discard the conversation.
- * The Claude CLI text is pinned in test/turn.test.ts.
+ * Whether the turn's saved conversation no longer exists. Every driver says so with agent-runtime's
+ * `LostSessionError` (the Claude CLI's "No conversation found", a missing OpenAI-compatible history row), and
+ * only it counts: a generic failure may be an outage or an expired login, which must not discard the
+ * conversation.
  */
-export const LOST_SESSION_TEXT = "No conversation found with session ID";
-
-export function isLostSession(e: unknown, backend?: string): boolean {
-  return e instanceof LostConversationError || (backend !== "openai-compat" && (e instanceof Error ? e.message : String(e)).includes(LOST_SESSION_TEXT));
+export function isLostSession(e: unknown): boolean {
+  return e instanceof LostSessionError;
 }
 
 /**
@@ -483,7 +480,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
           opts,
         );
       } catch (e) {
-        if (deps.signal?.aborted || !isLostSession(e, adapter.id)) throw e;
+        if (deps.signal?.aborted || !isLostSession(e)) throw e;
         resetConversation(db, chat.id);
         setTurnConversation(db, turnId, { opening: "lost" });
         raiseAlert(db, {

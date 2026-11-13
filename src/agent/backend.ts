@@ -4,7 +4,7 @@ import type { BackendAdapter, ToolBoundary } from "agent-runtime";
 import { loadProfiles } from "../secrets/redaction.ts";
 import { conversationStore } from "../store/conversations.ts";
 import type { Db } from "../store/db.ts";
-import { CLI_DEFAULT_MODEL, type CatalogModel } from "../store/models.ts";
+import { CLI_DEFAULT_MODEL, unknownKind, type CatalogModel } from "../store/models.ts";
 
 /**
  * The driver a turn runs on, built from the chat's model in the catalog (store/models.ts) when the turn
@@ -34,14 +34,34 @@ export interface DriverOptions {
 
 /** The model id the driver is given for the turn: the provider's own, or none for the CLI's default. */
 export function driverModel(m: CatalogModel): string | undefined {
-  return m.provider.kind === "claude" && m.model.model === CLI_DEFAULT_MODEL ? undefined : m.model.model;
+  switch (m.provider.kind) {
+    case "claude":
+      return m.model.model === CLI_DEFAULT_MODEL ? undefined : m.model.model;
+    case "openai-compat":
+      return m.model.model;
+    default:
+      return unknownKind(m.provider.kind);
+  }
 }
 
 export function makeDriver(o: DriverOptions): BackendAdapter {
-  const { provider, model } = o.model;
-  if (provider.kind === "claude") {
-    return new ClaudeBackend({ boundary: o.boundary, liveSystemPrompt: true, ...(provider.configDir ? { configDir: provider.configDir } : {}) });
+  switch (o.model.provider.kind) {
+    case "claude":
+      return claudeDriver(o);
+    case "openai-compat":
+      return openAICompatDriver(o);
+    default:
+      return unknownKind(o.model.provider.kind);
   }
+}
+
+function claudeDriver(o: DriverOptions): BackendAdapter {
+  const { provider } = o.model;
+  return new ClaudeBackend({ boundary: o.boundary, liveSystemPrompt: true, ...(provider.configDir ? { configDir: provider.configDir } : {}) });
+}
+
+function openAICompatDriver(o: DriverOptions): BackendAdapter {
+  const { provider, model } = o.model;
   if (!provider.baseUrl) throw new Error(`the provider "${provider.name}" has no base URL`);
   const apiKey = provider.apiKey ? providerKey(provider.apiKey, o.secretsFile) : undefined;
   return new OpenAICompatBackend({

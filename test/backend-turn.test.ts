@@ -206,7 +206,7 @@ describe("runTurn: real OpenAI-compatible driver failures", () => {
         expect(failed.turn.backendSessionId).toBe(id);
         expect(getChat(db, chatId)!.backendSessionId).toBe(id);
         expect(controlMessagesOf(db, "alert").some((alert) => alert.idemKey?.startsWith("lost-session:"))).toBe(false);
-        expect((await conversationStore(db, chatId).load(id))[0]!.content).toBe("durable history");
+        expect((await conversationStore(db, chatId).load(id))![0]!.content).toBe("durable history");
         globalThis.fetch = (async (_url, init) => {
           expect(String(init?.body)).toContain("durable history");
           return reply();
@@ -220,6 +220,29 @@ describe("runTurn: real OpenAI-compatible driver failures", () => {
       }
     }, 20_000);
   }
+
+  test("a history that is gone (its row deleted) is lost: the real driver says so, and the turn starts over fresh", async () => {
+    const { db, chatId, id } = seed();
+    await conversationStore(db, chatId).append(id, [{ role: "user", content: "durable history" }]);
+    db.$client.query("delete from conversations where id = ?").run(id);
+    const bodies: string[] = [];
+    globalThis.fetch = (async (_url, init) => {
+      bodies.push(String(init?.body));
+      return reply();
+    }) as typeof fetch;
+    try {
+      const r = await realTurn(db);
+      expect(r.outcome).toBe("done");
+      expect(r.turn.opening).toBe("lost");
+      expect(r.turn.backendSessionId).not.toBe(id);
+      expect(controlMessagesOf(db, "alert").some((alert) => alert.idemKey === `lost-session:${r.turn.id}`)).toBe(true);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).not.toContain("durable history");
+      expect(bodies[0]).toContain("earlier chat message");
+    } finally {
+      db.$client.close();
+    }
+  }, 20_000);
 });
 
 describe("runTurn: constructor compaction reports", () => {
@@ -276,7 +299,7 @@ describe("runTurn: constructor compaction reports", () => {
       expect(notes[0]!.text).toContain("rejected the replacement history");
       expect(JSON.stringify(notes)).not.toContain(secret);
       expect(result.steps.filter((step) => step.kind === "compaction")).toHaveLength(0);
-      expect((await conversationStore(db, chatId).load(id)).slice(0, before.length)).toEqual(before);
+      expect((await conversationStore(db, chatId).load(id))!.slice(0, before.length)).toEqual(before);
     } finally {
       db.$client.close();
     }

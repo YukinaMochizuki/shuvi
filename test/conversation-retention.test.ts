@@ -103,8 +103,8 @@ describe("conversation retention", () => {
     db.$client.query("update conversations set written_at = ? where id = ?").run("2020-01-01T00:00:00.000Z", "compact-session");
     await store.compact!("compact-session", [{ role: "user", content: "summary" }]);
     expect(Date.parse(timestamp("compact-session"))).toBeGreaterThan(Date.parse("2020-01-01T00:00:00.000Z"));
-    expect((await store.load("append-session")).map((message) => message.content)).toEqual(["first", "second"]);
-    expect((await store.load("compact-session")).map((message) => message.content)).toEqual(["summary"]);
+    expect((await store.load("append-session"))!.map((message) => message.content)).toEqual(["first", "second"]);
+    expect((await store.load("compact-session"))!.map((message) => message.content)).toEqual(["summary"]);
     expect((db.$client.query("select generation from conversations where id = ?").get("compact-session") as { generation: number }).generation).toBe(1);
     expect((db.$client.query("select count(*) as count from conversation_messages").get() as { count: number }).count).toBe(3);
     expect(pruneConversations(db, "2024-01-01T00:00:00.000Z")).toBe(0);
