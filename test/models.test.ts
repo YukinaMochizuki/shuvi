@@ -7,9 +7,12 @@ import {
   chatModel,
   defaultModel,
   findModel,
+  getProvider,
   laneOf,
   listModels,
   parseLane,
+  reconcileClaudeLogin,
+  SEEDED_PROVIDER,
   seedModels,
   setDefaultModel,
   type CatalogModel,
@@ -97,5 +100,25 @@ describe("the model catalog", () => {
     addProvider(db, { name: "x", kind: "openai-compat", baseUrl: "https://example/v1" });
     expect(() => addModel(db, { provider: "x", model: "m" })).toThrow(/context window/);
     expect(() => addModel(db, { provider: "nope", model: "m" })).toThrow(/no provider named "nope"/);
+  });
+});
+
+describe("SHUVI_CLAUDE_CONFIG_DIR on every start", () => {
+  test("points the seeded claude login at it when the store says otherwise, and only then", () => {
+    const db = memDb();
+    seedModels(db, {}); // a store from a machine where the login was the server user's default
+    expect(getProvider(db, SEEDED_PROVIDER)!.configDir).toBeNull();
+    expect(reconcileClaudeLogin(db, undefined)).toBeNull();
+    expect(reconcileClaudeLogin(db, "/claude")).toEqual({ from: null, to: "/claude" });
+    expect(getProvider(db, SEEDED_PROVIDER)!.configDir).toBe("/claude");
+    expect(reconcileClaudeLogin(db, "/claude")).toBeNull();
+    expect(reconcileClaudeLogin(db, "/srv/other")).toEqual({ from: "/claude", to: "/srv/other" });
+    // The lane is the provider's name, so its conversations stay its own.
+    expect(laneOf(getProvider(db, SEEDED_PROVIDER)!)).toBe(`claude:${SEEDED_PROVIDER}`);
+  });
+
+  test("no seeded login: nothing to point", () => {
+    const db = memDb();
+    expect(reconcileClaudeLogin(db, "/claude")).toBeNull();
   });
 });

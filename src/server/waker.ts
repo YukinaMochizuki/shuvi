@@ -12,7 +12,8 @@ import { isAlive, processStart, signalTurn, type SignalTurn, type SpawnTurn } fr
  * The waker decides WHEN to think, and nothing about how. One pass:
  *
  *   1. Reap: a `running` turn whose process is gone died without closing itself (a crash, an OOM kill).
- *      Close it as failed; the cursor rule (store/turns.ts) then has the next pass retry its input.
+ *      Close it as failed; the cursor rule (store/turns.ts) then has the next pass retry its input. One that
+ *      was being stopped (`term_at` or `stop_seq` set) closes as stopped instead, where its stop put it.
  *      A turn that never got a pid (the spawn itself failed) is reaped after `SPAWN_GRACE_MS`. "Gone"
  *      means the pid no longer runs the process started for the turn (spawn.ts: pid + start time).
  *   2. Limit: a turn running longer than its wall-clock limit (`SHUVI_TURN_MAX_MINUTES`, default 15) is
@@ -66,6 +67,11 @@ export interface WakerDeps {
   bot?: BotIdentity;
   /** Kept by the caller from pass to pass (see the header). */
   triggers?: TriggerScan;
+  /**
+   * false: reap and enforce the limit (1 and 2), but start nothing (3). A draining server (server/drain.ts)
+   * still closes the turns that die and stops the ones that hang, and starts no new one.
+   */
+  wake?: boolean;
 }
 
 export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[]; limited: number[] } {
@@ -88,8 +94,10 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
       continue;
     }
     if (!alive(t.pid, t.pidStart)) {
-      // A turn the limit stopped closes as `stopped`; finishTurn records why from its `term_at`.
-      if (t.termAt) finishTurn(db, t.id, { status: "stopped" });
+      // A turn something stopped (the limit's `term_at`, or a `stop_seq`: /stop, a switch, a draining server's
+      // deadline) and that died before closing itself closes as `stopped`, as it would have: not `failed`, which
+      // would count toward MAX_ATTEMPTS and alert. finishTurn records why from the row.
+      if (t.termAt || t.stopSeq != null) finishTurn(db, t.id, { status: "stopped" });
       else finishTurn(db, t.id, { status: "failed", error: `process ${t.pid} died` });
       reaped.push(t.id);
       continue;
@@ -126,6 +134,7 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
     }
   }
 
+  if (deps.wake === false) return { reaped, started, limited };
   const policy = deps.policy ?? defaultPolicy();
   const scan = deps.triggers ?? new TriggerScan();
   for (const chat of allChats(db)) {

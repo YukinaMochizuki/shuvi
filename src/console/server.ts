@@ -2,6 +2,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isLoopback, parseLoopbackListen } from "../listen.ts";
 import { sameSecret } from "../secrets/compare.ts";
 import type { Db } from "../store/db.ts";
 import { sniffImage } from "../store/media.ts";
@@ -102,21 +103,11 @@ function respond(body: string | Uint8Array | null, status: number, type: string,
 }
 const htmlResponse = (body: string, status = 200, extra: Record<string, string> = {}) => respond(body, status, "text/html; charset=utf-8", extra);
 
-/** A hostname a socket bound to it can only be reached from this machine. */
-export function isLoopback(hostname: string): boolean {
-  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return h === "localhost" || h === "::1" || /^127(\.\d{1,3}){3}$/.test(h);
-}
+export { isLoopback };
 
 /** `host:port` (or `[v6]:port`) → Bun.serve's options; refuses anything that is not loopback. */
 export function parseConsoleListen(listen: string): { hostname: string; port: number } {
-  const m = /^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/.exec(listen.trim());
-  if (!m) throw new Error(`SHUVI_CONSOLE_LISTEN must be host:port on a loopback address (e.g. 127.0.0.1:8787), not "${listen}"`);
-  const hostname = m[1] ?? m[2]!;
-  if (!isLoopback(hostname)) {
-    throw new Error(`SHUVI_CONSOLE_LISTEN must be a loopback address (127.0.0.1, ::1 or localhost), not "${hostname}": publish it to the tailnet with \`tailscale serve\` instead`);
-  }
-  return { hostname, port: Number(m[3]) };
+  return parseLoopbackListen("SHUVI_CONSOLE_LISTEN", listen, "127.0.0.1:8787", ": publish it to the tailnet with `tailscale serve` instead");
 }
 
 function sessionValue(token: string, exp: number): string {

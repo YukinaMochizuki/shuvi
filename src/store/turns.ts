@@ -32,6 +32,13 @@ import { asksForTurn, chatEvents, chats, TRIGGER_KINDS, turns } from "./schema.t
 export const MAX_ATTEMPTS = 3;
 /** The error recorded on a turn the wall-clock limit stopped (server/waker.ts). */
 export const WALL_CLOCK_STOP = "stopped: ran past the wall-clock limit";
+/**
+ * The error recorded on a turn a draining server stopped at its deadline (server/drain.ts). Written on the
+ * RUNNING row before the stop is signalled (`markDrainStop`), so whichever process closes it (the child on
+ * SIGTERM, the drain after SIGKILL, a waker's reap) records it; the next turn on the same input reads it to
+ * tell the model that this is a retry (agent/turn.ts `retryNote`).
+ */
+export const DRAIN_STOP = "stopped: the server shut down at the drain deadline";
 /** The wait before retrying after the first failure; it doubles with each further one. */
 export const RETRY_BASE_MS = 5_000;
 
@@ -112,6 +119,11 @@ export function chatLabel(chat: { id: number; tgChatId: number; title: string | 
 
 const excerpt = (s: string, n = 120) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
+/** Mark a running turn as stopped by a draining server (see `DRAIN_STOP`); its close keeps the reason. */
+export function markDrainStop(db: Db, id: number): void {
+  db.update(turns).set({ error: DRAIN_STOP }).where(and(eq(turns.id, id), eq(turns.status, "running"))).run();
+}
+
 /** Record which command stopped a turn (the first one wins). */
 export function markStop(db: Db, id: number, stopSeq: number): void {
   db.update(turns).set({ stopSeq }).where(and(eq(turns.id, id), isNull(turns.stopSeq))).run();
@@ -180,7 +192,8 @@ export function finishTurn(
     const u = outcome.usage;
     // A turn the wall-clock limit stopped says so on its row, whichever process closes it (the child on
     // SIGTERM, or the waker after SIGKILL): `term_at` plus this error is what tells it from an owner /stop.
-    const error = outcome.status === "stopped" && t.termAt ? WALL_CLOCK_STOP : (outcome.error ?? null);
+    // A reason set while it ran (`markDrainStop`) is kept unless the close gives its own.
+    const error = outcome.status === "stopped" && t.termAt ? WALL_CLOCK_STOP : (outcome.error ?? t.error ?? null);
     tx.update(turns)
       .set({
         status: outcome.status,

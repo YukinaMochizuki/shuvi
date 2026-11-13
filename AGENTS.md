@@ -18,6 +18,7 @@ bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
 bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, an unknown group approved
 bun scripts/e2e-media.ts    # videos from links against a fake porchkit (test/fake-porchkit.ts) and a fake Hangar
+bun scripts/e2e-drain.ts    # SIGTERM drains: a running turn finishes and is delivered; the deadline stops and retries
 bun run db:generate         # after any change to src/store/schema.ts
 ```
 
@@ -46,6 +47,10 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | receiving updates and the Telegram offset | `src/server/poller.ts`, `src/telegram/inbound.ts` |
 | sending, 429s, long messages | `src/server/sender.ts`, `src/telegram/format.ts` |
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` (the entry point), `src/runner/run.ts` (the turn's body) |
+| shutting down: the drain on SIGTERM, its deadline, what it keeps | `src/server/drain.ts`, `src/server/main.ts` (`shutdown`); docs/design.md §16 |
+| the retry of a turn the drain stopped (`DRAIN_STOP`, the retry note) | `src/store/turns.ts`, `src/agent/turn.ts` (`isRetryAfterDrain`), `src/agent/render.ts` (`RETRY_NOTE`) |
+| /healthz and /metrics (names, what they count) | `src/server/health.ts` |
+| the copy of the store taken before a migration | `src/store/migrate-backup.ts` |
 | turn liveness, the wall-clock limit | `src/server/spawn.ts`, `src/server/waker.ts` |
 | telling the owner anything (alerts, /status, approvals) | `src/control/bot.ts`, `src/store/control.ts`, `src/control/approvals.ts` |
 | the control bot's model cards (`/model`, `/models`, `/provider`), and probing models in the background | `src/control/model-cards.ts`, `src/server/probes.ts` |

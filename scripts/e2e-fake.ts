@@ -6,12 +6,13 @@
  *
  * It checks the property the design rests on (docs/design.md invariants 2 and 3): the server is killed
  * while a turn is mid-flight, the turn finishes anyway in its own process, and when a new server starts,
- * every message the turn wrote reaches Telegram exactly once and in order. The server is killed the way
- * a terminal or systemd does it, by its whole process group, so the check also proves the child is
- * detached from it. Then `/new` and `/stop` are acknowledged with a reaction and nothing else, and a
- * stopped turn says nothing more. Last, a photo: the server downloads it from the fake Bot API, and the
- * model receives it as an image block (on a resumed conversation). Then an edit to home/ (a git commit
- * by shuvi) is in the system prompt of the very next turn of the same conversation, without `/new`.
+ * every message the turn wrote reaches Telegram exactly once and in order. The server is killed without a
+ * chance to drain (SIGKILL, as a crash or an OOM kill does), by its whole process group, so the check also
+ * proves the child is detached from it. (SIGTERM drains instead: scripts/e2e-drain.ts.) Then `/new` and
+ * `/stop` are acknowledged with a reaction and nothing else, and a stopped turn says nothing more. Last, a
+ * photo: the server downloads it from the fake Bot API, and the model receives it as an image block (on a
+ * resumed conversation). Then an edit to home/ (a git commit by shuvi) is in the system prompt of the very
+ * next turn of the same conversation, without `/new`.
  * Then stickers: a pack file in home/ is indexed and its set fetched by the server, a turn calls
  * `find_sticker` then `sticker`, and the fake Bot API receives `sendSticker`. Last, the console: that
  * turn's page, fetched as a tailnet user would (the `Tailscale-User-Login` header `tailscale serve` sets),
@@ -170,9 +171,9 @@ await until("the first two messages to reach Telegram", () => texts().length >= 
 check(texts().join("|") === "On it, let me look|Halfway there, here is the gist", `text before a tool call and a say() arrive in order (${texts().join("|")})`);
 await until("the slow model step to start", () => slowStepStarted);
 
-process.kill(-server!.pid, "SIGTERM"); // the whole group: only a detached child survives this
+process.kill(-server!.pid, "SIGKILL"); // the whole group, no drain: only a detached child survives this
 await server!.exited;
-log("server's process group stopped mid-turn");
+log("server's process group killed mid-turn");
 const db = openDb(join(dataDir, "shuvi.db"));
 const running = db.$client.query("select id, pid from turns where status = 'running'").all() as { id: number; pid: number }[];
 check(running.length === 1, "the turn is still running with no server");

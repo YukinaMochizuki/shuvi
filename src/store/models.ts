@@ -359,6 +359,22 @@ export function recordProbe(db: Db, rowId: number, r: ProbeRecord, now = Date.no
     .run();
 }
 
+/**
+ * `SHUVI_CLAUDE_CONFIG_DIR`, when set, is where the seeded Claude login (`SEEDED_PROVIDER`) lives, on every
+ * start, not only the first: a store moved to another machine or into a container (where the login is a
+ * volume) keeps pointing at the login it is deployed with. The row is updated when it differs, and the change
+ * returned for the server to log; null when nothing changed (or there is no such provider, or no variable).
+ * The lane is the provider's NAME (`laneOf`), so its conversations stay attributed to it; a session filed
+ * under the old directory is not found under the new one, and its chat restarts as after a lost session.
+ */
+export function reconcileClaudeLogin(db: Db, claudeConfigDir: string | undefined): { from: string | null; to: string } | null {
+  if (!claudeConfigDir) return null;
+  const p = getProvider(db, SEEDED_PROVIDER);
+  if (!p || p.kind !== "claude" || p.configDir === claudeConfigDir) return null;
+  db.update(modelProviders).set({ configDir: claudeConfigDir }).where(eq(modelProviders.id, p.id)).run();
+  return { from: p.configDir, to: claudeConfigDir };
+}
+
 /** On a first start with an empty catalog: what turns ran on before there was one. Idempotent. */
 export function seedModels(db: Db, env: { claudeConfigDir?: string; model?: string }): void {
   if (listProviders(db).length) return;

@@ -356,14 +356,15 @@ await Bun.sleep(500);
 check((db.$client.query("select status from turns order by id desc limit 1").get() as { status: string }).status === "stopped", "/stop closes the running turn");
 check(texts().length === before, "a stopped turn does not deliver a late model response");
 
-// 6. A detached runner finishes its turn while the server's entire process group restarts.
+// 6. A detached runner finishes its turn while the server's entire process group is killed (SIGKILL: a crash,
+// with no drain; SIGTERM drains instead, scripts/e2e-drain.ts) and started again.
 push(dmUpdate(update++, "survive server restart"));
 await until("restart request at local fake endpoint", () => restartStarted);
 const running = db.$client.query("select id from turns where status = 'running'").get() as { id: number } | null;
 check(!!running, "the turn is running before server restart");
 const runningId = running!.id;
 const oldServer = server!;
-process.kill(-oldServer.pid, "SIGTERM");
+process.kill(-oldServer.pid, "SIGKILL");
 await oldServer.exited;
 server = null;
 log("server process group stopped while the detached runner is waiting");
