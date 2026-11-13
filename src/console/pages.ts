@@ -131,7 +131,8 @@ function offset(ms: number): string {
 
 function img(ref: string): Raw {
   const u = href("/media", { ref });
-  return html`<a href="${u}"><img src="${u}" alt="" loading="lazy"></a>`;
+  // Not boosted: the link opens the image itself, which htmx would otherwise swap into the page as text.
+  return html`<a href="${u}" hx-boost="false"><img src="${u}" alt="" loading="lazy"></a>`;
 }
 
 function pretty(json: string | null): string {

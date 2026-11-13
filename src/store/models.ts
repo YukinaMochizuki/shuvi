@@ -308,25 +308,40 @@ export function editModel(db: Db, id: string, e: { label?: string | null; contex
 
 /**
  * Ask for a probe of model `rowId` (server/probes.ts runs it). Only an OpenAI-compatible model is probed: false
- * for any other (nothing to probe: a Claude login's models are the CLI's).
+ * for any other (nothing to probe: a Claude login's models are the CLI's). One already asked stays as it is.
+ * The last probe's result is kept until the new one finishes, so a cancelled probe (`cancelProbe`) leaves it.
  */
-export function markProbing(db: Pick<Db, "select" | "update">, rowId: number): boolean {
+export function markProbing(db: Pick<Db, "select" | "update">, rowId: number, now = Date.now()): boolean {
   const m = modelByRowId(db, rowId);
   if (!m) return false;
   switch (m.provider.kind) {
     case "claude":
       return false;
     case "openai-compat":
-      db.update(models).set({ probeStatus: "checking" }).where(eq(models.id, rowId)).run();
+      if (!m.model.probeStartedAt) db.update(models).set({ probeStartedAt: new Date(now).toISOString() }).where(eq(models.id, rowId)).run();
       return true;
     default:
       return unknownKind(m.provider.kind);
   }
 }
 
-/** The models a probe was asked for (`checking`), a restart's interrupted ones included. */
+/** Whether a probe of this model is asked or running. */
+export const probePending = (m: CatalogModel): boolean => m.model.probeStartedAt !== null;
+
+/**
+ * Take back the probe asked of model `rowId`: the row shows its last result again, and the server's next pass
+ * aborts the request in flight (server/probes.ts). False when none was asked.
+ */
+export function cancelProbe(db: Pick<Db, "select" | "update">, rowId: number): boolean {
+  const m = modelByRowId(db, rowId);
+  if (!m || !probePending(m)) return false;
+  db.update(models).set({ probeStartedAt: null }).where(eq(models.id, rowId)).run();
+  return true;
+}
+
+/** The models a probe was asked for, a restart's interrupted ones included. */
 export function modelsToProbe(db: Db): CatalogModel[] {
-  return listModels(db).filter((m) => m.model.probeStatus === "checking");
+  return listModels(db).filter(probePending);
 }
 
 export interface ProbeRecord {
@@ -349,6 +364,7 @@ export function recordProbe(db: Db, rowId: number, r: ProbeRecord, now = Date.no
   db.update(models)
     .set({
       probeStatus: r.status,
+      probeStartedAt: null,
       probeError: r.error,
       probeLatencyMs: r.latencyMs,
       probedAt: new Date(now).toISOString(),

@@ -271,7 +271,7 @@ describe("/models", () => {
       "Could not add vllm/nolen: an OpenAI-compatible model needs its context window, in tokens: compaction is measured against it",
       "Usage: /models, or /models add <provider>/<model> [<context_window>]",
     ]);
-    expect(findModel(db, "vllm/mistral")!.model.probeStatus).toBe("checking");
+    expect(findModel(db, "vllm/mistral")!.model.probeStartedAt).toBeString();
     expect(findModel(db, "claude/sonnet")!.model.probeStatus).toBeNull();
   });
 });
@@ -320,7 +320,7 @@ describe("/provider", () => {
     press(db, button(db, "chatty · 8192 tokens"));
     press(db, button(db, "nolen · no context length"));
     expect(getCard(db, id)!.text.split("\n")[1]).toBe("The listing gives no context length for nolen. Add it with /models add lab/nolen <context_window>.");
-    expect(findModel(db, "lab/qwen3")!.model).toMatchObject({ contextWindow: 32768, probeStatus: "checking" });
+    expect(findModel(db, "lab/qwen3")!.model).toMatchObject({ contextWindow: 32768, probeStartedAt: expect.any(String) });
     expect(getCard(db, id)!.text).toContain("lab/qwen3: probe checking…");
 
     expect(backgroundPass(db, { secretsFile })).toBe(2);
@@ -392,8 +392,8 @@ describe("probes", () => {
     const fake = fakeEndpoint();
     addProvider(db, { name: "lab", kind: "openai-compat", baseUrl: fake.url });
     const m = addModel(db, { provider: "lab", model: "qwen3", contextWindow: 32768 });
-    // As a restart leaves it: `checking`, with no probe running in this process.
-    db.update(models).set({ probeStatus: "checking" }).where(eqId(m.model.id)).run();
+    // As a restart leaves it: a probe asked, with no probe running in this process.
+    db.update(models).set({ probeStartedAt: new Date().toISOString() }).where(eqId(m.model.id)).run();
     db.update(models).set({ vision: true }).where(eqId(m.model.id)).run();
     expect(backgroundPass(db, { secretsFile: "/nonexistent" })).toBe(1);
     await backgroundSettled();

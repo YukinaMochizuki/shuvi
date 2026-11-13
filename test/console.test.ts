@@ -279,6 +279,8 @@ describe("pages, against fixture data", () => {
     expect(html).toContain('class="bubble out"');
     const dm = await page("/chats/1");
     expect(dm).toContain('src="/media?ref=media%2Fexample-photo"');
+    // The link to it opens the image itself: htmx would swap its bytes into the page as text.
+    expect(dm).toContain('<a href="/media?ref=media%2Fexample-photo" hx-boost="false">');
     expect(dm).toContain(`turn ${x.turns.done}`);
     expect(dm).not.toContain('class="tag owner"'); // not in a DM
   });
