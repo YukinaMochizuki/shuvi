@@ -1,3 +1,4 @@
+import { hasPendingSwitch } from "../agent/switch.ts";
 import { TriggerScan, type BotIdentity } from "../agent/triggers.ts";
 import { capabilityHolds, type EnabledCapability } from "../capabilities/types.ts";
 import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
@@ -28,7 +29,9 @@ import { isAlive, processStart, signalTurn, type SignalTurn, type SpawnTurn } fr
  *      cursor to be shown with the next turn; a chat policy does not list gets none. A chat whose last turns failed
  *      waits out its backoff first (store/turns.ts `retryDelayMs`). A chat with a message a capability
  *      still holds (a picture still downloading: PERCEPTION GATING, `Capability.holds`) waits too; a hold
- *      lasts a few seconds at most, then the turn opens anyway.
+ *      lasts a few seconds at most, then the turn opens anyway. A chat with a switch of its model pending
+ *      (agent/switch.ts `requestSwitch`) waits until it is applied (server/commands.ts `switchRequestPass`),
+ *      so no turn starts on the model being left.
  *
  * It holds no state between passes: every answer is in the store, so a restarted server picks up exactly
  * where the last one was, including turns that are still running in children it did not start. (The one
@@ -138,6 +141,7 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
       trigger = t;
     }
     if (retryDelayMs(db, chat.id, now()) > 0) continue;
+    if (hasPendingSwitch(db, chat.id)) continue;
     const caps = deps.capabilities ?? [];
     if (caps.length && triggersAfter(db, chat.id, chat.cursorSeq).some((e) => capabilityHolds(caps, e, now()))) continue;
     const turn = claimTurn(db, chat.id, trigger);

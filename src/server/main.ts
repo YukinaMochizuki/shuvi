@@ -44,7 +44,7 @@ import { getChat, type ChatEvent } from "../store/events.ts";
 import { pruneTranscripts } from "../store/transcripts.ts";
 import { runningTurns } from "../store/turns.ts";
 import { telegramFiles } from "../telegram/files.ts";
-import { commandPass, GroupMenus, MAIN_COMMANDS, registerCommands } from "./commands.ts";
+import { commandPass, GroupMenus, MAIN_COMMANDS, registerCommands, switchRequestPass } from "./commands.ts";
 import { loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
 import { sendPass } from "./sender.ts";
@@ -81,6 +81,7 @@ void loop(
   "waker",
   async () => {
     commandPass(db);
+    switchRequestPass(db);
     wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers });
   },
   300,

@@ -5,10 +5,13 @@ import { CHAT_COLUMNS, turnWhere, type ConsoleChat, type TurnFilter } from "./qu
  * How the console groups a chat's turns, by what the model actually saw. Three levels:
  *
  *   chat
- *   └ CONVERSATION   her conversation: the turns that share one backend session (agent-runtime's session id).
- *     │              Every turn of a chat resumes the same one until `/new`, a switch to a model of another
- *     │              lane (agent/switch.ts) or a lost session opens another; inside it she sees one
- *     │              continuous exchange, except across a compaction, after
+ *   └ CONVERSATION   her conversation: a run of turns that share one backend session (agent-runtime's session
+ *     │              id). Every turn of a chat resumes the same one until `/new`, a lost session, or a switch
+ *     │              opens another. A chat has a conversation per model (agent/switch.ts), and every switch
+ *     │              moves it to another model's (`switched`): a fresh one, a copy, or one parked earlier and
+ *     │              now resumed. A run resuming an earlier one (A → B → A lossy) is shown as its own
+ *     │              conversation, opened by the switch, with the same backend session as the earlier run.
+ *     │              Inside it she sees one continuous exchange, except across a compaction, after
  *     │              which she sees only a summary of what came before (a `compaction` step, shown as such).
  *     └ SEGMENT      a run of its turns with no gap longer than SEGMENT_GAP_MS between one turn's end (or
  *                    start, if it never ended) and the next one's start: what the owner remembers as "that

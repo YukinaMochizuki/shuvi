@@ -10,7 +10,8 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
 - **Chats, conversations, segments** (`/turns`): on the left, every chat, most recently active first. Under
   each, its latest **segments** (runs of turns with no gap over 30 minutes), under the **conversation** they
   belong to: her conversation, the turns that resumed one backend session, from the chat's first turn, a
-  `/new`, a lost session's fresh restart, or a switch to a model of another lane, to the next. Filters
+  `/new`, a lost session's fresh restart, or a switch to another model's conversation (a chat has one per
+  model; switching back to an earlier one shows it as a new run with the same session), to the next. Filters
   (outcome, a tool used, a date range in the owner's time zone) and search (thinking, text, tool arguments and
   results, errors, the input) keep the segments holding a matching turn; a chat with none is hidden. `j` / `k`
   move through the segments.
@@ -39,7 +40,7 @@ Images are stored as paths under `media/`, never as bytes. Recording is best eff
 the turn goes on.
 
 Each turn also records which backend session it ran in and how that session came to be (`turns.opening`: the
-chat's first, a fresh one after `/new`, a restart after it was lost, another lane's after a model switch, or
+chat's first, a fresh one after `/new`, a restart after it was lost, another model's after a model switch, or
 resumed), which is what groups turns into conversations. The first turn after a model switch notes it in its
 transcript: from what to what, and lossless (how many messages were carried) or lossy. A successful compaction is a
 `compaction` step with its trigger and the tokens before and after (recorded when the agent-runtime in use
@@ -52,8 +53,8 @@ shows them from the chat's log and says so, with the first recorded turn and its
 is kept as a marker, so such a turn is never mistaken for a pruned one.
 
 Transcripts are kept for `SHUVI_TRANSCRIPT_DAYS` (default 30) after a turn ends, then pruned with any prompt
-text no transcript points at. An OpenAI-compatible conversation no chat uses any more (active, parked in a
-lane, or a running turn's) is pruned the same time after its last write. Pruning never touches `chat_events`,
+text no transcript points at. An OpenAI-compatible conversation no chat uses any more (not active, not parked
+for a model still in the catalog, not a running turn's) is pruned the same time after its last write. Pruning never touches `chat_events`,
 and the `turns` row (with its usage) stays.
 
 ## Publishing it on the tailnet

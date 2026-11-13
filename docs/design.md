@@ -87,13 +87,18 @@ Everything is in one SQLite file (WAL mode).
   model reports no cost: its turns record 0.
 - **Which model** a chat runs on is `chats.model` in the model catalog (`model_providers`, `models`:
   `src/store/models.ts`), else the catalog's default; it is read when the turn starts. A chat keeps one
-  conversation per LANE, where a model's driver keeps it (each Claude login its own; every OpenAI-compatible
-  endpoint the same one): the active one on `chats`, the others parked in `chat_lanes`. Switching to a model
-  of the same lane keeps the conversation; to another lane, the owner chooses each time between lossless
-  (what the active conversation gained since its lane was entered, which is what the target lacks, is
-  converted and appended to it: agent-runtime/convert; a target with none gets all of it) and lossy
-  (nothing is: the target resumes as it was left). The model is never told; `model_switches` records each
-  switch, and the turn after it says so in its transcript (`src/agent/switch.ts`).
+  conversation per MODEL: the active one on `chats` (`conversation_model` says whose), the others parked in
+  `chat_conversations`. On every switch, between any two models, the owner chooses between lossless (what
+  the active conversation gained since it was entered, which is what the target's lacks, is appended to the
+  target's; a target with none gets a copy of all of it) and lossy (nothing is: the target's conversation
+  resumes as it was left, or a fresh one opens with the last 10 messages). A LANE is only where a
+  conversation is stored, and so which converter carries it: a Claude login's session files, or the
+  OpenAI-compatible tables; within one Claude login a copy is the session itself, forked. A chat that
+  follows the default moves lossy to the new default's conversation at its next turn. A switch asked for
+  while a turn runs stops the turn first (`model_switch_requests`); the new model answers that turn's
+  messages, and a lossless carry stops where that turn began, so it gets them once. The model is never told;
+  `model_switches` records each switch, and the turn after it says so in its transcript
+  (`src/agent/switch.ts`). A parked conversation whose model left the catalog ages out like an abandoned one.
   `chat_events` is "what actually happened", for people and for retrieval tools.
 
 `home/` is a second data directory, next to the SQLite file and outside the code repository:
@@ -401,7 +406,7 @@ stickers:
   unknown-group card; an approved one is written into `policy.yaml` and committed by a server loop),
   secrets and schedules are its intended callers.
 - **Commands that act on the current chat** are sent in that chat, and only the owner's sender id counts:
-  - `/new`: start a fresh conversation context, in every lane. `chat_events` and the cursor are kept;
+  - `/new`: start a fresh conversation context, forgetting every model's conversation of the chat. `chat_events` and the cursor are kept;
     the new conversation opens with the last 10 messages.
   - `/stop`: stop the turn running in this chat.
 

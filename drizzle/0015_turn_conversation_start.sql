@@ -1,0 +1,1 @@
+ALTER TABLE `turns` ADD `conversation_start` text;

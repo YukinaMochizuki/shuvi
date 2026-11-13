@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ModelMessage } from "agent-runtime/openai-compat";
 import { appendToClaudeSession } from "agent-runtime/convert";
 import { makeDriver } from "../src/agent/backend.ts";
-import { enterModelLane, switchModel } from "../src/agent/switch.ts";
+import { enterChatModel, switchModel } from "../src/agent/switch.ts";
 import { runTurn } from "../src/agent/turn.ts";
 import { conversationLabel } from "../src/console/pages.ts";
 import { conversationOf } from "../src/console/sessions.ts";
@@ -49,7 +49,7 @@ function seed(contextWindow?: number) {
   const chatId = ownerChatId(db);
   const id = "saved";
   saveSession(db, chatId, id);
-  enterModelLane(db, getChat(db, chatId)!);
+  enterChatModel(db, getChat(db, chatId)!);
   const previous = claimTurn(db, chatId)!;
   setTurnConversation(db, previous.id, { backendSessionId: id, opening: "first" });
   finishTurn(db, previous.id, { status: "done" });
@@ -61,7 +61,7 @@ function seed(contextWindow?: number) {
 async function realTurn(db: ReturnType<typeof memDb>) {
   const chatId = ownerChatId(db);
   const turn = claimTurn(db, chatId)!;
-  const model = enterModelLane(db, getChat(db, chatId)!);
+  const model = enterChatModel(db, getChat(db, chatId)!);
   const outcome = await runTurn({
     db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", model: model.model.model, capabilities: [],
     makeAdapter: (boundary, note) => makeDriver({ db, chatId, model, boundary, note, secretsFile: "/nonexistent" }),
@@ -82,10 +82,10 @@ describe("runTurn after a switch", () => {
     // The chat's Claude conversation, as a Claude Code session file.
     const claude = appendToClaudeSession(null, [{ role: "user", content: "CLAUDE-QUESTION" }, { role: "assistant", content: [{ type: "text", text: "CLAUDE-ANSWER" }] }], { configDir, cwd: "/srv" });
     saveSession(db, chatId, claude.sessionId);
-    enterModelLane(db, getChat(db, chatId)!);
+    enterChatModel(db, getChat(db, chatId)!);
     const first = claimTurn(db, chatId)!;
     finishTurn(db, first.id, { status: "done" });
-    expect(switchModel(db, chatId, "local/test-model", "lossless")).toEqual({ mode: "lossless", from: "claude/opus", to: "local/test-model", carried: 2, compacted: false });
+    expect(switchModel(db, chatId, "local/test-model", "lossless")).toEqual({ mode: "lossless", changed: true, from: "claude/opus", to: "local/test-model", carried: 2, compacted: false });
     ownerSays(db, "now on the endpoint");
     let body = "";
     globalThis.fetch = (async (_url, init) => ((body = String(init?.body)), reply())) as typeof fetch;
@@ -105,24 +105,28 @@ describe("runTurn after a switch", () => {
     }
   });
 
-  test("a switch within the lane goes on with the same conversation: `resumed`, with a note", async () => {
+  test("a lossy switch to another model of the same lane opens that model's own conversation: fresh, `switched`, with a note", async () => {
     const { db, chatId, id } = seed();
     addModel(db, { provider: "local", model: "other-model", contextWindow: 100_000 });
-    expect(switchModel(db, chatId, "local/other-model", "lossy").mode).toBe("native");
+    expect(switchModel(db, chatId, "local/other-model", "lossy")).toMatchObject({ changed: true, carried: 0 });
     const turn = claimTurn(db, chatId)!;
     let adapter!: ScriptedAdapter;
     try {
-      expect(await runTurn({ db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", capabilities: [], makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ token: "same" }])) })).toBe("done");
-      expect(adapter.calls.map((call) => call.method)).toEqual(["continueRun"]);
-      expect(getTurn(db, turn.id)!.opening).toBe("resumed");
-      expect(getTurn(db, turn.id)!.backendSessionId).toBe(id);
-      expect(stepsOf(db, turn.id).find((step) => step.kind === "note")?.text).toBe("Model switched from local/test-model to local/other-model; the conversation went on as it was.");
+      expect(await runTurn({ db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", capabilities: [], makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ token: "fresh" }])) })).toBe("done");
+      expect(adapter.calls.map((call) => call.method)).toEqual(["run"]);
+      expect(adapter.calls[0]!.prompt).toContain("earlier chat message"); // fresh: it opens with the last messages
+      expect(getTurn(db, turn.id)!.opening).toBe("switched");
+      expect(getTurn(db, turn.id)!.backendSessionId).not.toBe(id);
+      expect(stepsOf(db, turn.id).find((step) => step.kind === "note")?.text).toBe(
+        "Model switched from local/test-model to local/other-model, lossy: it had no conversation, so a fresh one opens with the chat's last messages.",
+      );
+      expect(db.$client.query("select backend_session_id as s from chat_conversations where chat_id = ? and model = 'local/test-model'").get(chatId)).toEqual({ s: id });
     } finally {
       db.$client.close();
     }
   });
 
-  test("a default moved to another lane without a switch: the next turn moves lossy, and its earlier lane is kept", async () => {
+  test("a default moved to another model without a switch: the next turn moves lossy, and the earlier model's conversation is kept", async () => {
     const { db, chatId, id } = seed();
     addProvider(db, { name: "claude", kind: "claude", configDir: tmp("shuvi-claude-") });
     addModel(db, { provider: "claude", model: "opus" });
@@ -130,15 +134,15 @@ describe("runTurn after a switch", () => {
     const turn = claimTurn(db, chatId)!;
     let adapter!: ScriptedAdapter;
     try {
-      enterModelLane(db, getChat(db, chatId)!);
+      enterChatModel(db, getChat(db, chatId)!);
       expect(await runTurn({ db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", capabilities: [], makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ token: "fresh" }])) })).toBe("done");
       expect(adapter.calls.map((call) => call.method)).toEqual(["run"]);
       expect(adapter.calls[0]!.prompt).toContain("earlier chat message"); // a fresh lane opens with the last messages
       expect(getTurn(db, turn.id)!.opening).toBe("switched");
       expect(stepsOf(db, turn.id).find((step) => step.kind === "note")?.text).toBe(
-        "The chat's model moved to claude/opus (its default changed), lossy: its conversation resumed as it was left, without what was said on the other model.",
+        "The chat moved to claude/opus without a switch (its default changed, or it took up that model's parked conversation), lossy: it had no conversation, so a fresh one opens with the chat's last messages.",
       );
-      expect(db.$client.query("select backend_session_id as s from chat_lanes where chat_id = ? and lane = 'openai-compat'").get(chatId)).toEqual({ s: id });
+      expect(db.$client.query("select backend_session_id as s from chat_conversations where chat_id = ? and model = 'local/test-model'").get(chatId)).toEqual({ s: id });
     } finally {
       db.$client.close();
     }
@@ -146,7 +150,7 @@ describe("runTurn after a switch", () => {
 });
 
 describe("runTurn: several switches, and a driver that cannot be built", () => {
-  test("every switch since the last turn is noted; one across lanes makes the opening `switched`", async () => {
+  test("every switch since the last turn is noted, and makes the opening `switched`", async () => {
     const { db, chatId } = seed();
     addProvider(db, { name: "claude", kind: "claude", configDir: tmp("shuvi-claude-") });
     addModel(db, { provider: "claude", model: "opus" });
@@ -158,8 +162,8 @@ describe("runTurn: several switches, and a driver that cannot be built", () => {
       expect(await runTurn({ db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", capabilities: [], makeAdapter: (b) => new ScriptedAdapter(b, [{ token: "ok" }]) })).toBe("done");
       expect(getTurn(db, turn.id)!.opening).toBe("switched");
       expect(stepsOf(db, turn.id).filter((step) => step.kind === "note").map((step) => step.text)).toEqual([
-        "Model switched from local/test-model to claude/opus, lossy: its conversation resumed as it was left, without what was said on the other model.",
-        "Model switched from claude/opus to local/other-model, lossy: its conversation resumed as it was left, without what was said on the other model.",
+        "Model switched from local/test-model to claude/opus, lossy: it had no conversation, so a fresh one opens with the chat's last messages.",
+        "Model switched from claude/opus to local/other-model, lossy: it had no conversation, so a fresh one opens with the chat's last messages.",
       ]);
     } finally {
       db.$client.close();

@@ -104,6 +104,22 @@ describe("conversations: what the model saw as one", () => {
     expect(shape(db, chat)).toEqual([[[a]], [[b]]]);
   });
 
+  test("a switch to another model's conversation opens another, and so does the switch back to the first model's", () => {
+    const db = memDb();
+    const chat = dm(db);
+    const a = turn(db, chat, 0, 1, { conv: { sid: "opus-1", opening: "first" } });
+    // Lossy to sonnet, a model of the same login with no conversation: a fresh one.
+    const b = turn(db, chat, 2, 3, { conv: { sid: "sonnet-1", opening: "switched" } });
+    const c = turn(db, chat, 4, 5, { conv: { sid: "sonnet-1", opening: "resumed" } });
+    // Lossy back to opus: its own conversation, resumed as it was left, is a run of its own here.
+    const d = turn(db, chat, 6, 7, { conv: { sid: "opus-1", opening: "switched" } });
+    // An old `native` switch kept the conversation: the turn after it was recorded `resumed`, same session.
+    const e = turn(db, chat, 8, 9, { conv: { sid: "opus-1", opening: "resumed" } });
+    expect(shape(db, chat)).toEqual([[[a]], [[b, c]], [[d, e]]]);
+    expect(conversationOf(db, chat, b)!.conversation).toMatchObject({ start: "switched", backendSessionId: "sonnet-1", turns: 2 });
+    expect(conversationOf(db, chat, e)!.conversation).toMatchObject({ id: d, start: "switched", backendSessionId: "opus-1", turns: 2 });
+  });
+
   test("older turns: /new and lost-session alerts are read back as conversation starts, marked inferred", () => {
     const db = memDb();
     const chat = dm(db);

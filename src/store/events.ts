@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, max, ne, notInArray, or } from "drizzle-orm";
 import type { Db } from "./db.ts";
-import { asksForTurn, chatEvents, chatLanes, chats, kv, OUTBOUND_KINDS, TRIGGER_KINDS } from "./schema.ts";
+import { asksForTurn, chatConversations, chatEvents, chats, kv, OUTBOUND_KINDS, TRIGGER_KINDS } from "./schema.ts";
 
 /**
  * Reads and writes on `chat_events`, `chats` and `kv`. Every write that must happen once is an
@@ -195,21 +195,21 @@ export function allChats(db: Db): Chat[] {
 }
 
 /**
- * Forget the active conversation (a lost one): the next turn starts a fresh one in the same lane. The
- * conversations parked in other lanes (agent/switch.ts), `chat_events` and the cursor stay.
+ * Forget the active conversation (a lost one): the next turn starts a fresh one for the same model. The
+ * conversations parked for other models (agent/switch.ts), `chat_events` and the cursor stay.
  */
 export function resetConversation(db: Db, chatId: number): void {
-  db.update(chats).set({ backendSessionId: null, laneEnteredAt: null, contextTokens: null }).where(eq(chats.id, chatId)).run();
+  db.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null }).where(eq(chats.id, chatId)).run();
 }
 
 /**
- * `/new`: forget every conversation of the chat, the active one and those parked in other lanes. Their
- * histories stay until retention prunes them (store/conversations.ts).
+ * `/new`: forget every model's conversation of the chat, the active one and those parked. Their histories
+ * stay until retention prunes them (store/conversations.ts).
  */
 export function forgetConversations(db: Db, chatId: number): void {
   db.transaction((tx) => {
-    tx.update(chats).set({ backendSessionId: null, laneEnteredAt: null, contextTokens: null }).where(eq(chats.id, chatId)).run();
-    tx.delete(chatLanes).where(eq(chatLanes.chatId, chatId)).run();
+    tx.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null }).where(eq(chats.id, chatId)).run();
+    tx.delete(chatConversations).where(eq(chatConversations.chatId, chatId)).run();
   }, { behavior: "immediate" });
 }
 
