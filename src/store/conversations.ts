@@ -1,11 +1,15 @@
+import { and, asc, eq, gt, inArray, lt, max, notExists, sql } from "drizzle-orm";
 import type { ConversationStore, ModelMessage } from "agent-runtime/openai-compat";
 import type { Db } from "./db.ts";
+import { chatLanes, chats, conversationMessages, conversations, turns } from "./schema.ts";
+import { IMMEDIATE } from "./turns.ts";
 
 /**
  * OpenAI-compatible histories are shared by runner processes and belong to a chat. `/new` clears the active
  * session but keeps its history until retention expires. A running turn protects its chat's histories, even
- * before its first session callback. Only a missing conversation row is a lost session; malformed message
- * JSON stays an ordinary error. Loads read one coherent SQLite snapshot.
+ * before its first session callback. Only a missing conversation row is a lost session (`load` returns null,
+ * which the driver reports as agent-runtime's `LostSessionError`); malformed message JSON stays an ordinary
+ * error. Loads read one coherent SQLite snapshot (one statement).
  * Appends, compaction, and pruning use immediate transactions; compaction advances the visible generation,
  * and retention preserves histories used by a chat (active or parked in `chat_lanes`) or a running turn.
  * Cascade deletion requires `PRAGMA foreign_keys = ON`, which `openDb` sets on every connection.
@@ -15,94 +19,95 @@ import type { Db } from "./db.ts";
  * (a newer generation) leaves only the compacted history to return, which is all of it.
  */
 
-/** A durable OpenAI-compatible conversation whose stored history no longer exists. */
-export class LostConversationError extends Error {
-  constructor() {
-    super("OpenAI-compatible conversation history was not found");
-    this.name = "LostConversationError";
-  }
-}
+/** What writes a conversation: the store itself, or a transaction a caller already holds (agent/switch.ts). */
+type Writer = Pick<Db, "select" | "insert" | "update" | "delete">;
+
+/** Rows per insert statement, well under SQLite's bound-variable limit (4 per row). */
+const INSERT_BATCH = 500;
 
 /** Model messages share SQLite across runner processes; system prompts are supplied per turn, not stored. */
 export function conversationStore(db: Db, chatId: number): ConversationStore {
   return {
     async load(id) {
-      const rows = db.$client.query(
-        `select m.message
-         from conversations c
-         left join conversation_messages m
-           on m.conversation_id = c.id and m.generation = c.generation
-         where c.id = ?
-         order by m.seq`,
-      ).all(id) as Array<{ message: string | null }>;
-      if (!rows.length) throw new LostConversationError();
-      return rows.flatMap(({ message }) => message === null ? [] : [JSON.parse(message) as ModelMessage]);
+      const rows = db
+        .select({ message: conversationMessages.message })
+        .from(conversations)
+        .leftJoin(
+          conversationMessages,
+          and(eq(conversationMessages.conversationId, conversations.id), eq(conversationMessages.generation, conversations.generation)),
+        )
+        .where(eq(conversations.id, id))
+        .orderBy(asc(conversationMessages.seq))
+        .all();
+      if (!rows.length) return null;
+      return rows.flatMap(({ message }) => (message === null ? [] : [message]));
     },
     async append(id, messages) {
       appendMessages(db, chatId, id, messages);
     },
     async compact(id, messages) {
-      const serialized = messages.map((message) => JSON.stringify(message));
-      db.$client.transaction(() => {
-        const row = db.$client.query("select generation from conversations where id = ?").get(id) as { generation: number } | null;
+      db.transaction((tx) => {
+        const row = tx.select({ generation: conversations.generation }).from(conversations).where(eq(conversations.id, id)).get();
         const generation = row ? row.generation + 1 : 0;
-        const touchedAt = new Date().toISOString();
-        if (!row) {
-          db.$client.query(
-            "insert into conversations (id, chat_id, generation, written_at) values (?, ?, ?, ?)",
-          ).run(id, chatId, generation, touchedAt);
-        } else {
-          db.$client.query("update conversations set generation = ?, written_at = ? where id = ?").run(
-            generation,
-            touchedAt,
-            id,
-          );
-        }
-        const insert = db.$client.query(
-          "insert into conversation_messages (conversation_id, generation, seq, message) values (?, ?, ?, ?)",
-        );
-        serialized.forEach((message, seq) => insert.run(id, generation, seq, message));
-        db.$client.query("delete from conversation_messages where conversation_id = ? and generation < ?").run(id, generation);
-      }).immediate();
+        const writtenAt = new Date().toISOString();
+        tx.insert(conversations)
+          .values({ id, chatId, generation, writtenAt })
+          .onConflictDoUpdate({ target: conversations.id, set: { generation, writtenAt } })
+          .run();
+        insertRows(tx, id, generation, 0, messages);
+        tx.delete(conversationMessages)
+          .where(and(eq(conversationMessages.conversationId, id), lt(conversationMessages.generation, generation)))
+          .run();
+      }, IMMEDIATE);
     },
   };
 }
 
 /** Append `messages` to conversation `id` of chat `chatId`, creating it when it is new. */
 export function appendMessages(db: Db, chatId: number, id: string, messages: ModelMessage[]): void {
-  db.$client.transaction(() => insertMessages(db, chatId, id, messages)).immediate();
+  db.transaction((tx) => insertMessages(tx, chatId, id, messages), IMMEDIATE);
 }
 
-/** `appendMessages` without its own transaction: for a caller already holding the write lock (agent/switch.ts). */
-export function insertMessages(db: Db, chatId: number, id: string, messages: ModelMessage[]): void {
-  const touchedAt = new Date().toISOString();
-  db.$client.query(
-    `insert into conversations (id, chat_id, written_at) values (?, ?, ?)
-     on conflict(id) do update set written_at = excluded.written_at`,
-  ).run(id, chatId, touchedAt);
-  const row = db.$client.query("select generation from conversations where id = ?").get(id) as { generation: number };
-  const next = db.$client.query(
-    "select coalesce(max(seq), -1) + 1 as seq from conversation_messages where conversation_id = ? and generation = ?",
-  ).get(id, row.generation) as { seq: number };
-  const insert = db.$client.query(
-    "insert into conversation_messages (conversation_id, generation, seq, message) values (?, ?, ?, ?)",
-  );
-  messages.forEach((message, index) => insert.run(id, row.generation, next.seq + index, JSON.stringify(message)));
+/** `appendMessages` inside a transaction the caller already holds (agent/switch.ts), through its handle `tx`. */
+export function insertMessages(tx: Writer, chatId: number, id: string, messages: ModelMessage[]): void {
+  const writtenAt = new Date().toISOString();
+  const { generation } = tx
+    .insert(conversations)
+    .values({ id, chatId, writtenAt })
+    .onConflictDoUpdate({ target: conversations.id, set: { writtenAt } })
+    .returning({ generation: conversations.generation })
+    .get();
+  const last = tx
+    .select({ seq: max(conversationMessages.seq) })
+    .from(conversationMessages)
+    .where(and(eq(conversationMessages.conversationId, id), eq(conversationMessages.generation, generation)))
+    .get();
+  insertRows(tx, id, generation, (last?.seq ?? -1) + 1, messages);
+}
+
+function insertRows(tx: Writer, id: string, generation: number, firstSeq: number, messages: ModelMessage[]): void {
+  for (let i = 0; i < messages.length; i += INSERT_BATCH) {
+    tx.insert(conversationMessages)
+      .values(messages.slice(i, i + INSERT_BATCH).map((message, j) => ({ conversationId: id, generation, seq: firstSeq + i + j, message })))
+      .run();
+  }
 }
 
 export function conversationExists(db: Db, id: string): boolean {
-  return db.$client.query("select 1 from conversations where id = ?").get(id) !== null;
+  return !!db.select({ id: conversations.id }).from(conversations).where(eq(conversations.id, id)).get();
 }
 
 /** Where conversation `id` ends now (`<generation>:<seq>`); null for one with no messages, or none at all. */
-export function conversationEnd(db: Db, id: string): string | null {
-  const row = db.$client
-    .query(
-      `select c.generation as generation, max(m.seq) as seq
-       from conversations c join conversation_messages m on m.conversation_id = c.id and m.generation = c.generation
-       where c.id = ?`,
+export function conversationEnd(db: Pick<Db, "select">, id: string): string | null {
+  const row = db
+    .select({ generation: conversations.generation, seq: max(conversationMessages.seq) })
+    .from(conversations)
+    .innerJoin(
+      conversationMessages,
+      and(eq(conversationMessages.conversationId, conversations.id), eq(conversationMessages.generation, conversations.generation)),
     )
-    .get(id) as { generation: number | null; seq: number | null } | null;
+    .where(eq(conversations.id, id))
+    .get();
   return row && row.seq !== null ? `${row.generation}:${row.seq}` : null;
 }
 
@@ -113,32 +118,46 @@ export function conversationEnd(db: Db, id: string): string | null {
  */
 export function conversationSince(db: Db, id: string, after: string | null): { messages: ModelMessage[]; afterFound: boolean } {
   const at = after ? /^(\d+):(-?\d+)$/.exec(after) : null;
-  const current = db.$client.query("select generation from conversations where id = ?").get(id) as { generation: number } | null;
+  const current = db.select({ generation: conversations.generation }).from(conversations).where(eq(conversations.id, id)).get();
   if (!current) return { messages: [], afterFound: !after };
   const sameGeneration = !!at && Number(at[1]) === current.generation;
-  const rows = db.$client
-    .query("select message from conversation_messages where conversation_id = ? and generation = ? and seq > ? order by seq")
-    .all(id, current.generation, sameGeneration ? Number(at![2]) : -1) as Array<{ message: string }>;
-  return { messages: rows.map((r) => JSON.parse(r.message) as ModelMessage), afterFound: !after || sameGeneration };
+  const rows = db
+    .select({ message: conversationMessages.message })
+    .from(conversationMessages)
+    .where(
+      and(
+        eq(conversationMessages.conversationId, id),
+        eq(conversationMessages.generation, current.generation),
+        gt(conversationMessages.seq, sameGeneration ? Number(at![2]) : -1),
+      ),
+    )
+    .orderBy(asc(conversationMessages.seq))
+    .all();
+  return { messages: rows.map((r) => r.message), afterFound: !after || sameGeneration };
 }
 
 /** Remove abandoned histories older than `before`, preserving histories used by chats or running turns. */
 export function pruneConversations(db: Db, before: string, batch = 500): number {
   let removed = 0;
   for (;;) {
-    const count = db.$client.transaction(() => db.$client.query(
-      `delete from conversations
-       where id in (
-         select c.id
-         from conversations c
-         where c.written_at < ?
-           and not exists (select 1 from chats ch where ch.id = c.chat_id and ch.backend_session_id = c.id)
-           and not exists (select 1 from chat_lanes l where l.chat_id = c.chat_id and l.backend_session_id = c.id)
-           and not exists (select 1 from turns t where t.chat_id = c.chat_id and t.status = 'running')
-         order by c.written_at, c.id
-         limit ?
-       )`,
-    ).run(before, batch).changes).immediate();
+    const count = db.transaction((tx) => {
+      const abandoned = tx
+        .select({ id: conversations.id })
+        .from(conversations)
+        .where(
+          and(
+            lt(conversations.writtenAt, before),
+            notExists(tx.select({ one: sql`1` }).from(chats).where(and(eq(chats.id, conversations.chatId), eq(chats.backendSessionId, conversations.id)))),
+            notExists(
+              tx.select({ one: sql`1` }).from(chatLanes).where(and(eq(chatLanes.chatId, conversations.chatId), eq(chatLanes.backendSessionId, conversations.id))),
+            ),
+            notExists(tx.select({ one: sql`1` }).from(turns).where(and(eq(turns.chatId, conversations.chatId), eq(turns.status, "running")))),
+          ),
+        )
+        .orderBy(asc(conversations.writtenAt), asc(conversations.id))
+        .limit(batch);
+      return tx.delete(conversations).where(inArray(conversations.id, abandoned)).returning({ id: conversations.id }).all().length;
+    }, IMMEDIATE);
     removed += count;
     if (count < batch) return removed;
   }

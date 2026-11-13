@@ -5,9 +5,12 @@ import { appendToClaudeSession, claudeSessionMessages, findClaudeSession, readCl
 import { conversationEnd, conversationExists, conversationSince, insertMessages } from "../store/conversations.ts";
 import type { Db } from "../store/db.ts";
 import { getChat, type Chat } from "../store/events.ts";
-import { chatModel, defaultModel, findModel, getProvider, laneOf, listProviders, OPENAI_COMPAT_LANE, SEEDED_PROVIDER, type CatalogModel } from "../store/models.ts";
+import { chatModel, defaultModel, findModel, getProvider, laneOf, listProviders, parseLane, SEEDED_PROVIDER, unknownLane, type CatalogModel } from "../store/models.ts";
 import { chatLanes, chats, modelSwitches, turns } from "../store/schema.ts";
 import { IMMEDIATE, runningTurnFor } from "../store/turns.ts";
+
+/** A read: the store itself, or the handle of a transaction the caller holds. */
+type Reader = Pick<Db, "select">;
 
 /**
  * Moving a chat to another model, with the owner's choice of what the conversation keeps.
@@ -160,18 +163,31 @@ function moveChat(db: Db, chat: Chat, target: CatalogModel, mode: SwitchMode, op
   const part = mode === "lossless" && chat.backendSessionId ? laneRead(db, fromLane, chat.backendSessionId, session ? chat.laneEnteredAt : null) : { messages: [], whole: false };
   const carried = part.messages.length;
   const compacted = carried > 0 && part.whole && !!session && !!chat.laneEnteredAt;
-  if (carried && toLane !== OPENAI_COMPAT_LANE) {
-    session = appendToClaude(db, toLane, session, part.messages, opts); // a file: before the transaction
+  // Carried into a Claude lane: a file, written before the transaction; into the OpenAI-compatible one: rows,
+  // written inside it.
+  const to = parseLane(toLane);
+  let carryInTransaction = false;
+  if (carried) {
+    switch (to.kind) {
+      case "claude":
+        session = appendToClaude(db, to.provider, session, part.messages, opts);
+        break;
+      case "openai-compat":
+        carryInTransaction = true;
+        break;
+      default:
+        unknownLane(to);
+    }
   }
   if (carried) contextTokens = null; // grown by what was carried: let the driver measure it again
 
   db.transaction((tx) => {
     if (!how.implicit) refuseIfRunning(tx, chat.id);
-    if (carried && toLane === OPENAI_COMPAT_LANE) {
+    if (carryInTransaction) {
       session ??= randomUUID();
-      insertMessages(db, chat.id, session, part.messages);
+      insertMessages(tx, chat.id, session, part.messages);
     }
-    const enteredAt = session ? laneEnd(db, toLane, session) : null;
+    const enteredAt = session ? laneEnd(tx, toLane, session) : null;
     if (chat.backendSessionId) {
       tx.insert(chatLanes)
         .values({ chatId: chat.id, lane: fromLane, backendSessionId: chat.backendSessionId, contextTokens: chat.contextTokens })
@@ -191,16 +207,24 @@ function refuseIfRunning(tx: Pick<Db, "select">, chatId: number): void {
   }
 }
 
-/** The Claude login a `claude:<provider>` lane keeps its sessions in: `dir` undefined = the server user's; null = its provider is gone. */
-function loginOf(db: Db, lane: string): { dir: string | undefined } | null {
-  const provider = getProvider(db, lane.slice("claude:".length));
-  return provider ? { dir: provider.configDir ?? undefined } : null;
+/** The Claude login of provider `provider`: `dir` undefined = the server user's; null = the provider is gone. */
+function loginOf(db: Reader, provider: string): { dir: string | undefined } | null {
+  const p = getProvider(db, provider);
+  return p ? { dir: p.configDir ?? undefined } : null;
 }
 
 function laneHas(db: Db, lane: string, session: string): boolean {
-  if (lane === OPENAI_COMPAT_LANE) return conversationExists(db, session);
-  const login = loginOf(db, lane);
-  return !!login && findClaudeSession(session, login.dir) !== null;
+  const l = parseLane(lane);
+  switch (l.kind) {
+    case "openai-compat":
+      return conversationExists(db, session);
+    case "claude": {
+      const login = loginOf(db, l.provider);
+      return !!login && findClaudeSession(session, login.dir) !== null;
+    }
+    default:
+      return unknownLane(l);
+  }
 }
 
 /**
@@ -208,26 +232,41 @@ function laneHas(db: Db, lane: string, session: string): boolean {
  * that is all it holds because `after` was compacted away. Nothing, when the session or its login is gone.
  */
 function laneRead(db: Db, lane: string, session: string, after: string | null): { messages: ModelMessage[]; whole: boolean } {
-  if (lane === OPENAI_COMPAT_LANE) {
-    const r = conversationSince(db, session, after);
-    return { messages: r.messages, whole: !r.afterFound };
+  const l = parseLane(lane);
+  switch (l.kind) {
+    case "openai-compat": {
+      const r = conversationSince(db, session, after);
+      return { messages: r.messages, whole: !r.afterFound };
+    }
+    case "claude": {
+      const login = loginOf(db, l.provider);
+      if (!login || !findClaudeSession(session, login.dir)) return { messages: [], whole: false };
+      const r = claudeSessionMessages(session, { ...(login.dir ? { configDir: login.dir } : {}), after });
+      return { messages: r.messages, whole: !r.afterFound };
+    }
+    default:
+      return unknownLane(l);
   }
-  const login = loginOf(db, lane);
-  if (!login || !findClaudeSession(session, login.dir)) return { messages: [], whole: false };
-  const r = claudeSessionMessages(session, { ...(login.dir ? { configDir: login.dir } : {}), after });
-  return { messages: r.messages, whole: !r.afterFound };
 }
 
-/** Append `messages` to `session` in a Claude lane (null: a new session). Returns the session. */
-function appendToClaude(db: Db, lane: string, session: string | null, messages: ModelMessage[], opts: SwitchOptions): string {
-  const login = loginOf(db, lane);
-  if (!login) throw new Error(`the lane ${lane} belongs to a provider no longer in the catalog`);
+/** Append `messages` to `session` of Claude provider `provider`'s lane (null: a new session). Returns the session. */
+function appendToClaude(db: Db, provider: string, session: string | null, messages: ModelMessage[], opts: SwitchOptions): string {
+  const login = loginOf(db, provider);
+  if (!login) throw new Error(`the lane claude:${provider} belongs to a provider no longer in the catalog`);
   return appendToClaudeSession(session, messages, { ...(login.dir ? { configDir: login.dir } : {}), ...(opts.cwd ? { cwd: opts.cwd } : {}) }).sessionId;
 }
 
-/** Where `session` in `lane` ends now. */
-function laneEnd(db: Db, lane: string, session: string): string | null {
-  if (lane === OPENAI_COMPAT_LANE) return conversationEnd(db, session);
-  const login = loginOf(db, lane);
-  return login ? readClaudeSession(session, login.dir ? { configDir: login.dir } : {}).end : null;
+/** Where `session` in `lane` ends now. `db` may be a transaction's handle. */
+function laneEnd(db: Reader, lane: string, session: string): string | null {
+  const l = parseLane(lane);
+  switch (l.kind) {
+    case "openai-compat":
+      return conversationEnd(db, session);
+    case "claude": {
+      const login = loginOf(db, l.provider);
+      return login ? readClaudeSession(session, login.dir ? { configDir: login.dir } : {}).end : null;
+    }
+    default:
+      return unknownLane(l);
+  }
 }

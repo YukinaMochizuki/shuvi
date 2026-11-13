@@ -45,7 +45,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | the hook endpoints and their tokens | `src/capabilities/jobs/hooks.ts`, `src/capabilities/jobs/inbound.ts` |
 | receiving updates and the Telegram offset | `src/server/poller.ts`, `src/telegram/inbound.ts` |
 | sending, 429s, long messages | `src/server/sender.ts`, `src/telegram/format.ts` |
-| turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` |
+| turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` (the entry point), `src/runner/run.ts` (the turn's body) |
 | turn liveness, the wall-clock limit | `src/server/spawn.ts`, `src/server/waker.ts` |
 | telling the owner anything (alerts, /status, approvals) | `src/control/bot.ts`, `src/store/control.ts`, `src/control/approvals.ts` |
 | the sticker library: its format and index, ranking, the rules `sticker` enforces | `src/capabilities/stickers/` (`library.ts`, `find.ts`, `rules.ts`) |

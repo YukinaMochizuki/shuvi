@@ -109,7 +109,7 @@ describe("OpenAI-compatible backend factory over mocked fetch", () => {
       expect(next.text).toBe("resumed");
       expect(requests[3]!.messages.map((m) => m.role).slice(-2)).toEqual(["assistant", "user"]);
       expect(requests[3]!.messages[0]).toMatchObject({ role: "system", content: "system two" });
-      expect((await conversationStore(db, 7).load(sessionId)).some((m) => m.role === "system")).toBe(false);
+      expect((await conversationStore(db, 7).load(sessionId))!.some((m) => m.role === "system")).toBe(false);
     } finally {
       globalThis.fetch = savedFetch;
       db.$client.close();
@@ -141,7 +141,7 @@ describe("OpenAI-compatible backend factory over mocked fetch", () => {
       await started;
       controller.abort(new Error("stopped"));
       expect(await running).toBeInstanceOf(Error);
-      expect((await conversationStore(db, 7).load(sessionId)).map((message) => message.role)).toEqual(["user"]);
+      expect((await conversationStore(db, 7).load(sessionId))!.map((message) => message.role)).toEqual(["user"]);
 
       globalThis.fetch = (async (_input, init) => {
         const body = JSON.parse(String(init?.body)) as { messages: Array<{ role: string; content?: unknown }> };

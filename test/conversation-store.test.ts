@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "agent-runtime/openai-compat";
-import { conversationStore, LostConversationError } from "../src/store/conversations.ts";
+import { conversationStore } from "../src/store/conversations.ts";
 import { openDb, type Db } from "../src/store/db.ts";
 import { chats } from "../src/store/schema.ts";
 
@@ -77,10 +77,34 @@ describe("conversation message storage", () => {
     }
   });
 
+  test("the stored form is plain JSON text: rows written as text load as they were, and what the store writes is JSON.stringify of each message", async () => {
+    const { db, store } = database();
+    try {
+      const history: ModelMessage[] = [
+        { role: "user", content: [{ type: "text", text: "日本語 and emoji 🍣, a \"quote\", a \\ backslash\nand a newline" }] },
+        { role: "assistant", content: [{ type: "tool-call", toolCallId: "call_1", toolName: "ws__echo", input: { n: 1.5, list: [null, true], nested: { a: "b" } } }] },
+        { role: "tool", content: [{ type: "tool-result", toolCallId: "call_1", toolName: "ws__echo", output: { type: "text", value: "ok" } }] },
+      ];
+      // Written the way the store wrote before it went through drizzle: raw SQL, JSON.stringify per row.
+      db.$client.query("insert into conversations (id, chat_id, written_at) values ('legacy', 7, ?)").run(old);
+      history.forEach((message, seq) =>
+        db.$client.query("insert into conversation_messages (conversation_id, generation, seq, message) values ('legacy', 0, ?, ?)").run(seq, JSON.stringify(message)),
+      );
+      expect(await store.load("legacy")).toEqual(history);
+      await store.append("legacy", [{ role: "assistant", content: "next" }]);
+      expect(await store.load("legacy")).toEqual([...history, { role: "assistant", content: "next" }]);
+
+      await store.append("session", history);
+      expect(messages(db)).toEqual(history.map((message, seq) => ({ generation: 0, seq, message: JSON.stringify(message) })));
+    } finally {
+      db.$client.close();
+    }
+  });
+
   test("only a missing parent is lost; empty history loads and corrupt JSON remains an error", async () => {
     const { db, store } = database();
     try {
-      await expect(store.load("missing")).rejects.toBeInstanceOf(LostConversationError);
+      await expect(store.load("missing")).resolves.toBeNull();
       await store.compact!("created-by-compaction", [{ role: "user", content: "summary" }]);
       expect(await store.load("created-by-compaction")).toEqual([{ role: "user", content: "summary" }]);
       await store.append("session", []);
@@ -175,7 +199,7 @@ describe("conversation message storage", () => {
     `));
     try {
       await finished;
-      const history = (await store.load("session")).map((message) => String(message.content));
+      const history = (await store.load("session"))!.map((message) => String(message.content));
       expect(history).toHaveLength(180);
       expect(new Set(history).size).toBe(180);
       for (let worker = 0; worker < 3; worker++) {
@@ -205,7 +229,7 @@ describe("conversation message storage", () => {
     try {
       let reads = 0;
       while (!done) {
-        const history = await store.load("session");
+        const history = (await store.load("session"))!;
         const generation = Number(String(history[0]?.content).split(":")[0]);
         expect(history).toEqual(version(generation));
         reads++;

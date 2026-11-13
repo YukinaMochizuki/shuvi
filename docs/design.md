@@ -421,7 +421,7 @@ stickers:
   pid counts as the turn's only while the start time still matches, so a reused pid neither keeps a dead
   turn "running" nor receives a `/stop` meant for it.
 - **A lost conversation** (Claude reports a missing session, or the OpenAI-compatible history is absent
-  from the store): the chat's conversation is reset and the same turn runs again at once, once, opening with
+  from the store; either driver throws agent-runtime's `LostSessionError`, and nothing else counts): the chat's conversation is reset and the same turn runs again at once, once, opening with
   the last 10 messages, as after `/new`. It does not count as a failed attempt.
 - **Backups**: once a day a consistent copy of `shuvi.db` (`VACUUM INTO`, online) and a `git bundle` of
   `home/` go to `$SHUVI_DATA_DIR/backups/<time>/`; the last 7 are kept. A failed backup is alerted and

@@ -1,5 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { addModel, addProvider, chatModel, defaultModel, findModel, laneOf, listModels, seedModels, setDefaultModel } from "../src/store/models.ts";
+import type { ToolBoundary } from "agent-runtime";
+import { driverModel, makeDriver } from "../src/agent/backend.ts";
+import {
+  addModel,
+  addProvider,
+  chatModel,
+  defaultModel,
+  findModel,
+  laneOf,
+  listModels,
+  parseLane,
+  seedModels,
+  setDefaultModel,
+  type CatalogModel,
+  type ProviderKind,
+} from "../src/store/models.ts";
 import { memDb } from "./helpers.ts";
 
 describe("the model catalog", () => {
@@ -29,6 +44,23 @@ describe("the model catalog", () => {
     expect(laneOf({ kind: "claude", name: "work" })).toBe("claude:work");
     expect(laneOf({ kind: "openai-compat", name: "vllm" })).toBe("openai-compat");
     expect(laneOf({ kind: "openai-compat", name: "openrouter" })).toBe("openai-compat");
+  });
+
+  test("a lane reads back as what laneOf wrote; one this code does not know is refused, never taken for a Claude login", () => {
+    expect(parseLane(laneOf({ kind: "claude", name: "work" }))).toEqual({ kind: "claude", provider: "work" });
+    expect(parseLane(laneOf({ kind: "openai-compat", name: "vllm" }))).toEqual({ kind: "openai-compat" });
+    for (const lane of ["vllm", "claude:", "openai-compat:x", ""]) expect(() => parseLane(lane)).toThrow(`unknown lane "${lane}"`);
+  });
+
+  test("a kind this code does not know is refused everywhere, never run as another kind", () => {
+    const vllm = "vllm" as unknown as ProviderKind;
+    expect(() => laneOf({ kind: vllm, name: "x" })).toThrow('unknown provider kind "vllm"');
+    expect(() => addProvider(memDb(), { name: "x", kind: vllm, baseUrl: "http://127.0.0.1:8000/v1" })).toThrow('unknown provider kind "vllm"');
+    const model = { id: "x/m", provider: { kind: vllm, name: "x" }, model: { model: "m" } } as unknown as CatalogModel;
+    expect(() => driverModel(model)).toThrow('unknown provider kind "vllm"');
+    expect(() => makeDriver({ db: memDb(), chatId: 1, model, boundary: {} as ToolBoundary, note: () => {}, secretsFile: "/nonexistent" })).toThrow(
+      'unknown provider kind "vllm"',
+    );
   });
 
   test("one default: the first model, or whichever is made so", () => {

@@ -31,6 +31,14 @@ export type Provider = typeof modelProviders.$inferSelect;
 export type Model = typeof models.$inferSelect;
 export type ProviderKind = Provider["kind"];
 
+/**
+ * The `default` of every `switch` on a provider's kind: a kind added to the schema and not handled there fails
+ * to compile, and a row holding one this code does not know fails loudly instead of running as another kind.
+ */
+export function unknownKind(kind: never): never {
+  throw new Error(`unknown provider kind "${String(kind)}"`);
+}
+
 /** A model as a turn needs it: its id, its row and its provider's. */
 export interface CatalogModel {
   id: string;
@@ -50,9 +58,31 @@ export function modelId(provider: Pick<Provider, "name">, model: Pick<Model, "mo
   return `${provider.name}/${model.model}`;
 }
 
+/** A lane read back: whose conversation home it is (the inverse of `laneOf`). */
+export type Lane = { kind: "claude"; provider: string } | { kind: "openai-compat" };
+
+/** What lane `lane` (as `laneOf` wrote it) is. Throws on one this code does not know, never guessing a kind. */
+export function parseLane(lane: string): Lane {
+  if (lane === OPENAI_COMPAT_LANE) return { kind: "openai-compat" };
+  if (lane.startsWith("claude:") && lane.length > "claude:".length) return { kind: "claude", provider: lane.slice("claude:".length) };
+  throw new Error(`unknown lane "${lane}"`);
+}
+
+/** The `default` of every `switch` on a parsed lane's kind (see `unknownKind`). */
+export function unknownLane(lane: never): never {
+  throw new Error(`unknown lane kind "${String((lane as { kind?: unknown }).kind)}"`);
+}
+
 /** The lane a provider keeps conversations in. */
 export function laneOf(provider: Pick<Provider, "kind" | "name">): string {
-  return provider.kind === "claude" ? `claude:${provider.name}` : OPENAI_COMPAT_LANE;
+  switch (provider.kind) {
+    case "claude":
+      return `claude:${provider.name}`;
+    case "openai-compat":
+      return OPENAI_COMPAT_LANE;
+    default:
+      return unknownKind(provider.kind);
+  }
 }
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,39}$/;
@@ -75,17 +105,22 @@ export function addProvider(db: Db, p: { name: string; kind: ProviderKind; confi
   if (!NAME.test(p.name)) throw new Error(`"${p.name}" is not a provider name: lower-case letters, digits, '.', '_' and '-', at most 40`);
   if (getProvider(db, p.name)) throw new Error(`there is already a provider named "${p.name}"`);
   if (p.apiKey && !KEY_REF.test(p.apiKey)) throw new Error(`the key is named as <secrets profile>.<VARIABLE>, not "${p.apiKey}"`);
-  const row =
-    p.kind === "claude"
-      ? { name: p.name, kind: p.kind, configDir: p.configDir ?? null }
-      : (() => {
-          if (!p.baseUrl) throw new Error("an OpenAI-compatible provider needs its base URL");
-          return { name: p.name, kind: p.kind, baseUrl: checkBaseUrl(p.baseUrl), apiKey: p.apiKey ?? null };
-        })();
-  return db.insert(modelProviders).values(row).returning().get();
+  return db.insert(modelProviders).values(providerRow(p)).returning().get();
 }
 
-export function getProvider(db: Db, name: string): Provider | undefined {
+function providerRow(p: { name: string; kind: ProviderKind; configDir?: string | null; baseUrl?: string | null; apiKey?: string | null }) {
+  switch (p.kind) {
+    case "claude":
+      return { name: p.name, kind: p.kind, configDir: p.configDir ?? null };
+    case "openai-compat":
+      if (!p.baseUrl) throw new Error("an OpenAI-compatible provider needs its base URL");
+      return { name: p.name, kind: p.kind, baseUrl: checkBaseUrl(p.baseUrl), apiKey: p.apiKey ?? null };
+    default:
+      return unknownKind(p.kind);
+  }
+}
+
+export function getProvider(db: Pick<Db, "select">, name: string): Provider | undefined {
   return db.select().from(modelProviders).where(eq(modelProviders.name, name)).get();
 }
 
@@ -99,8 +134,16 @@ export function addModel(db: Db, m: { provider: string; model: string; label?: s
   if (!provider) throw new Error(`there is no provider named "${m.provider}"`);
   const model = m.model.trim();
   if (!model || /\s/.test(model)) throw new Error(`"${m.model}" is not a model id`);
-  if (provider.kind === "openai-compat" && !(Number.isSafeInteger(m.contextWindow) && m.contextWindow! > 0)) {
-    throw new Error("an OpenAI-compatible model needs its context window, in tokens: compaction is measured against it");
+  switch (provider.kind) {
+    case "claude":
+      break;
+    case "openai-compat":
+      if (!(Number.isSafeInteger(m.contextWindow) && m.contextWindow! > 0)) {
+        throw new Error("an OpenAI-compatible model needs its context window, in tokens: compaction is measured against it");
+      }
+      break;
+    default:
+      unknownKind(provider.kind);
   }
   return db.transaction((tx) => {
     const first = !tx.select({ id: models.id }).from(models).limit(1).get();
