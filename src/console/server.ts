@@ -7,7 +7,7 @@ import type { Db } from "../store/db.ts";
 import { sniffImage } from "../store/media.ts";
 import { cardPage, html } from "./html.ts";
 import { chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
-import { loadSettings, settingsPage } from "./settings.ts";
+import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
 import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
 
 /**
@@ -51,10 +51,15 @@ import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
  *   refuses; and the session cookie is SameSite=Strict besides.
  * A write answers 303 to `/settings?r=<id>#<row>`: its result is a FLASH, kept in memory (at most
  * settings-write.ts FLASH_MAX, for FLASH_MS), read once by its random id and not bound to a session; it holds
- * only the note and the form's non-secret fields. The fragment is percent-encoded (settings.ts `anchor`), so
+ * only the note and the form's non-secret fields. The fragment is ASCII-encoded (settings.ts `anchor`), so
  * a `Location` header can carry any model id.
  * Every page is server-rendered with escaped text (html.ts); the CSP allows only this origin's stylesheet,
- * images and one script (console.js: copy buttons, j / k), and forms that post to this origin only.
+ * images and two scripts, and forms and background requests to this origin only. The scripts: htmx (the npm
+ * package `htmx.org`, pinned, served from node_modules at `/htmx.min.js`; html.ts `page` sets its config: no
+ * eval, no script from a response, no history kept in the browser's storage) and console.js (copy buttons,
+ * j / k). Every page works without them; with them, links and forms swap the page in place (html.ts), and
+ * Settings swaps only what changed and fetches a pending probe's row or listing (`/settings/model?id=`,
+ * `/settings/listing`, read routes answering a part of the page) until it is done (settings.ts).
  */
 
 export interface ConsoleDeps {
@@ -85,10 +90,12 @@ export const SESSION_MS = 7 * 24 * 3600_000;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CSS = readFileSync(join(HERE, "style.css"), "utf8");
 const JS = readFileSync(join(HERE, "console.js"), "utf8");
+const HTMX = readFileSync(fileURLToPath(import.meta.resolve("htmx.org/dist/htmx.min.js")), "utf8");
 
 const SECURITY_HEADERS: Record<string, string> = {
   // Inline style attributes only (a size bar's width, a speaker's colour); no inline script at all.
-  "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  // connect-src: htmx's requests, to this origin only.
+  "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "x-content-type-options": "nosniff",
   // Not `no-referrer`: under it a browser serializes a form POST's Origin as `null` (Fetch, "append a
   // request Origin header"), and every write from the Settings page would be refused. `same-origin` sends
@@ -232,6 +239,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   // and they hold nothing but this file's own code.
   if (path === "/style.css") return respond(CSS, 200, "text/css; charset=utf-8", { "cache-control": "public, max-age=3600" });
   if (path === "/console.js") return respond(JS, 200, "text/javascript; charset=utf-8", { "cache-control": "public, max-age=3600" });
+  if (path === "/htmx.min.js") return respond(HTMX, 200, "text/javascript; charset=utf-8", { "cache-control": "public, max-age=3600" });
   try {
     const auth = await authenticate(deps, req, path);
     if (!auth.ok) return auth.response;
@@ -250,10 +258,14 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     // Chats and turns are one navigation now (the list groups turns by chat); the old address leads there.
     if (path === "/chats") return respond(null, 302, "text/plain", { location: "/turns" });
     if (path === "/turns") return htmlResponse(turnsPage(ctx, url.searchParams)!);
-    if (path === "/settings") {
+    if (path === "/settings" || path === "/settings/model" || path === "/settings/listing") {
+      const sctx = { timeZone: ctx.timeZone, now: ctx.now ?? Date.now(), csrf, ...(ctx.who ? { who: ctx.who } : {}) };
+      // A part of the page, fetched by itself while something in it is pending (settings.ts `polls`).
+      if (path === "/settings/model") return htmlResponse(modelPart(sctx, loadSettings(deps.db, new URLSearchParams()), url.searchParams.get("id") ?? "").s);
+      if (path === "/settings/listing") return htmlResponse(listingPart(sctx, loadSettings(deps.db, new URLSearchParams())).s);
       const flash = takeFlash(url.searchParams.get("r"), ctx.now);
       const view = loadSettings(deps.db, url.searchParams, flash);
-      return htmlResponse(settingsPage({ timeZone: ctx.timeZone, now: ctx.now ?? Date.now(), csrf, ...(ctx.who ? { who: ctx.who } : {}) }, view));
+      return htmlResponse(settingsPage(sctx, view));
     }
     const chat = /^\/chats\/(\d+)$/.exec(path);
     if (chat) {

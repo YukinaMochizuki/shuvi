@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { allowedHosts, allowedOrigins } from "../src/console/index.ts";
+import { anchor } from "../src/console/settings.ts";
 import { csrfToken, handleConsole, LOGIN_HEADER, SESSION_COOKIE, type ConsoleDeps } from "../src/console/server.ts";
 import { FLASH_MAX, FLASH_MS, flashCount, SETTINGS_WRITES } from "../src/console/settings-write.ts";
 import { consoleListing, finishListing, getCard, modelsCommand, openConsoleListing } from "../src/control/model-cards.ts";
@@ -167,7 +168,7 @@ describe("the write routes", () => {
     const res = await post(db, "/settings/models/default", { model: "vllm/qwen" });
     expect(res.status).toBe(303);
     const loc = res.headers.get("location")!;
-    expect(loc).toMatch(/#model-vllm%2Fqwen$/);
+    expect(loc).toMatch(/#model-vllm_2fqwen$/);
     expect(findModel(db, "vllm/qwen")!.model.isDefault).toBe(true);
     expect(getCard(db, card.id)!.text).toContain("vllm/qwen ★");
     const page = loc.replace(/#.*$/, "");
@@ -179,7 +180,7 @@ describe("the write routes", () => {
     const db = setup();
     let t = text(await write(db, "/settings/models/add", { provider: "vllm", model: "mistral", context_window: "16384" }));
     expect(t).toContain("Added vllm/mistral (16384 tokens). Probing it.");
-    expect(findModel(db, "vllm/mistral")!.model).toMatchObject({ contextWindow: 16384, probeStatus: "checking" });
+    expect(findModel(db, "vllm/mistral")!.model).toMatchObject({ contextWindow: 16384, probeStartedAt: expect.any(String) });
     expect(t).toContain("probe checking…");
     t = text(await write(db, "/settings/models/add", { provider: "vllm", model: "nolen", context_window: "" }));
     expect(t).toContain("Could not add vllm/nolen: an OpenAI-compatible model needs its context window");
@@ -194,7 +195,7 @@ describe("the write routes", () => {
   test("models/probe asks for a probe of an OpenAI-compatible model only", async () => {
     const db = setup();
     expect(text(await write(db, "/settings/models/probe", { model: "vllm/llama" }))).toContain("Probing vllm/llama.");
-    expect(findModel(db, "vllm/llama")!.model.probeStatus).toBe("checking");
+    expect(findModel(db, "vllm/llama")!.model.probeStartedAt).toBeString();
     expect(text(await write(db, "/settings/models/probe", { model: "claude/opus" }))).toContain("claude/opus is not probed: only an OpenAI-compatible model is.");
     expect(text(await write(db, "/settings/models/probe", { model: "vllm/gone" }))).toContain("There is no model vllm/gone in the catalog.");
   });
@@ -304,7 +305,7 @@ describe("adding a provider lists its models through the server's background pas
     expect(text(html)).toContain("✓ in the catalog");
     html = await write(db, "/settings/listings/add", { card: String(l.cardId), index: "1", context_window: "8192" });
     expect(text(html)).toContain("Added lab/nolen (8192 tokens); probing it.");
-    expect(findModel(db, "lab/nolen")!.model).toMatchObject({ contextWindow: 8192, probeStatus: "checking" });
+    expect(findModel(db, "lab/nolen")!.model).toMatchObject({ contextWindow: 8192, probeStartedAt: expect.any(String) });
     expect(text(await write(db, "/settings/listings/add", { card: String(l.cardId), index: "0" }))).toContain("lab/qwen3 is already in the catalog.");
     expect(text(await write(db, "/settings/listings/add", { card: String(l.cardId), index: "7" }))).toContain("That listing is closed");
 
@@ -437,11 +438,11 @@ describe("the write boundary", () => {
 });
 
 describe("review fixes", () => {
-  test("B1: a non-ASCII model id: every write answers its 303, with a percent-encoded fragment that is the row's id", async () => {
+  test("B1: a non-ASCII model id: every write answers its 303, with an ASCII fragment that is the row's id", async () => {
     const db = setup();
     addModel(db, { provider: "vllm", model: "qwen-日本", contextWindow: 10 });
     const id = "vllm/qwen-日本";
-    const frag = `#model-${encodeURIComponent(id)}`;
+    const frag = `#${anchor("model", id)}`;
     const cases: [string, Record<string, string>][] = [
       ["/settings/models/default", { model: id }],
       ["/settings/models/probe", { model: id }],
@@ -454,14 +455,14 @@ describe("review fixes", () => {
       expect(res.status).toBe(303);
       const loc = res.headers.get("location")!;
       expect(loc).toMatch(/^[\x21-\x7e]+$/); // printable ASCII only
-      expect(loc.endsWith(path === "/settings/models/add" ? `#model-${encodeURIComponent("vllm/llama-ελληνικά")}` : frag)).toBe(true);
+      expect(loc.endsWith(path === "/settings/models/add" ? `#${anchor("model", "vllm/llama-ελληνικά")}` : frag)).toBe(true);
     }
-    expect(findModel(db, id)!.model).toMatchObject({ isDefault: true, probeStatus: "checking", vision: true, visionSet: true, label: "日本語のラベル", contextWindow: 4096 });
+    expect(findModel(db, id)!.model).toMatchObject({ isDefault: true, probeStartedAt: expect.any(String), vision: true, visionSet: true, label: "日本語のラベル", contextWindow: 4096 });
     expect(findModel(db, "vllm/llama-ελληνικά")).toBeDefined();
     // The page's own anchors are encoded the same way, so the fragment lands on the row.
     const html = await get(db, "/settings");
     expect(html).toContain(`id="${frag.slice(1)}"`);
-    expect(html).toContain(`${frag}">Edit</a>`);
+    expect(html).toMatch(new RegExp(`${frag}"[^>]*>Edit</a>`));
     expect(html).not.toMatch(/(href|id)="[^"]*model-vllm\/qwen-日本/);
   });
 

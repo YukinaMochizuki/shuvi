@@ -47,8 +47,10 @@ The same operations as the control bot's `/models` and `/provider`, through the 
   another). The default model, or a provider holding it, cannot be removed: make another model the default
   first.
 
-Probes and listings run in the server, as for the control bot. The page shows them as they stand; reload it
-to see one finish.
+Probes and listings run in the server, as for the control bot. While one is pending, its row (or the listing
+panel) updates itself every second with how long it has waited and how long a request may take, and has a
+Cancel: cancelling stops the request itself, and a cancelled probe leaves the model's last result as it was.
+Without script, reload the page to see one finish.
 
 ### The write boundary
 
@@ -66,6 +68,9 @@ check:
   After a server restart, a page loaded before it is refused: reload it.
 
 The page needs no script: each write answers with a redirect back to `/settings`, which shows its result once.
+With script (htmx, served by the console itself), a button is disabled and shows that it is working the
+moment it is pressed, and the answer replaces the page in place without a reload. The checks above are the
+same either way.
 
 ## Where the data comes from
 

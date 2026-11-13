@@ -18,6 +18,7 @@ import {
   removeModel,
   removeProvider,
   setDefaultModel,
+  probePending,
   unknownKind,
   type CatalogModel,
 } from "../store/models.ts";
@@ -133,17 +134,16 @@ export function relativeTime(at: string, now = Date.now()): string {
 
 /** The last probe got no structured tool call: she cannot speak on it. */
 export function probeWarned(m: CatalogModel): boolean {
-  return m.model.probeStatus === "text-instead" || m.model.probeStatus === "failed";
+  return !probePending(m) && (m.model.probeStatus === "text-instead" || m.model.probeStatus === "failed");
 }
 
 /** A model's probe state in a few words; null when it has never been probed (a Claude model never is). */
 export function probeText(m: CatalogModel): string | null {
   const ms = m.model.probeLatencyMs != null ? `, ${m.model.probeLatencyMs} ms` : "";
+  if (probePending(m)) return "checking…";
   switch (m.model.probeStatus) {
     case null:
       return null;
-    case "checking":
-      return "checking…";
     case "ok":
       return `ok${ms}`;
     case "text-instead":
@@ -400,7 +400,7 @@ function renderModels(db: Db, state: State, cb: (a: string) => string): { text: 
         const n = first + i + 1;
         const row: Button[] = [];
         if (!m.model.isDefault) row.push({ text: `${n} · Make default`, callback_data: cb(`d${m.model.id}`) });
-        if (m.provider.kind === "openai-compat" && m.model.probeStatus !== "checking") row.push({ text: `${n} · Re-probe`, callback_data: cb(`q${m.model.id}`) });
+        if (m.provider.kind === "openai-compat" && !probePending(m)) row.push({ text: `${n} · Re-probe`, callback_data: cb(`q${m.model.id}`) });
         row.push({ text: `${n} · Remove`, callback_data: cb(`r${m.model.id}`) });
         return row;
       });

@@ -41,7 +41,32 @@ export function href(path: string, query: Record<string, string | number | undef
   return s ? `${path}?${s}` : path;
 }
 
-/** The shell every page is drawn in: the top bar, then `body`. `here`: the top bar's section to mark. */
+/**
+ * htmx's configuration (server.ts serves htmx itself): no `eval` and no script from a response (the CSP refuses
+ * both anyway); no copy of a page kept in the browser's storage (pages hold chats), so Back fetches the page
+ * again; requests to this origin only; no style injected (the CSP's style-src keeps to the stylesheet); and an
+ * error answer (a refused write, a page that failed, a 404) is shown like any page rather than dropped.
+ */
+const HTMX_CONFIG = JSON.stringify({
+  allowEval: false,
+  allowScriptTags: false,
+  historyCacheSize: 0,
+  refreshOnHistoryMiss: true,
+  selfRequestsOnly: true,
+  includeIndicatorStyles: false,
+  responseHandling: [
+    { code: "204", swap: false },
+    { code: "[2345]..", swap: true },
+  ],
+});
+
+/**
+ * The shell every page is drawn in: the top bar, then `body`. `here`: the top bar's section to mark.
+ *
+ * BOOSTED (htmx `hx-boost`): with script, a link or a form fetches its page in the background and swaps the body,
+ * keeping the stylesheet and scripts, with the URL and Back as for a load; the bar under the top bar
+ * (`#progress`) shows while a request is out. Without script, they are plain links and forms.
+ */
 export function page(title: string, body: Raw, who?: string, here?: "turns" | "settings"): string {
   return `<!doctype html>${html`<html lang="en">
 <head>
@@ -49,10 +74,13 @@ export function page(title: string, body: Raw, who?: string, here?: "turns" | "s
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${title} · shuvi</title>
+<meta name="htmx-config" content="${HTMX_CONFIG}">
 <link rel="stylesheet" href="/style.css">
+<script src="/htmx.min.js" defer></script>
 <script src="/console.js" defer></script>
 </head>
-<body>
+<body hx-boost="true" hx-indicator="#progress">
+<div id="progress" class="progress" aria-hidden="true"></div>
 <header class="topbar"><a class="brand" href="/turns">shuvi</a><span class="crumb">console</span>
 <nav><a href="/turns" class="${here === "turns" ? "here" : ""}">Turns</a><a href="/settings" class="${here === "settings" ? "here" : ""}">Settings</a></nav>
 ${who ? html`<span class="who">${who}</span>` : ""}</header>

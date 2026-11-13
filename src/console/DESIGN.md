@@ -112,12 +112,13 @@ One column (max 1080px, centred), reached from the top bar's Turns / Settings. W
 - **Providers**: name, kind, base URL or config dir, the key's `<profile>.<VAR>` (never a value), model
   count; List models (an endpoint), Remove.
 - **Models**, under their provider: ★ default, id, label; context window, vision with where it came from
-  ("set by you" / "from probe" / "not known yet"), the probe (checking, ok with latency, ⚠ text-instead, ⚠
-  failed with its reason, when); the chats whose own model it is (the default: how many chats run on it).
-  Make default, Re-probe, Vision on / off / auto (auto: follow the probe), Edit (label, context window),
-  Remove. A warned row has an amber edge, a failed one red.
-- **Add a provider**: the form; an endpoint's `/models` listing then shows in a panel (listing…, the list
-  with Add per model, ✓ for those in the catalog and a context-window field where the listing gives none,
+  ("set by you" / "from probe" / "not known yet"), the probe (checking with the time waited and a request's
+  limit, ok with latency, ⚠ text-instead, ⚠ failed with its reason, when); the chats whose own model it is
+  (the default: how many chats run on it). Make default, Re-probe (Cancel probe while one is pending), Vision
+  on / off / auto (auto: follow the probe), Edit (label, context window), Remove. A warned row has an amber
+  edge, a failed one red.
+- **Add a provider**: the form; an endpoint's `/models` listing then shows in a panel (listing… with the time
+  waited and Cancel, the list with Add per model, ✓ for those in the catalog and a context-window field where the listing gives none,
   or why it failed), until Done.
 - **Remove** is a link: the row opens a red confirmation panel naming what it removes and the chats on it.
   On the default (or its provider) the page shows the control bot's refusal instead. Edit opens a form in
@@ -126,8 +127,11 @@ One column (max 1080px, centred), reached from the top bar's Turns / Settings. W
   pink refused, red failed.
 
 Every button is a POST form (to `/settings/<area>/<verb>`, settings-write.ts) carrying the page's CSRF token;
-the server answers 303 back to `/settings`, so a reload never repeats a write. A probe or a listing runs in the
-server; the page shows its progress when reloaded (no script). The write boundary is in server.ts's header.
+the server answers 303 back to `/settings`, so a reload never repeats a write. With script, the form posts in
+the background: the button is disabled and shows a spinner, and the answer's `<main>` replaces the page's in
+place (no reload, no jump). A probe or a listing runs in the server; while one is pending, its row or the
+listing panel fetches itself every second until it is done (without script, a reload shows it). The write
+boundary is in server.ts's header.
 
 ## Components
 
@@ -173,5 +177,12 @@ server; the page shows its progress when reloaded (no script). The write boundar
 
 ## Script
 
-`/console.js` (same origin, CSP `script-src 'self'`), optional: copy buttons, and j / k to move through the
-list's rows (segments). Everything works without it, the Settings page's forms included.
+Two scripts, both same origin (CSP `script-src 'self'`, `connect-src 'self'`), both optional: everything
+works without them, the Settings page's forms included.
+
+- **htmx** (the pinned npm package, served at `/htmx.min.js`; html.ts `page` holds its configuration). Every
+  page is boosted: a link or a form fetches its page in the background and swaps the body, with the URL and
+  Back as for a load. A 2px bar under the top bar shows while a request is out (after 150 ms, so a quick one
+  does not flash it). Settings swaps only its `<main>`, and pending parts fetch themselves (above).
+- **`/console.js`**: copy buttons, j / k to move through the list's rows (segments), and a line in the top bar
+  when a request got no answer at all (the server restarting).

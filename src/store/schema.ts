@@ -76,9 +76,11 @@ export const modelProviders = sqliteTable("model_providers", {
  * and `vision` say what an OpenAI-compatible one can do (a Claude model's are the CLI's to know). At most one
  * row is the default, which chats without a model of their own run on.
  *
- * An OpenAI-compatible model's PROBE (server/probes.ts) is stored here too: `probe_status` is `checking` while
- * one runs (one left `checking` by a restart runs again), then `ok` (a structured tool call came back),
- * `text-instead` (it answered in text: without tools she cannot speak) or `failed` (`probe_error` says why).
+ * An OpenAI-compatible model's PROBE (server/probes.ts) is stored here too. `probe_started_at` is set while one is
+ * asked or running (one left set by a restart runs again; cleared when it finishes or is cancelled).
+ * `probe_status` is the LAST probe's result, kept while a new one runs so a cancelled probe leaves it as it was:
+ * `ok` (a structured tool call came back), `text-instead` (it answered in text: without tools she cannot speak)
+ * or `failed` (`probe_error` says why).
  * `probe_vision` is whether the last probe that tried saw a picture accepted (null: not known); it sets
  * `vision` unless the owner set `vision` himself (`vision_set`).
  */
@@ -96,8 +98,10 @@ export const models = sqliteTable(
     /** The owner set `vision` himself: a probe no longer changes it. */
     visionSet: integer("vision_set", { mode: "boolean" }).notNull().default(false),
     isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
-    /** Null: never probed (a Claude model never is). */
-    probeStatus: text("probe_status", { enum: ["checking", "ok", "text-instead", "failed"] }),
+    /** The last probe's result. Null: never finished one (a Claude model never is). */
+    probeStatus: text("probe_status", { enum: ["ok", "text-instead", "failed"] }),
+    /** Set while a probe is asked or running: when it was asked. */
+    probeStartedAt: text("probe_started_at"),
     probeError: text("probe_error"),
     probeLatencyMs: integer("probe_latency_ms"),
     probedAt: text("probed_at"),

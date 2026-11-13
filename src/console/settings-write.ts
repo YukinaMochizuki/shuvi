@@ -4,6 +4,7 @@ import type { Db } from "../store/db.ts";
 import {
   addModel,
   addProvider,
+  cancelProbe,
   editModel,
   findModel,
   getProvider,
@@ -30,6 +31,8 @@ import { anchor, type ProviderForm, type SettingsNote } from "./settings.ts";
  *   models/add         provider, model, context_window   `addModel`, then `markProbing`
  *   models/default     model                    `setDefaultModel`
  *   models/probe       model                    `markProbing` (an OpenAI-compatible model only)
+ *   models/probe-cancel model                   `cancelProbe`: back to its last result; the server's next pass
+ *                                               aborts the request in flight
  *   models/vision      model, vision=on|off|auto  `setModelVision` / `setModelVisionAuto`
  *   models/edit        model, label, context_window  `editModel`
  *   models/remove      model                    `removeModel` (refused for the default)
@@ -38,7 +41,10 @@ import { anchor, type ProviderForm, type SettingsNote } from "./settings.ts";
  *
  * Every change to the catalog is followed by `catalogChanged`, so the control bot's open cards show it. Each
  * runs in one IMMEDIATE transaction. Probes and listings run in the server's background pass
- * (server/probes.ts), as the control bot's do.
+ * (server/probes.ts), as the control bot's do; a Cancel only changes the row, and that pass stops the request.
+ *
+ * A write sent by htmx (settings.ts `writes`) gets the same answer: the browser follows the 303, and htmx puts
+ * that page's `<main>` in place of the one the form was on.
  *
  * The answer is a 303 to `/settings` (POST, redirect, GET: a reload never repeats a write) carrying the
  * result as a FLASH: a random id in `?r=`, its note kept here in memory for FLASH_MS (at most FLASH_MAX of
@@ -94,6 +100,7 @@ export const SETTINGS_WRITES = [
   "/settings/models/add",
   "/settings/models/default",
   "/settings/models/probe",
+  "/settings/models/probe-cancel",
   "/settings/models/vision",
   "/settings/models/edit",
   "/settings/models/remove",
@@ -229,6 +236,12 @@ function write(db: Db, path: SettingsWrite, form: Form, key: string): Outcome {
       const probing = markProbing(db, m.model.id);
       catalogChanged(db);
       return { note: probing ? { tone: "ok", text: `Probing ${m.id}.`, on: m.id } : { tone: "refused", text: `${m.id} is not probed: only an OpenAI-compatible model is.`, on: m.id }, anchor: anchor("model", m.id) };
+    }
+    case "/settings/models/probe-cancel": {
+      const m = model(db, form);
+      const cancelled = cancelProbe(db, m.model.id);
+      if (cancelled) catalogChanged(db);
+      return { note: cancelled ? { tone: "ok", text: `Cancelled the probe of ${m.id}.`, on: m.id } : { tone: "refused", text: `${m.id} has no probe to cancel: it had finished.`, on: m.id }, anchor: anchor("model", m.id) };
     }
     case "/settings/models/vision": {
       const m = model(db, form);
