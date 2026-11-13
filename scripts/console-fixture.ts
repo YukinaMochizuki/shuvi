@@ -7,7 +7,7 @@
  *
  *   bun scripts/console-fixture.ts [port]     # default 8787; prints the pages to open
  */
-import { allowedHosts } from "../src/console/index.ts";
+import { allowedHosts, allowedOrigins } from "../src/console/index.ts";
 import { handleConsole, LOGIN_HEADER } from "../src/console/server.ts";
 import { chatGrouping } from "../src/console/sessions.ts";
 import { buildConsoleFixture } from "../test/console-fixture.ts";
@@ -17,13 +17,14 @@ const port = Number(process.argv[2] ?? 8787);
 const f = await buildConsoleFixture({ pauses: true, rich: true });
 const users = new Set(["owner@example.com"]);
 const hosts = allowedHosts({ listen: `127.0.0.1:${port}` }, port);
+const origins = allowedOrigins({ listen: `127.0.0.1:${port}` }, port);
 Bun.serve({
   hostname: "127.0.0.1",
   port,
   fetch(req) {
     const headers = new Headers(req.headers);
     headers.set(LOGIN_HEADER, "owner@example.com");
-    return handleConsole({ db: f.db, timeZone: "Asia/Taipei", dataDir: f.dataDir, ownerId: OWNER, users, allowedHosts: hosts }, new Request(req, { headers }));
+    return handleConsole({ db: f.db, timeZone: "Asia/Taipei", dataDir: f.dataDir, ownerId: OWNER, users, allowedHosts: hosts, allowedOrigins: origins }, new Request(req, { headers }));
   },
 });
 const base = `http://127.0.0.1:${port}`;
@@ -33,4 +34,4 @@ const chats = (f.db.$client.query("select id from chats order by id").all() as {
 const places = chats.flatMap((c) => chatGrouping(f.db, c));
 const segments = [...new Set(places.map((p) => p.sessionId))].map((id) => `/segments/${id}`);
 const conversations = [...new Set(places.map((p) => p.conversationId))].map((id) => `/conversations/${id}`);
-for (const p of ["/turns", ...conversations, ...segments, "/chats/1", ...ids.map((id) => `/turns/${id}`)]) console.log(`  ${base}${p}`);
+for (const p of ["/settings", "/turns", ...conversations, ...segments, "/chats/1", ...ids.map((id) => `/turns/${id}`)]) console.log(`  ${base}${p}`);

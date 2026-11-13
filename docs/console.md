@@ -1,7 +1,8 @@
 # The console
 
-A private, read-only web view of what the assistant did: every turn as the model saw it, every chat, and each
-chat's timeline. It is for the owner, to debug and tune her. Nothing in it can change anything.
+A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
+timeline. It is for the owner, to debug and tune her. It is read-only, except for one page, **Settings**, which
+manages the model catalog (below). Nothing else in it can change anything.
 
 ## What it shows
 
@@ -28,6 +29,43 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
     index, memory), each with its size, and a diff against the previous turn's prompt in the chat.
   - *Raw input*: the exact text and images the model received.
 - **A chat** (`/chats/<id>`): the chat's whole log, each turn's boundary a divider linking to it.
+- **Settings** (`/settings`): the model catalog. See below.
+
+## Settings: the model catalog
+
+The same operations as the control bot's `/models` and `/provider`, through the same code
+(`src/store/models.ts`, `src/control/model-cards.ts`), so a change in either shows in the other:
+
+- **Providers**: each one's kind (Claude login or OpenAI-compatible), base URL or config dir, key reference
+  (`<profile>.<VAR>`, a name in the secrets file: a key is never entered or shown), and model count. Add one
+  (an OpenAI-compatible provider's `/models` is then listed, to add models from with one press; one whose
+  listing gives no context length asks for it), list its models again, or remove it with its models.
+- **Models**: the default (★), each one's context window, vision (set by you, or from its probe), its last
+  probe, and the chats whose own model it is. Make one the default, re-probe it, set vision on, off or auto
+  (follow the probe), edit its label and context window, add one by its id, or remove it.
+- **Remove** asks first, naming the chats that would lose their model (their next turn fails until they get
+  another). The default model, or a provider holding it, cannot be removed: make another model the default
+  first.
+
+Probes and listings run in the server, as for the control bot. The page shows them as they stand; reload it
+to see one finish.
+
+### The write boundary
+
+Settings is the console's only way in for a write. Every other page answers GET and HEAD only (and
+`/login` its POST); a POST to it is refused with 405. Settings' buttons POST to `/settings/<area>/<verb>`, and a
+GET there is refused too. A POST there is carried out only if it passes, on top of the sign-in and the Host
+check:
+
+- **Origin**: its `Origin` header is the console's own origin: `SHUVI_CONSOLE_URL`'s, or
+  `http://127.0.0.1:<port>` (`localhost`, `[::1]`) for the ssh tunnel. A request without one, or from any other
+  site, gets 403.
+- **A CSRF token**: every form carries a token for your session, an HMAC under a secret the server draws
+  at random when it starts. With the tailnet login there is no cookie, so the token is derived from your
+  login. With the token sign-in it is derived from your session cookie. A wrong or missing token gets 403.
+  After a server restart, a page loaded before it is refused: reload it.
+
+The page needs no script: each write answers with a redirect back to `/settings`, which shows its result once.
 
 ## Where the data comes from
 
@@ -96,3 +134,6 @@ ssh -L 8787:127.0.0.1:8787 <the shuvi machine>   # then open http://127.0.0.1:87
 ```
 
 With neither variable set, the console is off. Transcripts are recorded and pruned either way.
+
+Over the tunnel, open it as `http://127.0.0.1:8787` (or `localhost`): those are the origins a Settings change
+is accepted from.
