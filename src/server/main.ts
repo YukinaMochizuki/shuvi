@@ -6,7 +6,9 @@
  *   poller    long-poll Telegram, record updates, advance the offset (poller.ts); then hand the new events
  *             to the capabilities' inbound hooks (a media prewarm), before any turn for them can start
  *   waker     reap dead turns, start a turn where one is due (waker.ts)
- *   commands  /stop, /new (commands.ts)
+ *   commands  /stop, /new, /model (commands.ts); switch requests, and the control cards waiting on them
+ *             (control/model-cards.ts `switchCardPass`)
+ *   catalog   probes of OpenAI-compatible models, and the `/models` listings `/provider add` waits on (probes.ts)
  *   sender    deliver what turns queued (sender.ts)
  *   typing    show "typing…" in chats with a running turn
  *   policy    reload home/policy.yaml when it changes; write the policy changes the owner approved
@@ -32,6 +34,7 @@ import { pruneTranscriptMedia } from "../agent/transcript.ts";
 import { backupPass } from "../control/backup.ts";
 import { checkConsole, consoleOn, startConsole } from "../console/index.ts";
 import { CONTROL_COMMANDS, controlPollOnce, controlSendPass, deployedCommit, outboundAlertPass } from "../control/bot.ts";
+import { switchCardPass } from "../control/model-cards.ts";
 import { enabledCapabilities } from "../capabilities/index.ts";
 import { capabilityInbound, capabilityLoops } from "../capabilities/types.ts";
 import { loadConfig } from "../env.ts";
@@ -47,6 +50,7 @@ import { telegramFiles } from "../telegram/files.ts";
 import { commandPass, GroupMenus, MAIN_COMMANDS, registerCommands, switchRequestPass } from "./commands.ts";
 import { loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
+import { backgroundPass } from "./probes.ts";
 import { sendPass } from "./sender.ts";
 import { signalTurn, spawnTurn } from "./spawn.ts";
 import { wakerPass } from "./waker.ts";
@@ -82,6 +86,7 @@ void loop(
   async () => {
     commandPass(db);
     switchRequestPass(db);
+    switchCardPass(db);
     wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers });
   },
   300,
@@ -96,6 +101,8 @@ void loop(
   },
   1000,
 );
+// Started in the background; the rows say what is asked, so a restart's interrupted ones start again here.
+void loop("catalog", async () => void backgroundPass(db, { secretsFile: cfg.secretsFile }), 1000);
 void loop("sender", async () => (await sendPass(db, api)).backoffMs, 300);
 void loop(
   "typing",

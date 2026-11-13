@@ -286,7 +286,8 @@ export function modelsToProbe(db: Db): CatalogModel[] {
 export interface ProbeRecord {
   status: "ok" | "text-instead" | "failed";
   error: string | null;
-  latencyMs: number;
+  /** Null: nothing was sent (a key that cannot be read). */
+  latencyMs: number | null;
   /** Whether a picture was accepted; null: the probe learned nothing about it. */
   vision: boolean | null;
 }
