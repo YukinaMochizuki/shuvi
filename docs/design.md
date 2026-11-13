@@ -59,8 +59,10 @@ The **shuvi server** (an always-on Bun process) runs:
 - **job watcher**: watches background jobs and writes an event back to the origin chat when one ends.
 - **hook endpoints**: `/jobs/<id>/report` and `/inbound/<source>`, on the tailnet only.
 
-**runner child**: one process per turn; it runs one turn through agent-runtime and exits. It is detached
-and outlives the server, which is what makes invariant 3 hold.
+**runner child**: one process per turn; it runs one turn through agent-runtime and exits. It is detached,
+so where the host lets it (systemd with `KillMode=process`) it outlives the server. In a container it cannot,
+so the server drains on SIGTERM instead: it takes nothing new in and waits for the running turns before it
+exits (§16). Either way is what makes invariant 3 hold.
 
 ## 3. Data
 
@@ -540,7 +542,7 @@ the owner.
   file, and every value it ever held (kept beside it, mode 600), is redacted, also where output is cut at a
   byte offset; a file holding one is not sent; with nothing to redact by, output is withheld.
 
-## 16. Deployment assumptions
+## 16. Deployment
 
 - Turns run on agent-runtime's drivers: Claude's starts a Claude Code subprocess per turn, so the machine
   needs at least 4 GB of memory for 2–3 turns at once; an OpenAI-compatible model is called from the runner
@@ -548,8 +550,103 @@ the owner.
   start seeds it with the Claude login and `SHUVI_MODEL`.
 - Heavy computation runs remotely.
 
+**The container.** shuvi ships as one image (`Dockerfile`): Bun on Debian slim, a non-root user, `tini` as
+PID 1, and only the server, the runner and their dependencies (the Claude Code CLI comes with the Agent
+SDK). Configuration is the environment (`src/env.ts`). Two volumes hold everything that must survive a
+redeploy: `SHUVI_DATA_DIR` (`/data`: `shuvi.db`, `home/`, `media/`, `backups/`) and the Claude login dir
+(`SHUVI_CLAUDE_CONFIG_DIR`, `/claude`: the login and Claude Code's session files), both owned by the image's
+user. `SHUVI_CLAUDE_CONFIG_DIR`, when set, is applied to the catalog's `claude` login on every start, not only
+the first (`reconcileClaudeLogin`, `src/store/models.ts`), so a store moved in from elsewhere uses the volume.
+The working directory is fixed (`/app`), which matters because Claude Code files a session under the
+directory it runs in: a store moved in from a checkout elsewhere finds none of its Claude sessions once, and
+each chat starts over as after a lost session. CI builds the image on every push to `main` once the checks
+pass, and pushes it to a private registry; from there the platform's own flow pins the digest and deploys it.
+
+One server per data dir, always: a turn's liveness is its pid and that pid's start time (`spawn.ts`), which
+mean nothing across containers, so a second server started on the same `/data` while the first still runs
+(or drains) would take its turns for dead and run them again beside the originals, breaking invariants 2 and
+4. The old container must have stopped before the new one starts.
+
+Running it from a checkout under systemd, with `KillMode=process`, is the old way; it still works, but a
+restart there now drains too: up to `SHUVI_DRAIN_SEC` without polling, where before the server exited at once
+and its turns carried on. Accepted, since the container is the deployment.
+
+**Draining shutdown** (`src/server/drain.ts`). In a container, stopping the server stops every process in
+it: a runner child can no longer outlive the server, so invariant 3 is kept by waiting instead. On SIGTERM
+(tini forwards it to the server alone):
+
+1. the Telegram poller stops, and the waker starts no new turn (it still reaps dead turns and enforces the
+   wall-clock limit). The sender, the control bot and every other loop keep running;
+2. the server waits until no turn runs and nothing is queued to send, up to `SHUVI_DRAIN_SEC` (default
+   600). Once the last turn has ended, its messages get at most 30 s more to go out; a row Telegram keeps
+   refusing is left for the next server;
+3. at the deadline, each turn still running is stopped as a model switch stops one: SIGTERM to its child,
+   with the stop placed at the turn's start (`stop_seq` = `from_seq`), so it closes as `stopped` with the
+   cursor where it was and the next server answers the same messages again. The row is marked first
+   (`DRAIN_STOP`, `src/store/turns.ts`), so whoever closes it records why. A child still there
+   `SHUVI_DRAIN_GRACE_SEC` (15) later is killed and its turn closed the same way (by the drain, or by the
+   waker's reap, which closes a dead turn that was being stopped as `stopped`, never `failed`). The owner is
+   told in the control bot;
+4. the senders finish the send in flight (up to 10 s, so a message Telegram accepted is recorded and not
+   sent again by the next server), and the server exits 0.
+
+What holds through it:
+
+- Nothing perceived is lost: a message that arrives during the drain is not fetched, so Telegram keeps it
+  and hands it to the next server (the offset only moves with what was recorded, §2). Schedules, jobs and
+  inbound hooks keep writing to the store.
+- Nothing said is lost or said twice: delivery stays with the sender and its idempotency keys; a row still
+  pending at exit is sent by the next server. A turn stopped at the deadline may have said part of its
+  answer. Its retry resumes the same conversation, which already holds that turn's input and what it said,
+  and gets the same messages again; so they come under a framework line saying the previous turn on them
+  was cut off by a restart and what was sent stands (`RETRY_NOTE`, `src/agent/render.ts`). The model can
+  then finish rather than start over, though nothing forces it not to repeat itself. (A model switch is
+  different: the target conversation never held the stopped turn's part, so it needs no such line.)
+- A chat stays ordered: a stopped turn is closed before the server exits, so the next one finds none
+  running there.
+
+The container's stop timeout must exceed the drain (`stop_grace_period` ≥ `SHUVI_DRAIN_SEC` +
+`SHUVI_DRAIN_GRACE_SEC` + 15 s), or the runtime kills it partway. A server that dies without draining
+(SIGKILL, a crash, an OOM kill) takes its turns with it in a container; the next server reaps them as failed
+and retries them (`src/server/waker.ts`). A second SIGTERM or SIGINT skips the rest of the drain.
+
+**Before a migration.** When the server starts with migrations pending, it first copies the store (`VACUUM
+INTO`, a consistent snapshot) to `$SHUVI_DATA_DIR/backups/pre-migrate-<from>-<to>-<time>.db` and keeps the
+last 5 (`src/store/migrate-backup.ts`), pruning the older ones before it copies so a disk full of them frees
+room first. If the copy still cannot be written, it does not migrate and does not start.
+
+**Health and metrics** (`src/server/health.ts`), on `SHUVI_METRICS_LISTEN` (loopback, default
+`127.0.0.1:8788`, anything else refused at startup), always on. Loopback is the container's own network
+namespace; Prometheus reaches it through a tailnet sidecar sharing that namespace, which publishes it with
+`tailscale serve`:
+
+- `/healthz`: 200 when the store answers and the poller completed a long poll in the last 120 s (or the
+  server is draining); 503 otherwise. The image's `HEALTHCHECK` calls it.
+- `/metrics`, Prometheus text, counts and times only (never a URL, a chat or any text):
+
+  | metric | type | what |
+  |---|---|---|
+  | `shuvi_turns_started_total` | counter | turns started |
+  | `shuvi_turns_finished_total{outcome}` | counter | turns finished: `done`, `stopped`, `failed` |
+  | `shuvi_turns_running` | gauge | turns running now |
+  | `shuvi_outbound_pending` | gauge | outbound rows waiting to be sent |
+  | `shuvi_outbound_failed_total` | counter | outbound rows Telegram refused for good |
+  | `shuvi_poll_errors_total` | counter | failed Telegram long polls (this process) |
+  | `shuvi_last_poll_timestamp_seconds` | gauge | when the last long poll completed |
+  | `shuvi_draining` | gauge | 1 while draining |
+  | `shuvi_drain_deadline_timestamp_seconds` | gauge | when the drain stops what still runs (0: none) |
+  | `shuvi_prewarms_total` | counter | links prewarmed through porchkit |
+  | `shuvi_prewarm_hits_total` | counter | prewarmed links a turn then used |
+  | `shuvi_start_time_seconds` | gauge | when this server process started |
+
+  The turn, outbound and prewarm counts are read from the store at each scrape, so they hold whichever
+  process wrote the rows and survive a restart.
+
+**CI** (`.github/workflows/ci.yml`): typecheck, the unit tests and every `scripts/e2e-*.ts` on every push and
+pull request, against fakes only, so no secret is needed. `release.yml` builds and pushes the image after
+CI passes on `main`.
+
 ## 17. Open questions
 
-- Which machine it runs on.
 - Migrating from the previous assistant: splitting persona and rules into the §6 layers; converting
   sticker descriptions to the §12 format; whether to import the old conversation logs as `chat_events`.

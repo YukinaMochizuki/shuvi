@@ -49,6 +49,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` (the entry point), `src/runner/run.ts` (the turn's body) |
 | shutting down: the drain on SIGTERM, its deadline, what it keeps | `src/server/drain.ts`, `src/server/main.ts` (`shutdown`); docs/design.md §16 |
 | the retry of a turn the drain stopped (`DRAIN_STOP`, the retry note) | `src/store/turns.ts`, `src/agent/turn.ts` (`isRetryAfterDrain`), `src/agent/render.ts` (`RETRY_NOTE`) |
+| the container, CI and the release | `Dockerfile`, `.github/workflows/ci.yml`, `release.yml`; the README's "Deploying" |
 | /healthz and /metrics (names, what they count) | `src/server/health.ts` |
 | the copy of the store taken before a migration | `src/store/migrate-backup.ts` |
 | turn liveness, the wall-clock limit | `src/server/spawn.ts`, `src/server/waker.ts` |

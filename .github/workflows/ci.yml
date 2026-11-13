@@ -1,0 +1,120 @@
+# CI: typecheck, the unit tests and every end-to-end script, on every push and pull request.
+#
+# Nothing here needs a secret: the e2e scripts run the real server and runner children against fakes of
+# Telegram, Anthropic, Chat Completions, Hangar and porchkit (test/), and the Claude Code CLI they drive is
+# the one bundled with the Agent SDK, installed by `bun install` as it is locally. ffmpeg is installed so
+# the video tests run rather than skip.
+#
+# The check to require on `main` is `ci passed`: it fails unless every job above it passed, so a new e2e
+# script (picked up by `e2e scripts` below) is covered without editing the branch protection.
+#
+# Actions are pinned by commit; the comment names the release.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  BUN_VERSION: "1.4.4"
+
+jobs:
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ env.BUN_VERSION }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-${{ env.BUN_VERSION }}-
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ env.BUN_VERSION }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-${{ env.BUN_VERSION }}-
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+      - run: bun install --frozen-lockfile
+      - run: bun test
+
+  # Every scripts/e2e-*.ts, found here rather than listed, so a new one cannot be forgotten.
+  e2e-list:
+    name: e2e scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      scripts: ${{ steps.list.outputs.scripts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: list
+        run: |
+          set -euo pipefail
+          scripts=$(for f in scripts/e2e-*.ts; do [ -e "$f" ] && basename "$f" .ts; done | jq -Rnc '[inputs]')
+          [ "$scripts" != "[]" ] || { echo "::error::no scripts/e2e-*.ts found"; exit 1; }
+          echo "scripts=$scripts" >> "$GITHUB_OUTPUT"
+          echo "$scripts"
+
+  e2e:
+    name: ${{ matrix.script }}
+    needs: e2e-list
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        script: ${{ fromJSON(needs.e2e-list.outputs.scripts) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ env.BUN_VERSION }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-${{ env.BUN_VERSION }}-
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+      - run: bun install --frozen-lockfile
+      - run: bun scripts/${{ matrix.script }}.ts
+
+  # The one check to require: green only when every job above is.
+  passed:
+    name: ci passed
+    if: always()
+    needs: [typecheck, test, e2e-list, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          jq -e 'all(. == "success")' <<<"$RESULTS" >/dev/null || { echo "::error::a CI job did not pass"; exit 1; }
