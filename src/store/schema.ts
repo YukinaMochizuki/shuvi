@@ -1,5 +1,6 @@
 import { and, inArray, sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import type { ModelMessage } from "agent-runtime/openai-compat";
 
 /**
  * The store. One SQLite file, shared by the server and every runner child (WAL, so a child writing its
@@ -14,6 +15,15 @@ import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqli
  *   - a framework event off `idem_key` too: `job:<id>` (one `job_done` per job), `schedule:<id>:<due>`
  *     (one `scheduled` per firing), `inbound:<source>:<key>` (an inbound POST retried with the same
  *     Idempotency-Key).
+ *
+ * OpenAI-compatible histories live in `conversations` and `conversation_messages`, one JSON model message
+ * per row. The server prunes abandoned histories with the same retention window as turn transcripts; a
+ * chat's histories (its active one, its parked lanes', a running turn's) stay.
+ *
+ * Which models exist is `model_providers` and `models` (store/models.ts); which one a chat runs on is
+ * `chats.model`. A chat keeps one conversation per LANE (a driver's home for it: one Claude login, or the
+ * OpenAI-compatible store): the active one on `chats`, the others parked in `chat_lanes`; each move between
+ * lanes is a `model_switches` row (agent/switch.ts).
  */
 
 export const chats = sqliteTable("chats", {
@@ -23,12 +33,132 @@ export const chats = sqliteTable("chats", {
   title: text("title"),
   /** The last event seq the assistant has SEEN. The waker opens a turn only for inbound events past it. */
   cursorSeq: integer("cursor_seq").notNull().default(0),
-  /** agent-runtime's conversation id; null = the next turn starts a fresh conversation (`/new`). */
+  /** The model the chat runs on (`<provider>/<model>`, store/models.ts); null = the catalog's default. */
+  model: text("model"),
+  /**
+   * The lane the active conversation is in (`claude:<provider>`, `openai-compat`: agent/switch.ts); null =
+   * none yet, so the next turn's model decides it.
+   */
+  lane: text("lane"),
+  /** The active conversation, in `lane`; null = the next turn starts a fresh conversation (`/new`). */
   backendSessionId: text("backend_session_id"),
+  /**
+   * Where the active conversation stood when its lane was entered: what came after it is what another lane
+   * lacks (agent/switch.ts). Null = from its start.
+   */
+  laneEnteredAt: text("lane_entered_at"),
   /** Context occupancy the last turn ended at, handed back to the driver on the next turn. */
   contextTokens: integer("context_tokens"),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
+
+/**
+ * Where models run (store/models.ts). `name` is the first part of every model id (`<name>/<model>`), so it
+ * never changes. A `claude` provider is a Claude login (`config_dir`, null = the server user's); an
+ * `openai-compat` one an endpoint (`base_url`) whose key, if any, is named by `api_key` as
+ * `<secrets profile>.<VARIABLE>` in the secrets file, never stored here.
+ */
+export const modelProviders = sqliteTable("model_providers", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  kind: text("kind", { enum: ["claude", "openai-compat"] }).notNull(),
+  configDir: text("config_dir"),
+  baseUrl: text("base_url"),
+  apiKey: text("api_key"),
+  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
+
+/**
+ * The models of a provider a chat may run on, by the provider's own id for it (`model`). `context_window`
+ * and `vision` say what an OpenAI-compatible one can do (a Claude model's are the CLI's to know). At most one
+ * row is the default, which chats without a model of their own run on.
+ */
+export const models = sqliteTable(
+  "models",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    providerId: integer("provider_id")
+      .notNull()
+      .references(() => modelProviders.id, { onDelete: "cascade" }),
+    model: text("model").notNull(),
+    label: text("label"),
+    contextWindow: integer("context_window"),
+    vision: integer("vision", { mode: "boolean" }).notNull().default(false),
+    isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [uniqueIndex("models_provider_model").on(t.providerId, t.model), uniqueIndex("models_one_default").on(t.isDefault).where(sql`is_default = 1`)],
+);
+
+/** A chat's conversations in the lanes it is not in now, each where it was left (agent/switch.ts). */
+export const chatLanes = sqliteTable(
+  "chat_lanes",
+  {
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id),
+    lane: text("lane").notNull(),
+    backendSessionId: text("backend_session_id").notNull(),
+    contextTokens: integer("context_tokens"),
+    parkedAt: text("parked_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [primaryKey({ columns: [t.chatId, t.lane] })],
+);
+
+/**
+ * Each change of a chat's model (agent/switch.ts): within a lane (`native`, the conversation goes on) or to
+ * another, carrying what the other lacks (`lossless`, `carried` messages) or nothing (`lossy`). `turn_id` is
+ * the first turn after it, which records it.
+ */
+export const modelSwitches = sqliteTable(
+  "model_switches",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id),
+    fromModel: text("from_model"),
+    toModel: text("to_model").notNull(),
+    mode: text("mode", { enum: ["native", "lossless", "lossy"] }).notNull(),
+    fromSessionId: text("from_session_id"),
+    toSessionId: text("to_session_id"),
+    carried: integer("carried").notNull().default(0),
+    /** What was carried starts with a compaction's summary, which repeats some of what the target held. */
+    compacted: integer("compacted", { mode: "boolean" }).notNull().default(false),
+    turnId: integer("turn_id"),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [index("model_switches_chat").on(t.chatId, t.id)],
+);
+
+/** Durable model histories, scoped to the chat that created them and aged by their latest write. */
+export const conversations = sqliteTable(
+  "conversations",
+  {
+    id: text("id").primaryKey(),
+    chatId: integer("chat_id")
+      .notNull()
+      .references(() => chats.id),
+    generation: integer("generation").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+    writtenAt: text("written_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [index("conversations_written_at").on(t.writtenAt)],
+);
+
+/** One model message per row; compaction advances the conversation generation. */
+export const conversationMessages = sqliteTable(
+  "conversation_messages",
+  {
+    conversationId: text("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    generation: integer("generation").notNull(),
+    seq: integer("seq").notNull(),
+    message: text("message", { mode: "json" }).notNull().$type<ModelMessage>(),
+  },
+  (t) => [primaryKey({ columns: [t.conversationId, t.generation, t.seq] })],
+);
 
 export const EVENT_KINDS = [
   /** Someone wrote in the chat (text, or a placeholder for what this slice cannot read yet). */
@@ -144,16 +274,17 @@ export const turns = sqliteTable(
     cacheCreationTokens: integer("cache_creation_tokens"),
     /**
      * The backend conversation (agent-runtime's session id) the turn ran in: every turn of a chat resumes the
-     * same one until `/new` or a lost-session restart starts another. Null until the driver names it, and for
-     * turns recorded before this column existed.
+     * same one until `/new`, a switch to another lane or a lost-session restart starts another. Null until
+     * the driver names it, and for turns recorded before this column existed.
      */
     backendSessionId: text("backend_session_id"),
     /**
      * How the turn's conversation stood when it began: `resumed` (it went on with the chat's conversation), or
      * it opened a fresh one: `first` (the chat's first turn), `new` (after `/new`), `lost` (the old one was lost
-     * and restarted). Null only for turns from before this column existed (the console infers theirs).
+     * and restarted), `switched` (the chat's model moved to another lane: agent/switch.ts). Null only for
+     * turns from before this column existed (the console infers theirs).
      */
-    opening: text("opening", { enum: ["first", "new", "lost", "resumed"] }),
+    opening: text("opening", { enum: ["first", "new", "lost", "switched", "resumed"] }),
     startedAt: text("started_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },

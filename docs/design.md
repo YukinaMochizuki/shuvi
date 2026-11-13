@@ -78,8 +78,22 @@ Everything is in one SQLite file (WAL mode).
   only by the console, pruned after `SHUVI_TRANSCRIPT_DAYS`. Nothing decides anything from it
   (src/agent/transcript.ts, docs/console.md).
 - **jobs**, **schedules**: see §10.
-- **The conversation the model sees** is kept by agent-runtime itself (a Claude Code session for the
-  Claude driver, the `ConversationStore` for openai-compat), not rebuilt from `chat_events`.
+- **The conversation the model sees** is kept where its driver keeps it, not rebuilt from `chat_events`:
+  a Claude Code session (files in that Claude login's config dir) for the Claude driver; for
+  openai-compat, `conversations` and `conversation_messages` (`src/store/conversations.ts`), one JSON
+  message per row, appended in order, compacted by replacing the current generation, read from one
+  snapshot; deleting a conversation deletes its messages. A history no chat uses any more (after `/new`,
+  say) stays until `SHUVI_TRANSCRIPT_DAYS` after its last write, then is pruned. An OpenAI-compatible
+  model reports no cost: its turns record 0.
+- **Which model** a chat runs on is `chats.model` in the model catalog (`model_providers`, `models`:
+  `src/store/models.ts`), else the catalog's default; it is read when the turn starts. A chat keeps one
+  conversation per LANE, where a model's driver keeps it (each Claude login its own; every OpenAI-compatible
+  endpoint the same one): the active one on `chats`, the others parked in `chat_lanes`. Switching to a model
+  of the same lane keeps the conversation; to another lane, the owner chooses each time between lossless
+  (what the active conversation gained since its lane was entered, which is what the target lacks, is
+  converted and appended to it: agent-runtime/convert; a target with none gets all of it) and lossy
+  (nothing is: the target resumes as it was left). The model is never told; `model_switches` records each
+  switch, and the turn after it says so in its transcript (`src/agent/switch.ts`).
   `chat_events` is "what actually happened", for people and for retrieval tools.
 
 `home/` is a second data directory, next to the SQLite file and outside the code repository:
@@ -387,8 +401,8 @@ stickers:
   unknown-group card; an approved one is written into `policy.yaml` and committed by a server loop),
   secrets and schedules are its intended callers.
 - **Commands that act on the current chat** are sent in that chat, and only the owner's sender id counts:
-  - `/new`: start a fresh conversation context. `chat_events` and the cursor are kept; the new
-    conversation opens with the last 10 messages.
+  - `/new`: start a fresh conversation context, in every lane. `chat_events` and the cursor are kept;
+    the new conversation opens with the last 10 messages.
   - `/stop`: stop the turn running in this chat.
 
   The framework acknowledges a command only by reacting to it; it sends no message.
@@ -406,8 +420,8 @@ stickers:
 - **Liveness**: a turn's pid and that process's start time (`/proc/<pid>/stat`) are recorded at spawn. A
   pid counts as the turn's only while the start time still matches, so a reused pid neither keeps a dead
   turn "running" nor receives a `/stop` meant for it.
-- **A lost conversation** (the driver says "No conversation found with session ID"): the chat's
-  conversation is reset and the same turn runs again at once, once, as a fresh conversation opening with
+- **A lost conversation** (Claude reports a missing session, or the OpenAI-compatible history is absent
+  from the store): the chat's conversation is reset and the same turn runs again at once, once, opening with
   the last 10 messages, as after `/new`. It does not count as a failed attempt.
 - **Backups**: once a day a consistent copy of `shuvi.db` (`VACUUM INTO`, online) and a `git bundle` of
   `home/` go to `$SHUVI_DATA_DIR/backups/<time>/`; the last 7 are kept. A failed backup is alerted and
@@ -496,8 +510,10 @@ the owner.
 
 ## 16. Deployment assumptions
 
-- The main backend is agent-runtime's Claude driver. Each turn starts a Claude Code subprocess, so the
-  machine needs at least 4 GB of memory for 2–3 turns at once.
+- Turns run on agent-runtime's drivers: Claude's starts a Claude Code subprocess per turn, so the machine
+  needs at least 4 GB of memory for 2–3 turns at once; an OpenAI-compatible model is called from the runner
+  child, its tools through the same boundary. Which models exist is the catalog in `shuvi.db`; a first
+  start seeds it with the Claude login and `SHUVI_MODEL`.
 - Heavy computation runs remotely.
 
 ## 17. Open questions

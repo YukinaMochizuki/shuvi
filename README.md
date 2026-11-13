@@ -54,6 +54,8 @@ bun install
 bun run typecheck
 bun test
 bun scripts/e2e-fake.ts      # the whole path against a fake Telegram and a fake Anthropic API
+bun scripts/e2e-openai-compat.ts  # the same on an OpenAI-compatible model, against a fake Chat Completions endpoint
+bun scripts/e2e-switch.ts    # one chat switched between Claude and an endpoint, lossless and lossy, checked on the wire
 bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
 bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
 bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
@@ -69,16 +71,27 @@ SHUVI_BOT_TOKEN=… SHUVI_CONTROL_BOT_TOKEN=… SHUVI_OWNER_ID=… SHUVI_OWNER_L
 Configuration is environment variables only; `src/env.ts` lists the framework's, and each capability
 lists its own in the header of `src/capabilities/<id>/index.ts` (e.g. `SHUVI_WEB`). The code and its
 prompts are all English; `SHUVI_OWNER_LANGUAGE` is where the owner's own language is set, and the
-assistant replies in it. Turns run on the Claude login of the user the server runs as, unless
-`SHUVI_CLAUDE_CONFIG_DIR` names another.
+assistant replies in it.
+
+Which models turns run on is the model catalog in `shuvi.db` (`src/store/models.ts`): providers (a Claude
+login, or an OpenAI-compatible endpoint whose key is named in the secrets file) and their models, one of
+them the default; each chat runs on its own model or the default. A first start seeds it with the Claude
+login of the user the server runs as (or `SHUVI_CLAUDE_CONFIG_DIR`) and `SHUVI_MODEL`, which is what turns
+ran on before. A chat's model can be switched between turns (`src/agent/switch.ts`): to another model that
+keeps its conversation in the same place (the same Claude login, or any endpoint) it simply goes on; to one
+that keeps it elsewhere (Claude and an endpoint, or two logins), the owner chooses whether what was said
+since is carried over (lossless) or not (lossy). The model is never told.
 
 ## Data
 
 `SHUVI_DATA_DIR` (default `./data`) holds `shuvi.db`, `home/` (the assistant's persona, directives and
 memory as markdown, and `policy.yaml`) and `media/` (the photos and stickers it was sent, by `file_unique_id`;
 `media/transcript/` holds the other images turn transcripts refer to, pruned with them). All of it is
-private: it lives outside this repository and is never committed or pushed. Note that Claude Code also
-keeps a copy of each image a turn is shown, next to its session files.
+private: it lives outside this repository and is never committed or pushed. A conversation on an
+OpenAI-compatible model is kept in `shuvi.db` too, one message per row (tool results and images included),
+and so is in its backups; one no chat uses any more is pruned `SHUVI_TRANSCRIPT_DAYS` (default 30) after it
+was last written. Claude Code keeps its own session files, with a copy of each image a turn is shown; a
+switch carrying a conversation onto Claude appends to them.
 
 Once a day the server writes a consistent copy of `shuvi.db` and a `git bundle` of `home/` (when it is a
 git repo) to `$SHUVI_DATA_DIR/backups/<time>/`, keeping the last 7. They are on the same disk; copy

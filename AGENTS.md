@@ -11,6 +11,8 @@ Read [docs/design.md](docs/design.md) first. Its five invariants (§1) are what 
 bun run typecheck
 bun test                    # fresh in-memory DB per test
 bun scripts/e2e-fake.ts     # server + runner child + real Claude Code CLI, fake Telegram and Anthropic
+bun scripts/e2e-openai-compat.ts # the same on an OpenAI-compatible model, against a fake Chat Completions endpoint
+bun scripts/e2e-switch.ts   # one chat switched between Claude and an endpoint, lossless and lossy, on the wire
 bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
 bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
@@ -29,6 +31,9 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | videos from links (porchkit): who may look, who may fetch, the prewarm and its accounting | `src/capabilities/media/index.ts`, then `prewarm.ts`, `fetch.ts`; the client and its error texts: `src/porchkit/client.ts` |
 | a capability's hook on each new inbound message, a tool owner-only in some calls, a capability's own credential | `src/capabilities/types.ts` (`inbound`, `ownerOnlyWhen` / `ownerOnlyNote`, `secrets`) |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
+| which models exist, which one a chat runs on, the driver a turn runs on | `src/store/models.ts`, `src/agent/backend.ts` |
+| switching a chat's model: lanes, lossless and lossy, what is carried | `src/agent/switch.ts` (the conversion: agent-runtime/convert) |
+| an OpenAI-compatible conversation: its rows, positions, retention | `src/store/conversations.ts` |
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |
 | what a capability is, what it may touch | `src/capabilities/types.ts`, `src/capabilities/index.ts` |

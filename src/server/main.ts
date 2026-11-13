@@ -14,7 +14,7 @@
  *   scan      alert on outbound rows that are not getting through; expire approvals (control/)
  *   backup    a daily copy of shuvi.db and home/ (control/backup.ts)
  *   control   when `SHUVI_CONTROL_BOT_TOKEN` is set, the control bot's poller and sender (control/bot.ts)
- *   prune     drop turn transcripts older than SHUVI_TRANSCRIPT_DAYS (store/transcripts.ts)
+ *   prune     drop turn transcripts and abandoned conversations older than SHUVI_TRANSCRIPT_DAYS
  *   console   when SHUVI_CONSOLE_USERS or SHUVI_CONSOLE_TOKEN is set, the read-only web console (src/console/)
  *
  * and, alongside them, the loops of every enabled capability (src/capabilities/), through the same
@@ -38,6 +38,8 @@ import { loadConfig } from "../env.ts";
 import { PolicyWatch } from "../policy/load.ts";
 import { applyPolicyApprovals } from "../policy/write.ts";
 import { openDb } from "../store/db.ts";
+import { pruneConversations } from "../store/conversations.ts";
+import { seedModels } from "../store/models.ts";
 import { getChat, type ChatEvent } from "../store/events.ts";
 import { pruneTranscripts } from "../store/transcripts.ts";
 import { runningTurns } from "../store/turns.ts";
@@ -53,6 +55,8 @@ const cfg = loadConfig();
 // Refused here, before anything starts: a console on a non-loopback address (src/console/server.ts).
 checkConsole(cfg.console);
 const db = openDb(cfg.dbPath, { migrate: true });
+// A first start's model catalog: what turns ran on before there was one (store/models.ts).
+seedModels(db, { ...(cfg.claudeConfigDir ? { claudeConfigDir: cfg.claudeConfigDir } : {}), ...(cfg.model ? { model: cfg.model } : {}) });
 const api = new Api(cfg.botToken, cfg.telegramApiRoot ? { apiRoot: cfg.telegramApiRoot } : undefined);
 const capabilities = enabledCapabilities();
 const me = await api.getMe();
@@ -115,9 +119,11 @@ void loop(
   "prune",
   async () => {
     const cutoff = Date.now() - cfg.transcriptDays * 24 * 3600_000;
-    const r = pruneTranscripts(db, new Date(cutoff).toISOString());
+    const before = new Date(cutoff).toISOString();
+    const r = pruneTranscripts(db, before);
+    const conversations = pruneConversations(db, before);
     const images = pruneTranscriptMedia(cfg.dataDir, cutoff);
-    if (r.transcripts || r.prompts || images) console.log(`prune: ${r.transcripts} transcript(s), ${r.steps} step(s), ${r.prompts} prompt text(s), ${images} image(s) older than ${cfg.transcriptDays} days`);
+    if (r.transcripts || r.prompts || images || conversations) console.log(`prune: ${r.transcripts} transcript(s), ${r.steps} step(s), ${r.prompts} prompt text(s), ${conversations} conversation(s), ${images} image(s) older than ${cfg.transcriptDays} days`);
   },
   3600_000,
 );

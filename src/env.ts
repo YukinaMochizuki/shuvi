@@ -11,9 +11,11 @@ import { join, resolve } from "node:path";
  *                             prompts included, is English; this is the one place the owner's language
  *                             is named. Unset: the assistant answers in whatever language it is written to.
  *   SHUVI_DATA_DIR            where shuvi.db and home/ live (default ./data). Private; outside the repo.
- *   SHUVI_MODEL               the model turns run on (default: the driver's)
+ *   SHUVI_MODEL               the Claude model a first start's catalog defaults to (default: the CLI's).
+ *                             Which models turns run on is the model catalog (store/models.ts) from then on.
  *   SHUVI_TZ                  the time zone messages are shown to the model in (default: the host's)
- *   SHUVI_CLAUDE_CONFIG_DIR   which Claude login turns run on (default: the process user's)
+ *   SHUVI_CLAUDE_CONFIG_DIR   the Claude login a first start's catalog puts its `claude` provider on
+ *                             (default: the process user's)
  *   SHUVI_TELEGRAM_API_ROOT   the Bot API base URL (default Telegram's; a fake one in tests)
  *   SHUVI_CONTROL_BOT_TOKEN   the control bot's token (src/control/bot.ts), the framework's own channel to
  *                             the owner: status, stop, alerts, approvals. Unset: no control bot; alerts
@@ -22,7 +24,8 @@ import { join, resolve } from "node:path";
  *   SHUVI_TURN_MAX_MINUTES    a turn's wall-clock limit; past it the turn is stopped (default 15)
  *   SHUVI_ALERT_OUTBOUND_MINUTES  alert when an outbound message is still pending after this long (default 10)
  *   SHUVI_COMMIT              the deployed commit /status shows (default: `git describe` of the checkout)
- *   SHUVI_TRANSCRIPT_DAYS     how long a turn's transcript is kept after the turn ended (default 30)
+ *   SHUVI_TRANSCRIPT_DAYS     transcript retention after a turn ends and conversation history after its
+ *                             last write (default 30 days)
  *   SHUVI_SECRETS_FILE        the secret profiles (default /etc/shuvi.secrets.yaml): every value in it is
  *                             redacted from turn transcripts, and from a chat computer's output
  *   SHUVI_CONSOLE_LISTEN      where the console listens, LOOPBACK ONLY (default 127.0.0.1:8787); anything
@@ -82,6 +85,7 @@ export function dataDirFrom(env: Record<string, string | undefined>): string {
 
 export function loadConfig(opts: { needToken?: boolean } = {}): Config {
   const dataDir = dataDirFrom(process.env);
+  const model = process.env.SHUVI_MODEL?.trim();
   const ownerId = Number(required("SHUVI_OWNER_ID"));
   if (!Number.isSafeInteger(ownerId)) throw new Error("SHUVI_OWNER_ID must be a Telegram user id");
   return {
@@ -91,7 +95,7 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     dataDir,
     dbPath: join(dataDir, "shuvi.db"),
     home: join(dataDir, "home"),
-    ...(process.env.SHUVI_MODEL ? { model: process.env.SHUVI_MODEL } : {}),
+    ...(model ? { model } : {}),
     timeZone: process.env.SHUVI_TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
     ...(process.env.SHUVI_CLAUDE_CONFIG_DIR ? { claudeConfigDir: process.env.SHUVI_CLAUDE_CONFIG_DIR } : {}),
     ...(process.env.SHUVI_TELEGRAM_API_ROOT ? { telegramApiRoot: process.env.SHUVI_TELEGRAM_API_ROOT } : {}),

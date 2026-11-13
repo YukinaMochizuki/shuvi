@@ -137,7 +137,7 @@ export function extendTurn(db: Db, id: number, toSeq: number): void {
 }
 
 /** How a turn's conversation stood when it began (schema.ts `turns.opening`). */
-export type Opening = "first" | "new" | "lost" | "resumed";
+export type Opening = "first" | "new" | "lost" | "switched" | "resumed";
 
 /**
  * Note on the turn which backend conversation it ran in, and how that conversation opened: the console groups

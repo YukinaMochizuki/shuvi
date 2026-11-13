@@ -6,6 +6,7 @@ import { buildSystemPrompt } from "../src/agent/prompt.ts";
 import type { AdapterRunOptions, AdapterRunResult, ToolBoundary } from "agent-runtime";
 import { GAP_NOTE_MINUTES, isLostSession, runTurn } from "../src/agent/turn.ts";
 import { controlMessagesOf } from "../src/store/control.ts";
+import { LostConversationError } from "../src/store/conversations.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
 import { enqueueOutbound, getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
@@ -369,14 +370,14 @@ class LostSessionAdapter extends ScriptedAdapter {
   constructor(
     boundary: ToolBoundary,
     script: Step[],
-    private readonly error: string,
+    private readonly error: string | Error,
   ) {
     super(boundary, script);
   }
   override continueRun(input: Parameters<ScriptedAdapter["continueRun"]>[0], opts: AdapterRunOptions): Promise<AdapterRunResult> {
     this.calls.push({ method: "continueRun", prompt: input.prompt, backendSessionId: input.backendSessionId, tools: [] });
     opts.onSessionId?.(input.backendSessionId); // the CLI echoes the id it was asked for
-    return Promise.reject(new Error(this.error));
+    return Promise.reject(this.error instanceof Error ? this.error : new Error(this.error));
   }
 }
 
@@ -385,7 +386,7 @@ describe("runTurn: a lost conversation", () => {
   // prefix, then the SDK result's `errors` (the Claude Code CLI's message) after a colon.
   const LOST = 'Claude Agent SDK run ended with "error_during_execution": No conversation found with session ID: 6b0b8a3e-1111-4222-8333-444455556666';
 
-  async function lostTurn(db: Db, error: string) {
+  async function lostTurn(db: Db, error: string | Error) {
     const turn = claimTurn(db, ownerChatId(db))!;
     let adapter!: LostSessionAdapter;
     const outcome = await runTurn({ db, turnId: turn.id, home: emptyHome, timeZone: "UTC", makeAdapter: (b) => (adapter = new LostSessionAdapter(b, [{ token: "Fresh start." }], error)), capabilities: enabledCapabilities({ SHUVI_WEB: "off" }) });
@@ -394,7 +395,20 @@ describe("runTurn: a lost conversation", () => {
 
   test("the pinned driver text is recognised, and nothing else is", () => {
     expect(isLostSession(new Error(LOST))).toBe(true);
+    expect(isLostSession(new LostConversationError())).toBe(true);
     expect(isLostSession(new Error('Claude Agent SDK run ended with "error_during_execution"'))).toBe(false);
+  });
+
+  test("a missing persisted API conversation restarts once with recent chat history", async () => {
+    const db = memDb();
+    ownerSays(db, "earlier API context");
+    db.$client.exec(`update chats set cursor_seq = (select max(seq) from chat_events), backend_session_id = 'openai-compat:identity:1:gone'`);
+    ownerSays(db, "continue please");
+    const { outcome, adapter, turn } = await lostTurn(db, new LostConversationError());
+    expect(outcome).toBe("done");
+    expect(turn.opening).toBe("lost");
+    expect(adapter.calls.map((call) => call.method)).toEqual(["continueRun", "run"]);
+    expect(adapter.calls[1]!.prompt as string).toContain("earlier API context");
   });
 
   test("the conversation is reset and the same turn runs again at once as a fresh one, with the last messages, costing no attempt", async () => {

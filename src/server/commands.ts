@@ -2,7 +2,7 @@ import type { Api } from "grammy";
 import type { BotCommand, BotCommandScope } from "grammy/types";
 import type { Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
-import { enqueueOutbound, markCommandDone, pendingCommands, resetConversation, type CommandPayload } from "../store/events.ts";
+import { enqueueOutbound, forgetConversations, markCommandDone, pendingCommands, type CommandPayload } from "../store/events.ts";
 import { markStop, runningTurnFor, type Turn } from "../store/turns.ts";
 import { signalTurn, type SignalTurn } from "./spawn.ts";
 
@@ -10,8 +10,9 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  * Owner commands that act on the chat they are sent in (docs/design.md §13):
  *
  *   /stop   stop the turn running in this chat (SIGTERM to its child; it closes as `stopped`)
- *   /new    start a fresh conversation for this chat: the model's conversation is forgotten, the chat's
- *           events and cursor are kept. A running turn is stopped first.
+ *   /new    start a fresh conversation for this chat: the model's conversation is forgotten (on every
+ *           model it was carried to: agent/switch.ts), the chat's events and cursor are kept. A running
+ *           turn is stopped first.
  *
  * The framework does not speak (invariant 5). It acknowledges a command by reacting 👌 to it, so the
  * owner sees it took effect without a message in the assistant's chat that the assistant did not write.
@@ -135,7 +136,7 @@ export function commandPass(db: Db, signal: SignalTurn = signalTurn): number {
     const running = stopTurn(db, cmd.chatId, cmd.seq, signal);
     let note = running ? `stopped turn ${running.id}` : "no turn running";
     if (p.command === "new") {
-      resetConversation(db, cmd.chatId);
+      forgetConversations(db, cmd.chatId);
       note += "; conversation reset";
     }
     enqueueOutbound(db, { chatId: cmd.chatId, kind: "bot_reaction", payload: { targetSeq: cmd.seq, emoji: "👌" }, idemKey: `command:${cmd.seq}` });

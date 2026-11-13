@@ -13,6 +13,7 @@ import {
 } from "../capabilities/types.ts";
 import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
+import { LostConversationError } from "../store/conversations.ts";
 import { raiseAlert } from "../store/control.ts";
 import {
   enqueueOutbound,
@@ -34,6 +35,7 @@ import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
 import { chatLabel, extendTurn, finishTurn, getTurn, hadEarlierTurn, saveSession, setTurnConversation } from "../store/turns.ts";
 import { buildPromptSections, joinSections } from "./prompt.ts";
+import { claimSwitches, switchNote } from "./switch.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, timeNote, type InputOptions, type Perceive } from "./render.ts";
 import { recordingBoundary, TurnRecorder, type RecorderOptions } from "./transcript.ts";
 import { isTrigger, type BotIdentity } from "./triggers.ts";
@@ -61,17 +63,15 @@ export function openingTimeNote(db: Db, chatId: number, first: ChatEvent, nowIso
 }
 
 /**
- * What the driver's error says when the conversation it was asked to continue no longer exists (the
- * Claude Code session file is gone: a new machine, a cleaned config dir). It is the Claude Code CLI's own
- * text, which agent-runtime appends to its error as `Claude Agent SDK run ended with
- * "error_during_execution": No conversation found with session ID: <id>` (pinned in test/turn.test.ts).
- * Only this exact text counts: a generic failure may be an outage or an expired login, and resetting the
- * conversation on those would throw its context away for nothing.
+ * Whether the selected backend's saved conversation no longer exists. Claude reports this through its
+ * CLI error text; OpenAI-compatible history uses `LostConversationError` when its durable row is missing.
+ * Generic failures may be an outage or an expired login, so they must not discard the conversation.
+ * The Claude CLI text is pinned in test/turn.test.ts.
  */
 export const LOST_SESSION_TEXT = "No conversation found with session ID";
 
-export function isLostSession(e: unknown): boolean {
-  return (e instanceof Error ? e.message : String(e)).includes(LOST_SESSION_TEXT);
+export function isLostSession(e: unknown, backend?: string): boolean {
+  return e instanceof LostConversationError || (backend !== "openai-compat" && (e instanceof Error ? e.message : String(e)).includes(LOST_SESSION_TEXT));
 }
 
 /**
@@ -121,10 +121,15 @@ export function isLostSession(e: unknown): boolean {
  * one line saying what time it is (the turn's start) and how long it has been (`openingTimeNote`). It is in
  * the input, never the system prompt, so the prompt cache is unaffected.
  *
- * A LOST conversation (`continueRun` fails with `LOST_SESSION_TEXT`) is not a failure of the turn: the
+ * A LOST conversation (`isLostSession` recognises the error) is not a failure of the turn: the
  * chat's conversation is reset and the same turn runs again at once, once, as a fresh conversation that
  * opens with the last `HISTORY_ON_NEW` messages (as after `/new`). It costs no failure attempt; the owner
  * is told through the control bot.
+ *
+ * The SWITCHES of the chat's model since the last turn (agent/switch.ts) are recorded by the first turn after
+ * them: a transcript note each, saying from what to what and how, and, when one moved the conversation to
+ * another lane, the opening `switched`. The model is not told: what it is given is the conversation as it
+ * now stands.
  *
  * THE TRANSCRIPT (agent/transcript.ts): the turn is recorded as the model saw it, best effort: its system
  * prompt by section, its input, and a timeline of thinking, text blocks (with the message each became),
@@ -150,7 +155,7 @@ export interface TurnDeps {
   /** Who the bot is (agent/triggers.ts), to tell which group messages woke the turn. */
   bot?: BotIdentity;
   /** The driver for this turn, built around the boundary the turn supplies. */
-  makeAdapter: (boundary: ToolBoundary) => BackendAdapter;
+  makeAdapter: (boundary: ToolBoundary, note: (text: string) => void) => BackendAdapter;
   signal?: AbortSignal;
   /** How the transcript is recorded (agent/transcript.ts). Default: the data dir above `home`, no redaction. */
   record?: RecorderOptions;
@@ -354,6 +359,9 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     finishTurn(db, turnId, { status: "done" });
     return "empty";
   }
+  // The switches since the last turn (agent/switch.ts) are this turn's to record.
+  const switches = claimSwitches(db, chat.id, turnId);
+  const crossLane = switches.some((s) => s.mode !== "native");
   // In a group: from up to GROUP_CONTEXT messages before the first that woke the turn.
   let input = unseen;
   let context = 0;
@@ -386,6 +394,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   extendTurn(db, turnId, s.toSeq);
 
   const rec = new TurnRecorder(db, turnId, deps.record ?? { dataDir: dirname(deps.home) });
+  for (const s of switches) rec.note(switchNote(s));
   let buf = "";
   const flush = () => {
     const seq = queueMessage(db, s, buf);
@@ -394,9 +403,18 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   };
 
   const authority = turnAuthority(capabilities, deps.ownerId);
-  const adapter = deps.makeAdapter(
-    recordingBoundary(turnBoundary(db, s, deps.timeZone, capabilities, authority), rec, () => s.toSeq, (seq) => triggersAfter(db, chat.id, seq)[0]?.seq),
-  );
+  let adapter: BackendAdapter;
+  try {
+    adapter = deps.makeAdapter(
+      recordingBoundary(turnBoundary(db, s, deps.timeZone, capabilities, authority), rec, () => s.toSeq, (seq) => triggersAfter(db, chat.id, seq)[0]?.seq),
+      (text) => rec.note(text),
+    );
+  } catch (e) {
+    // A driver that cannot be built (a provider's key missing from the secrets file) fails the turn, saying why.
+    rec.end();
+    finishTurn(db, turnId, { status: "failed", error: rec.redactText(e instanceof Error ? e.message : String(e)) });
+    return "failed";
+  }
   const firstOwnerMessage = input.find((e) => e.kind === "message" && (deps.ownerId === undefined || (e.payload as unknown as MessagePayload).from.id === deps.ownerId));
   const ownerName = deps.ownerName ?? (firstOwnerMessage ? (firstOwnerMessage.payload as unknown as MessagePayload).from.name : undefined);
   const owner: OwnerInfo = { ...(ownerName ? { name: ownerName } : {}), ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
@@ -448,8 +466,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const sections = buildPromptSections(deps.home, chat, owner, capabilities, chatPolicy, db);
   const systemPrompt = joinSections(sections);
   rec.prompt(sections);
-  // Which conversation this turn is in: the chat's (resumed), or a fresh one (the chat's first, after `/new`).
-  setTurnConversation(db, turnId, { opening: chat.backendSessionId ? "resumed" : hadEarlierTurn(db, chat.id, turnId) ? "new" : "first" });
+  // Which conversation this turn is in: resumed, or fresh after its first turn, `/new`, or a switch to another lane.
+  setTurnConversation(db, turnId, { opening: crossLane ? "switched" : chat.backendSessionId ? "resumed" : hadEarlierTurn(db, chat.id, turnId) ? "new" : "first" });
   const fresh = (p: Prompt) => {
     rec.input(p, false);
     return adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
@@ -465,7 +483,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
           opts,
         );
       } catch (e) {
-        if (deps.signal?.aborted || !isLostSession(e)) throw e;
+        if (deps.signal?.aborted || !isLostSession(e, adapter.id)) throw e;
         resetConversation(db, chat.id);
         setTurnConversation(db, turnId, { opening: "lost" });
         raiseAlert(db, {
