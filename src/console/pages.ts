@@ -832,7 +832,7 @@ function spanPage(ctx: PageContext, q: URLSearchParams, id: number, level: "segm
   if (!sp) return null;
   const f = currentFilters(q);
   const { pane } = listPane(ctx, q, level === "segment" ? { segment: sp.id, inChat: sp.chatId } : { conversation: sp.id, inChat: sp.chatId });
-  return page(level === "segment" ? "Segment" : "Conversation", split(pane, spanDetail(ctx, sp, level, q, f), true), ctx.who);
+  return page(level === "segment" ? "Segment" : "Conversation", split(pane, spanDetail(ctx, sp, level, q, f), true), ctx.who, "turns");
 }
 
 export const segmentPage = (ctx: PageContext, q: URLSearchParams, id: number) => spanPage(ctx, q, id, "segment");
@@ -859,7 +859,7 @@ export function turnsPage(ctx: PageContext, q: URLSearchParams, id?: number): st
     const sp = t ? segmentOf(ctx.db, t.chatId, first) : null;
     if (sp) detail = spanDetail(ctx, sp, "segment", q, f);
   }
-  return page(turn ? `Turn ${turn.id}` : "Turns", split(pane, detail, !!turn), ctx.who);
+  return page(turn ? `Turn ${turn.id}` : "Turns", split(pane, detail, !!turn), ctx.who, "turns");
 }
 
 // ---- a chat ---------------------------------------------------------------------------------------------------
@@ -913,5 +913,5 @@ ${more && first ? html`<p class="note"><a href="${href(`/chats/${chat.id}`, { ..
 ${events.length ? html`<div class="convo">${items}</div>` : empty("Nothing recorded in this chat.")}
 </div></div>`;
   const { pane } = listPane(ctx, q, { chat: chat.id, inChat: chat.id });
-  return page(chatName(chat), split(pane, detail, true), ctx.who);
+  return page(chatName(chat), split(pane, detail, true), ctx.who, "turns");
 }

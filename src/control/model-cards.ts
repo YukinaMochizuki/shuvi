@@ -95,7 +95,11 @@ interface Listed {
 }
 
 type State =
-  | { step: "closed"; text: string }
+  /**
+   * `listingFailed`: a provider_add card whose listing failed, with why (the console shows it until it is
+   * `dismissed`).
+   */
+  | { step: "closed"; text: string; listingFailed?: { provider: string; error: string }; dismissed?: boolean }
   // switch
   | { step: "model"; page: number; note?: string }
   /** `running`: the turn running in the chat when it was drawn (switchCardPass redraws it when that changes). */
@@ -662,26 +666,36 @@ function pressModels(db: Db, card: Card, state: State, action: string, n: number
 
 function pressProviderAdd(db: Db, card: Card, state: State, action: string, n: number | null): string {
   if (state.step !== "listed") return CLOSED;
-  const at = (page: number, note?: string): State => ({ ...state, page, ...(note ? { note } : { note: undefined }) });
-  if (action === "p" && n !== null) return void setState(db, card, at(n), { step: true }), "";
-  const l = action === "a" && n !== null ? state.listed[n] : undefined;
-  if (!l) return CLOSED;
+  if (action === "p" && n !== null) return void setState(db, card, { ...state, page: n, note: undefined }, { step: true }), "";
+  if (action !== "a" || n === null || !state.listed[n]) return CLOSED;
+  addListed(db, card, state, n);
+  return "";
+}
+
+/**
+ * Add the `n`th model a listing card lists, and say how it went on the card (its note): already in the catalog,
+ * no context length (unless `contextWindow` gives one: the console asks for it), or added and asked to be probed.
+ * The control bot's press and the console's Add both come here.
+ */
+function addListed(db: Db, card: Card, state: Extract<State, { step: "listed" }>, n: number, contextWindow?: number): string {
+  const l = state.listed[n]!;
+  const ctx = l.contextWindow ?? contextWindow;
   const id = `${state.provider}/${l.model}`;
   let note: string;
   if (findModel(db, id)) note = `${id} is already in the catalog.`;
-  else if (!l.contextWindow) note = `The listing gives no context length for ${l.model}. Add it with /models add ${id} <context_window>.`;
+  else if (!ctx) note = `The listing gives no context length for ${l.model}. Add it with /models add ${id} <context_window>.`;
   else {
     try {
-      const m = addModel(db, { provider: state.provider, model: l.model, contextWindow: l.contextWindow });
+      const m = addModel(db, { provider: state.provider, model: l.model, contextWindow: ctx });
       markProbing(db, m.model.id);
       catalogChanged(db, card.id);
-      note = `Added ${id} (${l.contextWindow} tokens); probing it.`;
+      note = `Added ${id} (${ctx} tokens); probing it.`;
     } catch (e) {
       note = `Could not add ${id}: ${e instanceof Error ? e.message : String(e)}`;
     }
   }
-  setState(db, card, at(state.page, note), { step: true });
-  return "";
+  setState(db, card, { ...state, note }, { step: true });
+  return note;
 }
 
 function pressProviderRemove(db: Db, card: Card, action: string): string {
@@ -771,6 +785,75 @@ export function switchCardPass(db: Db): number {
   return n;
 }
 
+// ---- the console's listings ----------------------------------------------------------------------------
+//
+// The console's Settings page lists a provider's `/models` through a provider_add card of its own, opened
+// with no message (its idem key starts CONSOLE_LISTING): the same row, the same background listing
+// (server/probes.ts), the same Add rules (`addListed`) and Cancel / Done (`pressCard`). The page shows the
+// newest such card while it is open, or closed by a failed listing until that is dismissed.
+
+export const CONSOLE_LISTING = "console-listing:";
+
+/** What the console shows of its listing card. */
+export type ConsoleListing =
+  | { cardId: number; provider: string; state: "listing"; since: string }
+  | { cardId: number; provider: string; state: "listed"; listed: Listed[]; note?: string }
+  | { cardId: number; provider: string; state: "failed"; error: string };
+
+function consoleCards(db: Db): Card[] {
+  return db
+    .select()
+    .from(controlCards)
+    .where(eq(controlCards.kind, "provider_add"))
+    .orderBy(asc(controlCards.id))
+    .all()
+    .filter((c) => c.idemKey?.startsWith(CONSOLE_LISTING));
+}
+
+/**
+ * List provider `provider`'s `/models` for the console: a provider_add card with no message, closing (as
+ * superseded) the console's older open ones. `key` makes a repeated request open one card.
+ */
+export function openConsoleListing(db: Db, provider: string, key: string): Card | null {
+  const card = openCard(db, { kind: "provider_add", idemKey: `${CONSOLE_LISTING}${key}`, state: { step: "listing", provider } }, false);
+  if (card) for (const c of consoleCards(db)) if (c.id < card.id && c.status === "open") close(db, c, SUPERSEDED);
+  return card;
+}
+
+/** The console's newest listing card, as the page shows it; undefined when there is none to show. */
+export function consoleListing(db: Db): ConsoleListing | undefined {
+  const card = consoleCards(db).at(-1);
+  if (!card) return undefined;
+  const s = stateOf(card);
+  switch (s.step) {
+    case "listing":
+      return card.status === "open" ? { cardId: card.id, provider: s.provider, state: "listing", since: card.createdAt } : undefined;
+    case "listed":
+      return card.status === "open" ? { cardId: card.id, provider: s.provider, state: "listed", listed: s.listed, ...(s.note ? { note: s.note } : {}) } : undefined;
+    case "closed":
+      return s.listingFailed && !s.dismissed ? { cardId: card.id, provider: s.listingFailed.provider, state: "failed", error: s.listingFailed.error } : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** The console's Add on its listing card: the `n`th listed model, with `contextWindow` where the listing gave none. */
+export function addFromConsoleListing(db: Db, cardId: number, n: number, contextWindow?: number): string {
+  const card = getCard(db, cardId);
+  const state = card && stateOf(card);
+  if (!card || !card.idemKey?.startsWith(CONSOLE_LISTING) || card.status !== "open" || state?.step !== "listed" || !state.listed[n]) throw new Error("That listing is closed: list the provider again.");
+  return addListed(db, card, state, n, contextWindow);
+}
+
+/** The console's Cancel (while listing) or Done (once listed or failed) on its listing card. */
+export function closeConsoleListing(db: Db, cardId: number): void {
+  const card = getCard(db, cardId);
+  if (!card || !card.idemKey?.startsWith(CONSOLE_LISTING)) throw new Error("There is no such listing.");
+  const s = stateOf(card);
+  if (card.status === "open") return void pressCard(db, `${CARD_PREFIX}${card.id}:${card.version}:x`);
+  if (s.step === "closed" && s.listingFailed && !s.dismissed) db.update(controlCards).set({ state: { ...s, dismissed: true } as unknown as Record<string, unknown> }).where(eq(controlCards.id, card.id)).run();
+}
+
 /** The provider_add cards waiting for their endpoint's `/models` (server/probes.ts `backgroundPass`). */
 export function cardsListing(db: Db): { cardId: number; provider: string }[] {
   return db
@@ -794,7 +877,8 @@ export function finishListing(db: Db, cardId: number, r: { listed: Listed[] } | 
   if (!card || card.status !== "open" || state?.step !== "listing") return;
   if ("error" in r) {
     const p = getProvider(db, state.provider);
-    close(db, card, `Added provider ${state.provider}${p?.baseUrl ? ` (${p.baseUrl})` : ""}. Listing its models failed: ${r.error}\nThe provider stays. Add a model with /models add ${state.provider}/<model> <context_window>.`);
+    const text = `Added provider ${state.provider}${p?.baseUrl ? ` (${p.baseUrl})` : ""}. Listing its models failed: ${r.error}\nThe provider stays. Add a model with /models add ${state.provider}/<model> <context_window>.`;
+    setState(db, card, { step: "closed", text, listingFailed: { provider: state.provider, error: r.error } }, { step: true });
     return;
   }
   setState(db, card, { step: "listed", provider: state.provider, page: 0, listed: r.listed }, { step: true });

@@ -111,7 +111,8 @@ export function checkBaseUrl(raw: string): string {
 export function addProvider(db: Db, p: { name: string; kind: ProviderKind; configDir?: string | null; baseUrl?: string | null; apiKey?: string | null }): Provider {
   if (!NAME.test(p.name)) throw new Error(`"${p.name}" is not a provider name: lower-case letters, digits, '.', '_' and '-', at most 40`);
   if (getProvider(db, p.name)) throw new Error(`there is already a provider named "${p.name}"`);
-  if (p.apiKey && !KEY_REF.test(p.apiKey)) throw new Error(`the key is named as <secrets profile>.<VARIABLE>, not "${p.apiKey}"`);
+  // Never quote what was given: it may be the key itself, pasted where its name goes.
+  if (p.apiKey && !KEY_REF.test(p.apiKey)) throw new Error("the key is named as <secrets profile>.<VARIABLE>, not given itself");
   return db.insert(modelProviders).values(providerRow(p)).returning().get();
 }
 
@@ -135,30 +136,49 @@ export function listProviders(db: Db): Provider[] {
   return db.select().from(modelProviders).orderBy(asc(modelProviders.id)).all();
 }
 
+/**
+ * An OpenAI-compatible model needs its context window (a positive number of tokens); a Claude one takes the
+ * CLI's, and giving one is refused.
+ */
+function checkContextWindow(provider: Provider, contextWindow: number | undefined): void {
+  switch (provider.kind) {
+    case "claude":
+      if (contextWindow !== undefined) throw new Error("a Claude model's context window is the CLI's");
+      return;
+    case "openai-compat":
+      if (!(Number.isSafeInteger(contextWindow) && contextWindow! > 0)) {
+        throw new Error("an OpenAI-compatible model needs its context window, in tokens: compaction is measured against it");
+      }
+      return;
+    default:
+      unknownKind(provider.kind);
+  }
+}
+
+export const LABEL_MAX = 60;
+
+/** A label as stored: trimmed, null when empty; one line, at most LABEL_MAX characters. */
+function checkLabel(label: string | null | undefined): string | null {
+  const l = label?.trim() ?? "";
+  if (/[\r\n]/.test(l)) throw new Error("a label is one line");
+  if (l.length > LABEL_MAX) throw new Error(`a label is at most ${LABEL_MAX} characters`);
+  return l || null;
+}
+
 /** Add a model of `provider` (its name). The first model of an empty catalog is its default. */
 export function addModel(db: Db, m: { provider: string; model: string; label?: string; contextWindow?: number; vision?: boolean; isDefault?: boolean }): CatalogModel {
   const provider = getProvider(db, m.provider);
   if (!provider) throw new Error(`there is no provider named "${m.provider}"`);
   const model = m.model.trim();
   if (!model || /\s/.test(model)) throw new Error(`"${m.model}" is not a model id`);
-  switch (provider.kind) {
-    case "claude":
-      break;
-    case "openai-compat":
-      if (!(Number.isSafeInteger(m.contextWindow) && m.contextWindow! > 0)) {
-        throw new Error("an OpenAI-compatible model needs its context window, in tokens: compaction is measured against it");
-      }
-      break;
-    default:
-      unknownKind(provider.kind);
-  }
+  checkContextWindow(provider, m.contextWindow);
   return db.transaction((tx) => {
     const first = !tx.select({ id: models.id }).from(models).limit(1).get();
     const isDefault = m.isDefault ?? first;
     if (isDefault) tx.update(models).set({ isDefault: false }).where(eq(models.isDefault, true)).run();
     const row = tx
       .insert(models)
-      .values({ providerId: provider.id, model, label: m.label ?? null, contextWindow: m.contextWindow ?? null, vision: m.vision ?? false, isDefault })
+      .values({ providerId: provider.id, model, label: checkLabel(m.label), contextWindow: m.contextWindow ?? null, vision: m.vision ?? false, isDefault })
       .returning()
       .get();
     return { id: modelId(provider, row), model: row, provider };
@@ -258,6 +278,32 @@ export function setModelVision(db: Db, id: string, vision: boolean): void {
   const m = findModel(db, id);
   if (!m) throw new Error(`there is no model "${id}"`);
   db.update(models).set({ vision, visionSet: true }).where(eq(models.id, m.model.id)).run();
+}
+
+/** Let model `id`'s vision follow its probes again (what the last one learned, if anything): the owner's setting is dropped. */
+export function setModelVisionAuto(db: Db, id: string): void {
+  const m = findModel(db, id);
+  if (!m) throw new Error(`there is no model "${id}"`);
+  db.update(models)
+    .set({ visionSet: false, ...(m.model.probeVision === null ? {} : { vision: m.model.probeVision }) })
+    .where(eq(models.id, m.model.id))
+    .run();
+}
+
+/**
+ * Change model `id`'s label (empty: none) and, for an OpenAI-compatible model, its context window (required,
+ * as when it is added). A Claude model's context window is the CLI's: giving one is refused.
+ */
+export function editModel(db: Db, id: string, e: { label?: string | null; contextWindow?: number }): CatalogModel {
+  const m = findModel(db, id);
+  if (!m) throw new Error(`there is no model "${id}"`);
+  checkContextWindow(m.provider, e.contextWindow);
+  const label = checkLabel(e.label);
+  db.update(models)
+    .set({ label, ...(m.provider.kind === "openai-compat" ? { contextWindow: e.contextWindow! } : {}) })
+    .where(eq(models.id, m.model.id))
+    .run();
+  return findModel(db, id)!;
 }
 
 /**

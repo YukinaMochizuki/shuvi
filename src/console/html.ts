@@ -41,8 +41,8 @@ export function href(path: string, query: Record<string, string | number | undef
   return s ? `${path}?${s}` : path;
 }
 
-/** The shell every page is drawn in: the top bar, then `body`. */
-export function page(title: string, body: Raw, who?: string): string {
+/** The shell every page is drawn in: the top bar, then `body`. `here`: the top bar's section to mark. */
+export function page(title: string, body: Raw, who?: string, here?: "turns" | "settings"): string {
   return `<!doctype html>${html`<html lang="en">
 <head>
 <meta charset="utf-8">
@@ -54,6 +54,7 @@ export function page(title: string, body: Raw, who?: string): string {
 </head>
 <body>
 <header class="topbar"><a class="brand" href="/turns">shuvi</a><span class="crumb">console</span>
+<nav><a href="/turns" class="${here === "turns" ? "here" : ""}">Turns</a><a href="/settings" class="${here === "settings" ? "here" : ""}">Settings</a></nav>
 ${who ? html`<span class="who">${who}</span>` : ""}</header>
 ${body}
 </body>

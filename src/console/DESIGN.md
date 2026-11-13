@@ -85,7 +85,49 @@ page marks those turns. `j` / `k` move between segments.
   its transcript was pruned after the retention period, or it was never recorded (it ended before its prompt
   reached the model). The first recorded turn is a marker in `kv`, so the three are told apart.
 - **/chats/:id**: a chat's whole log, each turn's boundary a thin divider linking to it.
+- **/settings**: the model catalog, the console's one page that changes anything (below).
 - **/login**, **403**, **404**: the same shell, a small centred card.
+
+## Settings
+
+One column (max 1080px, centred), reached from the top bar's Turns / Settings. What the control bot's
+`/models` and `/provider` cards do (control/model-cards.ts), with the same rules and words:
+
+```
+┌ top bar: shuvi console  Turns Settings ················· owner@… ┐
+│ Settings  the model catalog                                      │
+│ 3 providers · 7 models · default claude/opus                     │
+│ PROVIDERS ────────────────────────────────────────────────────── │
+│ vllm [OpenAI-compatible]                    [List models][Remove]│
+│ http://10.0.0.5:8000/v1 · key home.VLLM_KEY · 3 models           │
+│ MODELS  7 models · 1 probing · 2 ⚠ ───────────────────────────── │
+│ vllm  OpenAI-compatible · 3 models                               │
+│ ┃ vllm/llama-3.1-8b             [Make default][Re-probe][Edit][…]│
+│ ┃ 8,192 tokens · no vision (set by you) · ⚠ text-in…[on|off|auto]│
+│ ADD A PROVIDER ───────────────────────────────────────────────── │
+│ ● lab lists 6 models.  qwen3-32b  32,768 tokens  ✓ in the catalog│
+└──────────────────────────────────────────────────────────────────┘
+```
+
+- **Providers**: name, kind, base URL or config dir, the key's `<profile>.<VAR>` (never a value), model
+  count; List models (an endpoint), Remove.
+- **Models**, under their provider: ★ default, id, label; context window, vision with where it came from
+  ("set by you" / "from probe" / "not known yet"), the probe (checking, ok with latency, ⚠ text-instead, ⚠
+  failed with its reason, when); the chats whose own model it is (the default: how many chats run on it).
+  Make default, Re-probe, Vision on / off / auto (auto: follow the probe), Edit (label, context window),
+  Remove. A warned row has an amber edge, a failed one red.
+- **Add a provider**: the form; an endpoint's `/models` listing then shows in a panel (listing…, the list
+  with Add per model, ✓ for those in the catalog and a context-window field where the listing gives none,
+  or why it failed), until Done.
+- **Remove** is a link: the row opens a red confirmation panel naming what it removes and the chats on it.
+  On the default (or its provider) the page shows the control bot's refusal instead. Edit opens a form in
+  the row the same way.
+- **The result of a write** (a flash, once) is drawn on the row it is about, else at the top: green done,
+  pink refused, red failed.
+
+Every button is a POST form (to `/settings/<area>/<verb>`, settings-write.ts) carrying the page's CSRF token;
+the server answers 303 back to `/settings`, so a reload never repeats a write. A probe or a listing runs in the
+server; the page shows its progress when reloaded (no script). The write boundary is in server.ts's header.
 
 ## Components
 
@@ -113,6 +155,12 @@ page marks those turns. `j` / `k` move between segments.
 | GapDivider | dashed line between segments: "1h 00m later · 11 Nov, 00:22" |
 | Compaction | amber panel: "Compacted", trigger, tokens before → after, what she sees from here on |
 | Banner | failed turn: tinted panel with the error |
+| SettingsRow | provider or model: what it is (left), its buttons (right; below it under 760px) |
+| Btn | 26px button or link: plain, `danger` (red text), `danger solid` (confirm), `primary` (accent) |
+| SegButtons | Vision on / off / auto: one form, the current value raised |
+| Confirm | red-tinted panel across a row: the question, what it affects, the button, Cancel |
+| Notice | a write's result: on its row, or at the top; ok / refused / failed tones |
+| Listing | a provider's `/models`: state line, then rows (model, context window, Add or ✓) |
 
 ## Type and spacing
 
@@ -126,4 +174,4 @@ page marks those turns. `j` / `k` move between segments.
 ## Script
 
 `/console.js` (same origin, CSP `script-src 'self'`), optional: copy buttons, and j / k to move through the
-list's rows (segments). Everything works without it.
+list's rows (segments). Everything works without it, the Settings page's forms included.
