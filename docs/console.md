@@ -10,9 +10,10 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
 - **Chats, conversations, segments** (`/turns`): on the left, every chat, most recently active first. Under
   each, its latest **segments** (runs of turns with no gap over 30 minutes), under the **conversation** they
   belong to: her conversation, the turns that resumed one backend session, from the chat's first turn, a
-  `/new`, a lost session's fresh restart, or a backend settings change, to the next. Filters (outcome, tool
-  used, date range in the owner's time zone) and search (thinking, text, tool arguments and results, errors,
-  input) keep matching segments; a chat with none is hidden. `j` / `k` move through the segments.
+  `/new`, a lost session's fresh restart, or a switch to a model of another lane, to the next. Filters
+  (outcome, a tool used, a date range in the owner's time zone) and search (thinking, text, tool arguments and
+  results, errors, the input) keep the segments holding a matching turn; a chat with none is hidden. `j` / `k`
+  move through the segments.
 - **A segment** (`/segments/<id>`) or **a whole conversation** (`/conversations/<id>`): one continuous
   exchange, a thin divider at each turn (its outcome, duration, cost, links to the turn and its tabs), a
   dashed one where a conversation went quiet, and a prominent one where it was **compacted** (after which she
@@ -38,9 +39,9 @@ Images are stored as paths under `media/`, never as bytes. Recording is best eff
 the turn goes on.
 
 Each turn also records which backend session it ran in and how that session came to be (`turns.opening`: the
-chat's first, a fresh one after `/new`, a restart after it was lost, a fresh conversation after backend
-settings changed, or resumed), which is what groups turns into conversations. A backend settings change
-records a note in the transcript and raises a control-bot alert. A successful compaction is a
+chat's first, a fresh one after `/new`, a restart after it was lost, another lane's after a model switch, or
+resumed), which is what groups turns into conversations. The first turn after a model switch notes it in its
+transcript: from what to what, and lossless (how many messages were carried) or lossy. A successful compaction is a
 `compaction` step with its trigger and the tokens before and after (recorded when the agent-runtime in use
 reports compactions through its `onCompaction` run option); a compaction summary failure or rejection is
 recorded as a generic transcript note. Turns from before these were recorded have their conversation inferred
@@ -51,10 +52,9 @@ shows them from the chat's log and says so, with the first recorded turn and its
 is kept as a marker, so such a turn is never mistaken for a pruned one.
 
 Transcripts are kept for `SHUVI_TRANSCRIPT_DAYS` (default 30) after a turn ends, then pruned with any prompt
-text no transcript points at. Abandoned OpenAI-compatible histories use the same retention period measured
-from their last write and are pruned hourly; active sessions and sessions used by running turns are preserved.
-`/new` clears the active OpenAI-compatible session while its old history remains until retention expires.
-Pruning never touches `chat_events`, and the `turns` row (with its usage) stays.
+text no transcript points at. An OpenAI-compatible conversation no chat uses any more (active, parked in a
+lane, or a running turn's) is pruned the same time after its last write. Pruning never touches `chat_events`,
+and the `turns` row (with its usage) stays.
 
 ## Publishing it on the tailnet
 

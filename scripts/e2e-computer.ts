@@ -135,7 +135,6 @@ const env = {
   SHUVI_TELEGRAM_API_ROOT: tg.apiRoot,
   SHUVI_CONTROL_BOT_TOKEN: "CONTROL",
   SHUVI_CONTROL_API_ROOT: control.apiRoot,
-  SHUVI_BACKEND: "claude",
   SHUVI_MODEL: "claude-sonnet-4-5",
   SHUVI_TZ: "Asia/Taipei",
   SHUVI_WEB: "off",

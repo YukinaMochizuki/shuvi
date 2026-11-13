@@ -35,6 +35,7 @@ import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
 import { chatLabel, extendTurn, finishTurn, getTurn, hadEarlierTurn, saveSession, setTurnConversation } from "../store/turns.ts";
 import { buildPromptSections, joinSections } from "./prompt.ts";
+import { claimSwitches, switchNote } from "./switch.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, timeNote, type InputOptions, type Perceive } from "./render.ts";
 import { recordingBoundary, TurnRecorder, type RecorderOptions } from "./transcript.ts";
 import { isTrigger, type BotIdentity } from "./triggers.ts";
@@ -124,8 +125,11 @@ export function isLostSession(e: unknown, backend?: string): boolean {
  * chat's conversation is reset and the same turn runs again at once, once, as a fresh conversation that
  * opens with the last `HISTORY_ON_NEW` messages (as after `/new`). It costs no failure attempt; the owner
  * is told through the control bot.
- * A changed backend scope starts fresh before rendering input, records a `changed` opening and a
- * transcript note, and alerts the owner. The runner supplies the scope check (agent/backend.ts).
+ *
+ * The SWITCHES of the chat's model since the last turn (agent/switch.ts) are recorded by the first turn after
+ * them: a transcript note each, saying from what to what and how, and, when one moved the conversation to
+ * another lane, the opening `switched`. The model is not told: what it is given is the conversation as it
+ * now stands.
  *
  * THE TRANSCRIPT (agent/transcript.ts): the turn is recorded as the model saw it, best effort: its system
  * prompt by section, its input, and a timeline of thinking, text blocks (with the message each became),
@@ -152,8 +156,6 @@ export interface TurnDeps {
   bot?: BotIdentity;
   /** The driver for this turn, built around the boundary the turn supplies. */
   makeAdapter: (boundary: ToolBoundary, note: (text: string) => void) => BackendAdapter;
-  /** Whether the saved session belongs to this backend's settings and chat. */
-  conversationMatches?: (sessionId: string, chatId: number) => boolean;
   signal?: AbortSignal;
   /** How the transcript is recorded (agent/transcript.ts). Default: the data dir above `home`, no redaction. */
   record?: RecorderOptions;
@@ -357,18 +359,9 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     finishTurn(db, turnId, { status: "done" });
     return "empty";
   }
-  const changed = !!chat.backendSessionId && deps.conversationMatches?.(chat.backendSessionId, chat.id) === false;
-  if (changed) {
-    resetConversation(db, chat.id);
-    chat.backendSessionId = null;
-    chat.contextTokens = null;
-    raiseAlert(db, {
-      key: `backend-changed:${turnId}`,
-      turnId,
-      topic: `backend-changed:${chat.id}`,
-      text: `Backend settings changed for ${chatLabel(chat)}; turn ${turnId} started a fresh conversation with the last ${HISTORY_ON_NEW} messages.`,
-    });
-  }
+  // The switches since the last turn (agent/switch.ts) are this turn's to record.
+  const switches = claimSwitches(db, chat.id, turnId);
+  const crossLane = switches.some((s) => s.mode !== "native");
   // In a group: from up to GROUP_CONTEXT messages before the first that woke the turn.
   let input = unseen;
   let context = 0;
@@ -401,7 +394,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   extendTurn(db, turnId, s.toSeq);
 
   const rec = new TurnRecorder(db, turnId, deps.record ?? { dataDir: dirname(deps.home) });
-  if (changed) rec.note(`Backend settings changed; this turn started a fresh conversation with the last ${HISTORY_ON_NEW} messages.`);
+  for (const s of switches) rec.note(switchNote(s));
   let buf = "";
   const flush = () => {
     const seq = queueMessage(db, s, buf);
@@ -410,10 +403,18 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   };
 
   const authority = turnAuthority(capabilities, deps.ownerId);
-  const adapter = deps.makeAdapter(
-    recordingBoundary(turnBoundary(db, s, deps.timeZone, capabilities, authority), rec, () => s.toSeq, (seq) => triggersAfter(db, chat.id, seq)[0]?.seq),
-    (text) => rec.note(text),
-  );
+  let adapter: BackendAdapter;
+  try {
+    adapter = deps.makeAdapter(
+      recordingBoundary(turnBoundary(db, s, deps.timeZone, capabilities, authority), rec, () => s.toSeq, (seq) => triggersAfter(db, chat.id, seq)[0]?.seq),
+      (text) => rec.note(text),
+    );
+  } catch (e) {
+    // A driver that cannot be built (a provider's key missing from the secrets file) fails the turn, saying why.
+    rec.end();
+    finishTurn(db, turnId, { status: "failed", error: rec.redactText(e instanceof Error ? e.message : String(e)) });
+    return "failed";
+  }
   const firstOwnerMessage = input.find((e) => e.kind === "message" && (deps.ownerId === undefined || (e.payload as unknown as MessagePayload).from.id === deps.ownerId));
   const ownerName = deps.ownerName ?? (firstOwnerMessage ? (firstOwnerMessage.payload as unknown as MessagePayload).from.name : undefined);
   const owner: OwnerInfo = { ...(ownerName ? { name: ownerName } : {}), ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
@@ -465,8 +466,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const sections = buildPromptSections(deps.home, chat, owner, capabilities, chatPolicy, db);
   const systemPrompt = joinSections(sections);
   rec.prompt(sections);
-  // Which conversation this turn is in: resumed, or fresh after its first turn, `/new` or changed settings.
-  setTurnConversation(db, turnId, { opening: changed ? "changed" : chat.backendSessionId ? "resumed" : hadEarlierTurn(db, chat.id, turnId) ? "new" : "first" });
+  // Which conversation this turn is in: resumed, or fresh after its first turn, `/new`, or a switch to another lane.
+  setTurnConversation(db, turnId, { opening: crossLane ? "switched" : chat.backendSessionId ? "resumed" : hadEarlierTurn(db, chat.id, turnId) ? "new" : "first" });
   const fresh = (p: Prompt) => {
     rec.input(p, false);
     return adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);

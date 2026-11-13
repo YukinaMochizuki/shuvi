@@ -39,6 +39,7 @@ import { PolicyWatch } from "../policy/load.ts";
 import { applyPolicyApprovals } from "../policy/write.ts";
 import { openDb } from "../store/db.ts";
 import { pruneConversations } from "../store/conversations.ts";
+import { seedModels } from "../store/models.ts";
 import { getChat, type ChatEvent } from "../store/events.ts";
 import { pruneTranscripts } from "../store/transcripts.ts";
 import { runningTurns } from "../store/turns.ts";
@@ -54,6 +55,8 @@ const cfg = loadConfig();
 // Refused here, before anything starts: a console on a non-loopback address (src/console/server.ts).
 checkConsole(cfg.console);
 const db = openDb(cfg.dbPath, { migrate: true });
+// A first start's model catalog: what turns ran on before there was one (store/models.ts).
+seedModels(db, { ...(cfg.claudeConfigDir ? { claudeConfigDir: cfg.claudeConfigDir } : {}), ...(cfg.model ? { model: cfg.model } : {}) });
 const api = new Api(cfg.botToken, cfg.telegramApiRoot ? { apiRoot: cfg.telegramApiRoot } : undefined);
 const capabilities = enabledCapabilities();
 const me = await api.getMe();

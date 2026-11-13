@@ -3,15 +3,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "agent-runtime/openai-compat";
-import { conversationMatchesBackend, openAICompatBackend, openAIConversationPrefix } from "../src/agent/backend.ts";
+import { appendToClaudeSession } from "agent-runtime/convert";
+import { makeDriver } from "../src/agent/backend.ts";
+import { enterModelLane, switchModel } from "../src/agent/switch.ts";
 import { runTurn } from "../src/agent/turn.ts";
 import { conversationLabel } from "../src/console/pages.ts";
-import { chatGrouping, conversationOf } from "../src/console/sessions.ts";
-import type { Config } from "../src/env.ts";
+import { conversationOf } from "../src/console/sessions.ts";
 import { conversationStore } from "../src/store/conversations.ts";
 import { controlMessagesOf } from "../src/store/control.ts";
 import { getChat } from "../src/store/events.ts";
-import { getTranscript, stepsOf } from "../src/store/transcripts.ts";
+import { addModel, addProvider, setDefaultModel } from "../src/store/models.ts";
+import { stepsOf } from "../src/store/transcripts.ts";
 import { claimTurn, finishTurn, getTurn, saveSession, setTurnConversation } from "../src/store/turns.ts";
 import { memDb, ownerChatId, ownerSays, ScriptedAdapter } from "./helpers.ts";
 
@@ -22,15 +24,10 @@ afterEach(() => {
   dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true }));
 });
 
-function config(): Config {
-  const dataDir = mkdtempSync(join(tmpdir(), "shuvi-backend-turn-"));
-  dirs.push(dataDir);
-  return {
-    botToken: "", ownerId: 1001, dataDir, dbPath: join(dataDir, "shuvi.db"), home: join(dataDir, "home"),
-    backend: "openai-compat", model: "test-model", timeZone: "UTC", turnMaxMs: 1, outboundAlertMs: 1,
-    transcriptDays: 1, secretsFile: join(dataDir, "secrets"), console: { listen: "127.0.0.1:8787" },
-    openAICompat: { baseURL: "http://127.0.0.1:8000/v1", contextWindow: 100_000, vision: false },
-  };
+function tmp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  dirs.push(dir);
+  return dir;
 }
 
 const reply = () => new Response([
@@ -38,12 +35,21 @@ const reply = () => new Response([
   { choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 } },
 ].map((chunk) => `data: ${JSON.stringify({ id: "test", object: "chat.completion.chunk", created: 1, model: "test-model", ...chunk })}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
 
-function seed(cfg: Config) {
+/** A catalog whose default is an OpenAI-compatible model with no key. */
+function catalog(db: ReturnType<typeof memDb>, contextWindow = 100_000) {
+  addProvider(db, { name: "local", kind: "openai-compat", baseUrl: "http://127.0.0.1:8000/v1" });
+  return addModel(db, { provider: "local", model: "test-model", contextWindow, isDefault: true });
+}
+
+/** A chat whose conversation `saved` is in the OpenAI-compatible lane, after one turn, with a new message. */
+function seed(contextWindow?: number) {
   const db = memDb();
+  catalog(db, contextWindow);
   ownerSays(db, "earlier chat message");
   const chatId = ownerChatId(db);
-  const id = `${openAIConversationPrefix(cfg, chatId)}saved`;
+  const id = "saved";
   saveSession(db, chatId, id);
+  enterModelLane(db, getChat(db, chatId)!);
   const previous = claimTurn(db, chatId)!;
   setTurnConversation(db, previous.id, { backendSessionId: id, opening: "first" });
   finishTurn(db, previous.id, { status: "done" });
@@ -51,75 +57,130 @@ function seed(cfg: Config) {
   return { db, chatId, id };
 }
 
-async function realTurn(db: ReturnType<typeof memDb>, cfg: Config) {
+/** One turn as the runner child runs it: the chat's model from the catalog, its driver built from it. */
+async function realTurn(db: ReturnType<typeof memDb>) {
   const chatId = ownerChatId(db);
   const turn = claimTurn(db, chatId)!;
+  const model = enterModelLane(db, getChat(db, chatId)!);
   const outcome = await runTurn({
-    db, turnId: turn.id, home: cfg.home, timeZone: "UTC", model: cfg.model, capabilities: [],
-    conversationMatches: (id, chat) => conversationMatchesBackend(id, cfg, chat),
-    makeAdapter: (boundary, note) => openAICompatBackend(db, cfg, chatId, boundary, note),
+    db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", model: model.model.model, capabilities: [],
+    makeAdapter: (boundary, note) => makeDriver({ db, chatId, model, boundary, note, secretsFile: "/nonexistent" }),
   });
   return { outcome, turn: getTurn(db, turn.id)!, steps: stepsOf(db, turn.id) };
 }
 
-describe("runTurn: backend scope changes", () => {
-  for (const change of ["backend", "model", "endpoint", "to Claude"] as const) {
-    test(`${change} starts fresh with a recorded reason and recent history`, async () => {
-      const cfg = config();
-      const { db, chatId, id } = seed(cfg);
-      await conversationStore(db, chatId).append(id, [{ role: "user", content: "old model history" }]);
-      if (change === "backend") saveSession(db, chatId, "legacy-claude-session");
-      if (change === "model") cfg.model = "another-model";
-      if (change === "endpoint") cfg.openAICompat!.baseURL = "http://127.0.0.1:9000/v1";
-      if (change === "to Claude") cfg.backend = "claude";
-      const turn = claimTurn(db, chatId)!;
-      let adapter!: ScriptedAdapter;
-      try {
-        expect(await runTurn({
-          db, turnId: turn.id, home: cfg.home, timeZone: "UTC", capabilities: [],
-          conversationMatches: (session, chat) => conversationMatchesBackend(session, cfg, chat),
-          makeAdapter: (boundary) => (adapter = new ScriptedAdapter(boundary, [{ token: "fresh" }])),
-        })).toBe("done");
-        expect(adapter.calls.map((call) => call.method)).toEqual(["run"]);
-        expect(adapter.calls[0]!.prompt).toContain("earlier chat message");
-        expect(getTurn(db, turn.id)!.opening).toBe("changed");
-        expect(getTranscript(db, turn.id)!.resumed).toBe(false);
-        expect(stepsOf(db, turn.id).some((step) => step.kind === "note" && step.text?.includes("Backend settings changed"))).toBe(true);
-        const alert = controlMessagesOf(db, "alert")[0]!;
-        expect(alert.idemKey).toBe(`backend-changed:${turn.id}`);
-        expect(alert.text).not.toContain("/new");
-        const conversation = conversationOf(db, chatId, turn.id)!.conversation;
-        expect(conversation.start).toBe("changed");
-        expect(new Set(chatGrouping(db, chatId).map((item) => item.conversationId)).size).toBe(2);
-        expect(conversationLabel(conversation)).toBe("A fresh conversation after backend settings changed");
-        expect(await conversationStore(db, chatId).load(id)).toEqual([{ role: "user", content: "old model history" }]);
-      } finally {
-        db.$client.close();
-      }
-    });
-  }
+describe("runTurn after a switch", () => {
+  test("lossless from a Claude conversation: the next turn on the OpenAI-compatible model is sent it, records `switched` and a note", async () => {
+    const db = memDb();
+    const configDir = tmp("shuvi-claude-");
+    addProvider(db, { name: "claude", kind: "claude", configDir });
+    addModel(db, { provider: "claude", model: "opus", isDefault: true });
+    addProvider(db, { name: "local", kind: "openai-compat", baseUrl: "http://127.0.0.1:8000/v1" });
+    addModel(db, { provider: "local", model: "test-model", contextWindow: 100_000 });
+    ownerSays(db, "hello on claude");
+    const chatId = ownerChatId(db);
+    // The chat's Claude conversation, as a Claude Code session file.
+    const claude = appendToClaudeSession(null, [{ role: "user", content: "CLAUDE-QUESTION" }, { role: "assistant", content: [{ type: "text", text: "CLAUDE-ANSWER" }] }], { configDir, cwd: "/srv" });
+    saveSession(db, chatId, claude.sessionId);
+    enterModelLane(db, getChat(db, chatId)!);
+    const first = claimTurn(db, chatId)!;
+    finishTurn(db, first.id, { status: "done" });
+    expect(switchModel(db, chatId, "local/test-model", "lossless")).toEqual({ mode: "lossless", from: "claude/opus", to: "local/test-model", carried: 2, compacted: false });
+    ownerSays(db, "now on the endpoint");
+    let body = "";
+    globalThis.fetch = (async (_url, init) => ((body = String(init?.body)), reply())) as typeof fetch;
+    try {
+      const result = await realTurn(db);
+      expect(result.outcome).toBe("done");
+      expect(body).toContain("CLAUDE-QUESTION");
+      expect(body).toContain("CLAUDE-ANSWER");
+      expect(body).not.toContain("switched"); // the model is not told
+      expect(result.turn.opening).toBe("switched");
+      expect(result.steps.find((step) => step.kind === "note")?.text).toBe("Model switched from claude/opus to local/test-model, lossless: 2 messages carried into its conversation.");
+      const conversation = conversationOf(db, chatId, result.turn.id)!.conversation;
+      expect(conversation.start).toBe("switched");
+      expect(conversationLabel(conversation)).toBe("Another conversation, after the model was switched");
+    } finally {
+      db.$client.close();
+    }
+  });
 
-  test("key rotation and legacy Claude ids resume without a change alert", async () => {
-    for (const backend of ["claude", "openai-compat"] as const) {
-      const cfg = config();
-      const { db, chatId } = seed(cfg);
-      cfg.backend = backend;
-      if (backend === "claude") saveSession(db, chatId, "legacy-claude-session");
-      else cfg.openAICompat!.apiKey = "rotated-test-key";
-      const turn = claimTurn(db, chatId)!;
-      let adapter!: ScriptedAdapter;
-      try {
-        expect(await runTurn({
-          db, turnId: turn.id, home: cfg.home, timeZone: "UTC", capabilities: [],
-          conversationMatches: (session, chat) => conversationMatchesBackend(session, cfg, chat),
-          makeAdapter: (boundary) => (adapter = new ScriptedAdapter(boundary, [{ token: "resumed" }])),
-        })).toBe("done");
-        expect(adapter.calls.map((call) => call.method)).toEqual(["continueRun"]);
-        expect(getTurn(db, turn.id)!.opening).toBe("resumed");
-        expect(controlMessagesOf(db, "alert")).toHaveLength(0);
-      } finally {
-        db.$client.close();
-      }
+  test("a switch within the lane goes on with the same conversation: `resumed`, with a note", async () => {
+    const { db, chatId, id } = seed();
+    addModel(db, { provider: "local", model: "other-model", contextWindow: 100_000 });
+    expect(switchModel(db, chatId, "local/other-model", "lossy").mode).toBe("native");
+    const turn = claimTurn(db, chatId)!;
+    let adapter!: ScriptedAdapter;
+    try {
+      expect(await runTurn({ db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", capabilities: [], makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ token: "same" }])) })).toBe("done");
+      expect(adapter.calls.map((call) => call.method)).toEqual(["continueRun"]);
+      expect(getTurn(db, turn.id)!.opening).toBe("resumed");
+      expect(getTurn(db, turn.id)!.backendSessionId).toBe(id);
+      expect(stepsOf(db, turn.id).find((step) => step.kind === "note")?.text).toBe("Model switched from local/test-model to local/other-model; the conversation went on as it was.");
+    } finally {
+      db.$client.close();
+    }
+  });
+
+  test("a default moved to another lane without a switch: the next turn moves lossy, and its earlier lane is kept", async () => {
+    const { db, chatId, id } = seed();
+    addProvider(db, { name: "claude", kind: "claude", configDir: tmp("shuvi-claude-") });
+    addModel(db, { provider: "claude", model: "opus" });
+    setDefaultModel(db, "claude/opus");
+    const turn = claimTurn(db, chatId)!;
+    let adapter!: ScriptedAdapter;
+    try {
+      enterModelLane(db, getChat(db, chatId)!);
+      expect(await runTurn({ db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", capabilities: [], makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ token: "fresh" }])) })).toBe("done");
+      expect(adapter.calls.map((call) => call.method)).toEqual(["run"]);
+      expect(adapter.calls[0]!.prompt).toContain("earlier chat message"); // a fresh lane opens with the last messages
+      expect(getTurn(db, turn.id)!.opening).toBe("switched");
+      expect(stepsOf(db, turn.id).find((step) => step.kind === "note")?.text).toBe(
+        "The chat's model moved to claude/opus (its default changed), lossy: its conversation resumed as it was left, without what was said on the other model.",
+      );
+      expect(db.$client.query("select backend_session_id as s from chat_lanes where chat_id = ? and lane = 'openai-compat'").get(chatId)).toEqual({ s: id });
+    } finally {
+      db.$client.close();
+    }
+  });
+});
+
+describe("runTurn: several switches, and a driver that cannot be built", () => {
+  test("every switch since the last turn is noted; one across lanes makes the opening `switched`", async () => {
+    const { db, chatId } = seed();
+    addProvider(db, { name: "claude", kind: "claude", configDir: tmp("shuvi-claude-") });
+    addModel(db, { provider: "claude", model: "opus" });
+    addModel(db, { provider: "local", model: "other-model", contextWindow: 100_000 });
+    switchModel(db, chatId, "claude/opus", "lossy");
+    switchModel(db, chatId, "local/other-model", "lossy");
+    const turn = claimTurn(db, chatId)!;
+    try {
+      expect(await runTurn({ db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", capabilities: [], makeAdapter: (b) => new ScriptedAdapter(b, [{ token: "ok" }]) })).toBe("done");
+      expect(getTurn(db, turn.id)!.opening).toBe("switched");
+      expect(stepsOf(db, turn.id).filter((step) => step.kind === "note").map((step) => step.text)).toEqual([
+        "Model switched from local/test-model to claude/opus, lossy: its conversation resumed as it was left, without what was said on the other model.",
+        "Model switched from claude/opus to local/other-model, lossy: its conversation resumed as it was left, without what was said on the other model.",
+      ]);
+    } finally {
+      db.$client.close();
+    }
+  });
+
+  test("a driver that cannot be built fails the turn, saying why, redacted", async () => {
+    const { db, chatId } = seed();
+    const turn = claimTurn(db, chatId)!;
+    try {
+      const outcome = await runTurn({
+        db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", capabilities: [],
+        record: { dataDir: tmp("shuvi-data-"), redact: (text) => text.replaceAll("sk-secret", "[REDACTED]") },
+        makeAdapter: () => {
+          throw new Error("the key endpoint.API_KEY is not in the secrets file (sk-secret)");
+        },
+      });
+      expect(outcome).toBe("failed");
+      expect(getTurn(db, turn.id)!.error).toBe("the key endpoint.API_KEY is not in the secrets file ([REDACTED])");
+    } finally {
+      db.$client.close();
     }
   });
 });
@@ -127,8 +188,7 @@ describe("runTurn: backend scope changes", () => {
 describe("runTurn: real OpenAI-compatible driver failures", () => {
   for (const failure of ["5xx", "network"] as const) {
     test(`${failure} preserves the session and resumes it on retry`, async () => {
-      const cfg = config();
-      const { db, chatId, id } = seed(cfg);
+      const { db, chatId, id } = seed();
       await conversationStore(db, chatId).append(id, [{ role: "user", content: "durable history" }]);
       // Even an API error containing the Claude CLI marker is not a missing local conversation.
       const message = "No conversation found with session ID: upstream-error";
@@ -139,7 +199,7 @@ describe("runTurn: real OpenAI-compatible driver failures", () => {
         return Response.json({ error: { message, type: "server_error" } }, { status: 503 });
       }) as typeof fetch;
       try {
-        const failed = await realTurn(db, cfg);
+        const failed = await realTurn(db);
         expect(requests).toBeGreaterThan(0);
         expect(failed.outcome).toBe("failed");
         expect(failed.turn.opening).toBe("resumed");
@@ -151,7 +211,7 @@ describe("runTurn: real OpenAI-compatible driver failures", () => {
           expect(String(init?.body)).toContain("durable history");
           return reply();
         }) as typeof fetch;
-        const retried = await realTurn(db, cfg);
+        const retried = await realTurn(db);
         expect(retried.outcome).toBe("done");
         expect(retried.turn.backendSessionId).toBe(id);
         expect(retried.turn.opening).toBe("resumed");
@@ -171,9 +231,7 @@ describe("runTurn: constructor compaction reports", () => {
 
   for (const pruned of [false, true]) {
     test(`summary failure is a safe note ${pruned ? "with a successful prune" : "even when history is unchanged"}`, async () => {
-      const cfg = config();
-      cfg.openAICompat!.contextWindow = 100;
-      const { db, chatId, id } = seed(cfg);
+      const { db, chatId, id } = seed(100);
       const before = history();
       if (pruned) before[0] = { role: "user", content: [{ type: "file", mediaType: "image/png", data: "aGVsbG8=" }] };
       await conversationStore(db, chatId).append(id, before);
@@ -185,7 +243,7 @@ describe("runTurn: constructor compaction reports", () => {
         return Response.json({ error: { message: secret, type: "invalid_request_error" } }, { status: 400 });
       }) as typeof fetch;
       try {
-        const result = await realTurn(db, cfg);
+        const result = await realTurn(db);
         expect(result.outcome).toBe("done");
         expect(summaries).toBe(1);
         const notes = result.steps.filter((step) => step.kind === "note");
@@ -201,9 +259,7 @@ describe("runTurn: constructor compaction reports", () => {
   }
 
   test("rejected compaction is noted without exposing the rejected tool call id", async () => {
-    const cfg = config();
-    cfg.openAICompat!.contextWindow = 100;
-    const { db, chatId, id } = seed(cfg);
+    const { db, chatId, id } = seed(100);
     const before = history();
     before.push({ role: "tool", content: [{ type: "tool-result", toolCallId: secret, toolName: "example", output: { type: "text", value: "orphaned result" } }] });
     await conversationStore(db, chatId).append(id, before);
@@ -213,7 +269,7 @@ describe("runTurn: constructor compaction reports", () => {
       return Response.json({ id: "summary", object: "chat.completion", created: 1, model: "test-model", choices: [{ index: 0, message: { role: "assistant", content: "short summary" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } });
     }) as typeof fetch;
     try {
-      const result = await realTurn(db, cfg);
+      const result = await realTurn(db);
       expect(result.outcome).toBe("done");
       const notes = result.steps.filter((step) => step.kind === "note");
       expect(notes).toHaveLength(1);

@@ -10,8 +10,9 @@
  *
  * SIGTERM is a stop (`/stop`, or `/new` while a turn runs): it aborts the driver, and the turn closes as
  * `stopped`. Usage: `bun src/runner/child.ts <turnId>`.
- * Backend scope checks and compaction notes are passed into runTurn, which records fresh conversations
- * caused by changed settings separately from `/new` (agent/backend.ts).
+ * The turn runs on the chat's model in the catalog (store/models.ts), on the driver its provider names
+ * (agent/backend.ts), in the lane that model keeps its conversation in (agent/switch.ts `enterModelLane`).
+ * A model no longer in the catalog fails the turn, saying so.
  *
  * The SIGTERM handler is installed BEFORE anything else is loaded (the modules below are imported
  * dynamically for that reason): a stop that lands while the child is still starting up would otherwise
@@ -28,8 +29,8 @@ if (!Number.isSafeInteger(turnId)) {
   process.exit(2);
 }
 
-const { ClaudeBackend } = await import("agent-runtime/claude");
-const { conversationMatchesBackend, openAICompatBackend } = await import("../agent/backend.ts");
+const { driverModel, makeDriver } = await import("../agent/backend.ts");
+const { enterModelLane } = await import("../agent/switch.ts");
 const { loadConfig } = await import("../env.ts");
 const { openDb } = await import("../store/db.ts");
 const { getChat } = await import("../store/events.ts");
@@ -43,7 +44,8 @@ const { raiseAlert } = await import("../store/control.ts");
 
 const cfg = loadConfig({ needToken: false });
 const db = openDb(cfg.dbPath);
-const turn = (await import("../store/turns.ts")).getTurn(db, turnId);
+const { finishTurn, getTurn } = await import("../store/turns.ts");
+const turn = getTurn(db, turnId);
 const chat = turn ? getChat(db, turn.chatId) : undefined;
 // The same home/policy.yaml the server reads, the same way (a broken one: the last good, from the store);
 // and who the bot is, which the server recorded at startup (a child has no token to ask Telegram).
@@ -74,24 +76,31 @@ const capabilities = enabledCapabilities();
 // A capability's own credential (porchkit's token) is redacted too, as `[REDACTED:<label>]`.
 const redact = withCapabilitySecrets((s) => redaction.redact(s), capabilities);
 
+// The chat's model, and its conversation in that model's lane, before anything is rendered.
+let model: ReturnType<typeof enterModelLane> | undefined;
+try {
+  model = chat && turn?.status === "running" ? enterModelLane(db, chat) : undefined;
+} catch (e) {
+  finishTurn(db, turnId, { status: "failed", error: e instanceof Error ? e.message : String(e) });
+  console.log(`turn ${turnId}: failed (${e instanceof Error ? e.message : String(e)})`);
+  process.exit(0);
+}
+const turnModel = model ? driverModel(model) : undefined;
+
 const outcome = await runTurn({
   db,
   turnId,
   home: cfg.home,
   timeZone: cfg.timeZone,
   ownerId: cfg.ownerId,
-  ...(cfg.model ? { model: cfg.model } : {}),
+  ...(turnModel ? { model: turnModel } : {}),
   ...(cfg.ownerLanguage ? { ownerLanguage: cfg.ownerLanguage } : {}),
   capabilities,
   policy,
   ...(bot ? { bot } : {}),
-  conversationMatches: (id, chatId) => conversationMatchesBackend(id, cfg, chatId),
-  // liveSystemPrompt: each turn's system prompt replaces the one the conversation began with, so an edit
-  // to home/ is heard from the next turn (Claude Code otherwise replays the prompt it recorded).
-  makeAdapter: (boundary, note) =>
-    cfg.backend === "openai-compat"
-      ? openAICompatBackend(db, cfg, chat!.id, boundary, note)
-      : new ClaudeBackend({ boundary, liveSystemPrompt: true, ...(cfg.claudeConfigDir ? { configDir: cfg.claudeConfigDir } : {}) }),
+  // Claude: its system prompt is live on every turn, so an edit to home/ is heard from the next turn
+  // (Claude Code otherwise replays the prompt it recorded). agent/backend.ts.
+  makeAdapter: (boundary, note) => makeDriver({ db, chatId: chat!.id, model: model!, boundary, note, secretsFile: cfg.secretsFile }),
   signal: ac.signal,
   record: { dataDir: cfg.dataDir, redact, notes },
 });

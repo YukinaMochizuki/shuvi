@@ -16,8 +16,8 @@ unit of the list is a run of turns, grouped by what the model actually saw (`ses
 
 - **Chat**: as before, a group in the left pane, ordered by last activity.
 - **Conversation**: her conversation, the turns that resumed one backend session. It starts at the chat's
-  first turn, at `/new`, when backend settings changed, or when a lost session was restarted fresh; its header
-  says which. Inside it she
+  first turn, at `/new`, after a switch to a model of another lane, or when a lost session was restarted
+  fresh, and its header says which. Inside it she
   saw one continuous exchange, except across a **compaction**, after which she saw only a summary: that point
   is a prominent divider (trigger, tokens before → after), and a conversation or segment holding one says so.
   Turns from before openings were recorded get theirs inferred from `/new` commands and lost-session alerts,
@@ -95,7 +95,7 @@ page marks those turns. `j` / `k` move between segments.
 | Split | tree pane + detail pane, each scrolling on its own |
 | FilterBar | search field, outcome links, "more filters" (`<details>`: tool, from, to) |
 | ChatGroup | `<details>`: header (name → its log, last activity, turns, failed) over its conversations, "n more" |
-| ConversationHead | link: how it started (first, after /new, settings changed, restarted, inferred), when, turns, compactions |
+| ConversationHead | link: how it started (first, after /new, after a model switch, restarted, inferred), when, turns, compactions |
 | SegmentRow | dot · what started it (1 line) · relative time / start · span · turns · tools · cost; failed rows tinted |
 | Dot | 8px outcome colour |
 | Badge | outcome word in its colour, for headers |

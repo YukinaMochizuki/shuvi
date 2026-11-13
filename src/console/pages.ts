@@ -302,8 +302,8 @@ export function conversationLabel(c: Conversation, form: "short" | "long" = "lon
       ? form === "short" ? "first conversation" : "The chat's first conversation"
       : c.start === "new"
         ? form === "short" ? "after /new" : "A fresh conversation, after /new"
-        : c.start === "changed"
-          ? form === "short" ? "backend settings changed" : "A fresh conversation after backend settings changed"
+        : c.start === "switched"
+          ? form === "short" ? "after a model switch" : "Another conversation, after the model was switched"
           : c.start === "lost"
             ? form === "short" ? "restarted (lost)" : "Restarted: the previous conversation was lost"
             : form === "short" ? "conversation" : "A new conversation";

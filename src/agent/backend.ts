@@ -1,51 +1,69 @@
-/**
- * Backend session identity and the OpenAI-compatible driver factory. OpenAI-compatible ids are scoped
- * to endpoint, model and chat; API key rotation keeps the same scope. Unprefixed legacy ids belong to
- * Claude. runTurn checks this scope before resuming and records a changed opening when it differs.
- *
- * History lives in store/conversations.ts. Only a missing row is a lost session; provider failures keep
- * the conversation. Constructor compaction failures become static transcript notes, never raw provider
- * errors or rejected history. Successful compactions use the runtime's run-level callback once.
- */
-import { createHash, randomUUID } from "node:crypto";
+import { ClaudeBackend } from "agent-runtime/claude";
 import { OpenAICompatBackend } from "agent-runtime/openai-compat";
-import type { ToolBoundary } from "agent-runtime";
-import type { Config } from "../env.ts";
-import type { Db } from "../store/db.ts";
+import type { BackendAdapter, ToolBoundary } from "agent-runtime";
+import { loadProfiles } from "../secrets/redaction.ts";
 import { conversationStore } from "../store/conversations.ts";
+import type { Db } from "../store/db.ts";
+import { CLI_DEFAULT_MODEL, type CatalogModel } from "../store/models.ts";
 
-function identity(baseURL: string, model: string): string {
-  return createHash("sha256").update(`${baseURL}\n${model}`).digest("hex").slice(0, 16);
+/**
+ * The driver a turn runs on, built from the chat's model in the catalog (store/models.ts) when the turn
+ * starts, so a change to the catalog applies from the next turn.
+ *
+ *   claude         agent-runtime's Claude driver on the provider's login (`config_dir`), its system prompt
+ *                  live on every turn (`liveSystemPrompt`: an edit to home/ is heard on a resume).
+ *   openai-compat  agent-runtime's OpenAI-compatible driver on the provider's endpoint, its history in our
+ *                  store (store/conversations.ts), its key read from the secrets file (`<profile>.<VAR>`)
+ *                  only here; every value of that file is redacted from transcripts already.
+ *
+ * A conversation id names a conversation, not the model it runs on: a switch within a lane keeps it
+ * (agent/switch.ts). Only a missing history is a lost session; provider failures keep the conversation.
+ * Compaction failures become fixed transcript notes, never a provider's raw error or the rejected history.
+ */
+
+export interface DriverOptions {
+  db: Db;
+  chatId: number;
+  model: CatalogModel;
+  boundary: ToolBoundary;
+  /** A line for the turn's transcript. */
+  note: (text: string) => void;
+  /** The secrets file the provider's key is read from (env.ts `SHUVI_SECRETS_FILE`). */
+  secretsFile: string;
 }
 
-/** Conversation ids carry the backend settings and chat that own their persisted history. */
-export function openAIConversationPrefix(config: Config, chatId: number): string {
-  if (config.backend !== "openai-compat" || !config.openAICompat || !config.model) throw new Error("OpenAI-compatible backend is not configured");
-  return `openai-compat:${identity(config.openAICompat.baseURL, config.model)}:${chatId}:`;
+/** The model id the driver is given for the turn: the provider's own, or none for the CLI's default. */
+export function driverModel(m: CatalogModel): string | undefined {
+  return m.provider.kind === "claude" && m.model.model === CLI_DEFAULT_MODEL ? undefined : m.model.model;
 }
 
-/** Whether a saved id belongs to the backend this runner is about to use. */
-export function conversationMatchesBackend(sessionId: string, config: Config, chatId: number): boolean {
-  if (config.backend === "claude") return !sessionId.startsWith("openai-compat:");
-  return sessionId.startsWith(openAIConversationPrefix(config, chatId));
-}
-
-export function openAICompatBackend(db: Db, config: Config, chatId: number, boundary: ToolBoundary, note: (text: string) => void = () => {}) {
-  const settings = config.openAICompat;
-  const model = config.model;
-  if (config.backend !== "openai-compat" || !settings || !model) throw new Error("OpenAI-compatible backend is not configured");
-  const prefix = openAIConversationPrefix(config, chatId);
+export function makeDriver(o: DriverOptions): BackendAdapter {
+  const { provider, model } = o.model;
+  if (provider.kind === "claude") {
+    return new ClaudeBackend({ boundary: o.boundary, liveSystemPrompt: true, ...(provider.configDir ? { configDir: provider.configDir } : {}) });
+  }
+  if (!provider.baseUrl) throw new Error(`the provider "${provider.name}" has no base URL`);
+  const apiKey = provider.apiKey ? providerKey(provider.apiKey, o.secretsFile) : undefined;
   return new OpenAICompatBackend({
-    provider: { name: "openai-compat", baseURL: settings.baseURL, ...(settings.apiKey ? { apiKey: settings.apiKey } : {}) },
-    defaultModel: model,
-    boundary,
-    store: conversationStore(db, chatId),
-    vision: settings.vision,
-    compaction: { contextWindow: settings.contextWindow },
+    provider: { name: provider.name, baseURL: provider.baseUrl, ...(apiKey ? { apiKey } : {}) },
+    defaultModel: model.model,
+    boundary: o.boundary,
+    store: conversationStore(o.db, o.chatId),
+    vision: model.vision,
+    ...(model.contextWindow ? { compaction: { contextWindow: model.contextWindow } } : {}),
     onCompaction: (report) => {
-      if (report.summaryError !== undefined) note("OpenAI-compatible compaction could not summarize the conversation; the runtime kept or pruned its history.");
-      if (report.rejected !== undefined) note("OpenAI-compatible compaction rejected the replacement history; the conversation was kept unchanged.");
+      if (report.summaryError !== undefined) o.note("OpenAI-compatible compaction could not summarize the conversation; the runtime kept or pruned its history.");
+      if (report.rejected !== undefined) o.note("OpenAI-compatible compaction rejected the replacement history; the conversation was kept unchanged.");
     },
-    newId: () => `${prefix}${randomUUID()}`,
   });
+}
+
+/** The key `<profile>.<VAR>` names in the secrets file. Throws, naming only the reference, when it is not there. */
+function providerKey(ref: string, file: string): string {
+  const dot = ref.indexOf(".");
+  const loaded = loadProfiles(file);
+  if ("error" in loaded) throw new Error(`the key ${ref} cannot be read: ${loaded.error}`);
+  const value = loaded.profiles[ref.slice(0, dot)]?.[ref.slice(dot + 1)];
+  if (!value) throw new Error(`the key ${ref} is not in the secrets file ${file}`);
+  return value;
 }

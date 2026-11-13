@@ -4,9 +4,10 @@
  *
  *   fake Telegram ⇄ shuvi server ⇄ detached runner ⇄ OpenAICompatBackend ⇄ local fake SSE endpoint
  *
- * Covers the production adapter and tool boundary, conversation persistence across runner processes,
- * prompt refresh and chat visibility, a legacy Claude session id, /new, /stop, and a runner surviving
- * a server process-group restart. No model service or external API is used.
+ * Covers the production adapter and tool boundary, the model catalog (an endpoint whose key is read from
+ * the secrets file), conversation persistence across runner processes, prompt refresh and chat visibility,
+ * a switch to another model of the same lane (the conversation goes on), a lost history, /new, /stop, and
+ * a runner surviving a server process-group restart. No model service or external API is used.
  *
  *   bun scripts/e2e-openai-compat.ts
  */
@@ -14,7 +15,9 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Update } from "grammy/types";
+import { switchModel } from "../src/agent/switch.ts";
 import { openDb } from "../src/store/db.ts";
+import { addModel, addProvider } from "../src/store/models.ts";
 import { signalTurn } from "../src/server/spawn.ts";
 import { consolePortIn, dmUpdate, FakeTelegram, groupUpdate, OWNER, tapLines, type Person } from "../test/helpers.ts";
 
@@ -26,7 +29,8 @@ let cleanupDb: ReturnType<typeof openDb> | null = null;
 const tg = new FakeTelegram();
 const dataDir = mkdtempSync(join(tmpdir(), "shuvi-e2e-openai-"));
 const secretsFile = join(dataDir, "secrets.yaml");
-writeFileSync(secretsFile, "{}\n", { mode: 0o600 });
+// The endpoint's key, which the catalog names as `fake.API_KEY` and the fake endpoint requires.
+writeFileSync(secretsFile, "fake:\n  API_KEY: sk-fake-local\n", { mode: 0o600 });
 const fail = (m: string): never => {
   console.error(`FAIL: ${m}`);
   cleanup();
@@ -139,7 +143,7 @@ function answer(body: ChatRequest): Reply {
     return { text: all.includes("history marker first") ? "History resumed." : "History missing." };
   }
   if (scenario === "switch") {
-    return { text: all.includes("LEGACY CLAUDE CONVERSATION MARKER") ? "Legacy history was reused." : "Fresh OpenAI conversation." };
+    return { text: all.includes("history marker first") ? "Same conversation on the other model." : "The conversation was lost in the switch." };
   }
   if (scenario === "lost") return { text: "Missing history recovered." };
   if (hasCurrentToolResult(body)) {
@@ -211,12 +215,6 @@ const env = {
   SHUVI_BOT_TOKEN: "TOKEN",
   SHUVI_OWNER_ID: String(OWNER),
   SHUVI_TELEGRAM_API_ROOT: tg.apiRoot,
-  SHUVI_MODEL: "fake-openai-model",
-  SHUVI_BACKEND: "openai-compat",
-  SHUVI_OPENAI_BASE_URL: `http://127.0.0.1:${fake.port}/v1`,
-  SHUVI_OPENAI_API_KEY: "sk-fake-local",
-  SHUVI_OPENAI_CONTEXT_WINDOW: "32000",
-  SHUVI_OPENAI_VISION: "false",
   SHUVI_SECRETS_FILE: secretsFile,
   SHUVI_CONSOLE_LISTEN: "127.0.0.1:0",
   SHUVI_CONSOLE_USERS: "owner@example.com",
@@ -255,8 +253,12 @@ function cleanup() {
   fake?.stop(true);
 }
 const texts = (chat = OWNER) => tg.sent().filter((b) => b.chat_id === chat).map((b) => String(b.text));
-const db = openDb(join(dataDir, "shuvi.db"));
+const db = openDb(join(dataDir, "shuvi.db"), { migrate: true });
 cleanupDb = db;
+// The catalog the turns run on: the fake endpoint and two of its models, the first the default.
+addProvider(db, { name: "fake", kind: "openai-compat", baseUrl: `http://127.0.0.1:${fake.port}/v1`, apiKey: "fake.API_KEY" });
+addModel(db, { provider: "fake", model: "fake-openai-model", contextWindow: 32_000 });
+addModel(db, { provider: "fake", model: "fake-openai-other-model", contextWindow: 32_000 });
 const idle = () => (db.$client.query("select count(*) as n from turns where status = 'running'").get() as { n: number }).n === 0;
 let update = 1;
 const push = (...updates: Update[]) => tg.updates.push(...updates);
@@ -316,36 +318,18 @@ check(texts(GROUP.id).at(-1) === "Group has public context only.", "group conver
 check(!seenBodies["group-read"]?.includes("history marker first") && !seenBodies["group-read"]?.includes("PRIVATE PERSONA MARKER"), "group request contains neither DM history nor private persona");
 await until("group visibility turn completion", idle);
 
-// 4. A preexisting Claude backend session id is not sent as OpenAI conversation history.
-const legacySession = "claude-session-from-previous-backend";
-db.$client.query("insert into conversations (id, chat_id) select ?, id from chats where tg_chat_id = ?").run(legacySession, OWNER);
-db.$client.query("insert into conversation_messages (conversation_id, generation, seq, message) values (?, 0, 0, ?)").run(
-  legacySession,
-  JSON.stringify({ role: "user", content: "LEGACY CLAUDE CONVERSATION MARKER" }),
-);
-db.$client.query("update chats set backend_session_id = ? where tg_chat_id = ?").run(legacySession, OWNER);
+// 4. A switch to another model of the same lane: the conversation goes on, on the other model.
+const ownerChat = (db.$client.query("select id, backend_session_id from chats where tg_chat_id = ?").get(OWNER) as { id: number; backend_session_id: string });
+check(switchModel(db, ownerChat.id, "fake/fake-openai-other-model", "lossy").mode === "native", "a switch within the OpenAI-compatible lane is native");
 before = texts().length;
 push(dmUpdate(update++, "backend switch check"));
-await until("fresh backend response", () => texts().length > before);
-check(texts().at(-1) === "Fresh OpenAI conversation.", "legacy Claude session id starts a fresh OpenAI conversation");
-await until("backend switch turn completion", idle);
-const switchedTurn = db.$client.query("select opening from turns t join chats c on c.id = t.chat_id where c.tg_chat_id = ? order by t.id desc limit 1").get(OWNER) as { opening: string };
-check(switchedTurn.opening === "changed", "backend switch records a settings-change opening");
-check(!seenBodies.switch?.includes("LEGACY CLAUDE CONVERSATION MARKER"), "legacy Claude conversation history is absent from OpenAI requests");
-
-const previousSession = (db.$client.query("select backend_session_id from chats where tg_chat_id = ?").get(OWNER) as { backend_session_id: string }).backend_session_id;
-process.kill(-server!.pid, "SIGTERM");
-await server!.exited;
-env.SHUVI_MODEL = "fake-openai-other-model";
-startServer();
-await until("server with changed model", () => consolePort > 0, 30_000);
-before = texts().length;
-push(dmUpdate(update++, "backend switch check"));
-await until("changed model response", () => texts().length > before);
-await until("changed model turn completion", idle);
+await until("switched model response", () => texts().length > before);
+await until("switched model turn completion", idle);
+check(texts().at(-1) === "Same conversation on the other model.", "the other model is sent the conversation so far");
+check(requests.at(-1)?.model === "fake-openai-other-model", "the request names the model switched to");
 const changedModelTurn = db.$client.query("select opening, backend_session_id from turns order by id desc limit 1").get() as { opening: string; backend_session_id: string };
-check(changedModelTurn.opening === "changed" && changedModelTurn.backend_session_id !== previousSession, "changing model starts a separate conversation");
-check(requests.at(-1)?.model === env.SHUVI_MODEL && !requests.at(-1)?.messages.some((m) => m.role === "tool"), "the configured model receives recent chat context without the previous tool history");
+check(changedModelTurn.opening === "resumed" && changedModelTurn.backend_session_id === ownerChat.backend_session_id, "the turn resumed the same conversation");
+check(!seenBodies.switch?.includes("switched"), "nothing tells the model a switch happened");
 
 db.$client.query("delete from conversations where id = ?").run(changedModelTurn.backend_session_id);
 before = texts().length;

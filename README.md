@@ -51,6 +51,17 @@ commands, so a group turn has no unseen messages to open with and follow-ups nev
 
 ```bash
 bun install
+bun run typecheck
+bun test
+bun scripts/e2e-fake.ts      # the whole path against a fake Telegram and a fake Anthropic API
+bun scripts/e2e-openai-compat.ts  # the same on an OpenAI-compatible model, against a fake Chat Completions endpoint
+bun scripts/e2e-switch.ts    # one chat switched between Claude and an endpoint, lossless and lossy, checked on the wire
+bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
+bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
+bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
+bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
+bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed probe, sheets of a link, a fetch into ~/inbox
+bun scripts/console-fixture.ts  # the console over made-up fixture data, on 127.0.0.1:8787, to look at
 ```
 
 ```bash
@@ -60,69 +71,43 @@ SHUVI_BOT_TOKEN=… SHUVI_CONTROL_BOT_TOKEN=… SHUVI_OWNER_ID=… SHUVI_OWNER_L
 Configuration is environment variables only; `src/env.ts` lists the framework's, and each capability
 lists its own in the header of `src/capabilities/<id>/index.ts` (e.g. `SHUVI_WEB`). The code and its
 prompts are all English; `SHUVI_OWNER_LANGUAGE` is where the owner's own language is set, and the
-assistant replies in it. `SHUVI_BACKEND` defaults to `claude`: turns use the Claude login of the user
-the server runs as, unless `SHUVI_CLAUDE_CONFIG_DIR` names another. `SHUVI_MODEL` optionally selects its model.
+assistant replies in it.
 
-To use agent-runtime's OpenAI-compatible Chat Completions backend, set:
-
-```bash
-export SHUVI_BACKEND=openai-compat
-export SHUVI_OPENAI_BASE_URL=https://api.openai.com/v1
-export SHUVI_MODEL='<model ID supported by your endpoint>'
-export SHUVI_OPENAI_CONTEXT_WINDOW='<context window in tokens for that model>'
-# Set SHUVI_OPENAI_API_KEY in your private environment file or secret manager.
-bun run server
-```
-
-Keep the bot and owner settings above. The endpoint, model and positive integer context window are required;
-use the endpoint's API base URL, including `/v1` when required. The endpoint must support streamed Chat
-Completions and function tools. `SHUVI_OPENAI_API_KEY` supplies a bearer key; omit it only for an endpoint
-that needs no authentication. Set `SHUVI_OPENAI_VISION=true` when the model accepts image inputs (default
-`false`; otherwise images become text notices). Compaction uses the configured context window and the
-same model. Cost is recorded as 0 because this backend does not report pricing; token usage reflects the
-last model call of the turn.
-
-Each chat resumes its own stored conversation across runner and server restarts. Switching backend,
-endpoint or OpenAI-compatible model starts a fresh conversation with the last 10 chat messages; the turn
-records the settings change and the control bot alerts the owner. An API key rotation keeps the conversation.
-Persona, memory and tool permissions continue to follow the chat's policy, and changes to `home/` reach the
-next turn's system prompt.
-
-Development commands and local integration checks:
-
-```bash
-bun run typecheck
-bun test
-bun scripts/e2e-fake.ts      # the whole path against a fake Telegram and a fake Anthropic API
-bun scripts/e2e-openai-compat.ts  # the same on the OpenAI-compatible driver, against a local fake API
-bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
-bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
-bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
-bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
-bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed probe, sheets of a link, a fetch into ~/inbox
-bun scripts/console-fixture.ts  # the console over made-up fixture data, on 127.0.0.1:8787, to look at
-```
-
-After changing `src/store/schema.ts`, regenerate the database migration with `bun run db:generate`.
+Which models turns run on is the model catalog in `shuvi.db` (`src/store/models.ts`): providers (a Claude
+login, or an OpenAI-compatible endpoint whose key is named in the secrets file) and their models, one of
+them the default; each chat runs on its own model or the default. A first start seeds it with the Claude
+login of the user the server runs as (or `SHUVI_CLAUDE_CONFIG_DIR`) and `SHUVI_MODEL`, which is what turns
+ran on before. A chat's model can be switched between turns (`src/agent/switch.ts`): to another model that
+keeps its conversation in the same place (the same Claude login, or any endpoint) it simply goes on; to one
+that keeps it elsewhere (Claude and an endpoint, or two logins), the owner chooses whether what was said
+since is carried over (lossless) or not (lossy). The model is never told.
 
 ## Data
 
 `SHUVI_DATA_DIR` (default `./data`) holds `shuvi.db`, `home/` (the assistant's persona, directives and
 memory as markdown, and `policy.yaml`) and `media/` (the photos and stickers it was sent, by `file_unique_id`;
 `media/transcript/` holds the other images turn transcripts refer to, pruned with them). All of it is
-private: it lives outside this repository and is never committed or pushed. OpenAI-compatible conversation
-history is stored in `shuvi.db` in `conversations` and `conversation_messages`, with each message
-(including tool results and base64 images) in its own row, and included in database backups. The server
-applies the table migration at startup. Abandoned histories are pruned after `SHUVI_TRANSCRIPT_DAYS`
-(default 30) from their last write; active sessions and sessions used by running turns are preserved.
-Resetting a conversation with `/new` leaves its previous OpenAI-compatible history until retention expires. Pruning the live database does not remove copies from
-existing backups; those follow the snapshot rotation below. Claude Code keeps its own session files,
-including copies of images a turn is shown.
+private: it lives outside this repository and is never committed or pushed. A conversation on an
+OpenAI-compatible model is kept in `shuvi.db` too, one message per row (tool results and images included),
+and so is in its backups; one no chat uses any more is pruned `SHUVI_TRANSCRIPT_DAYS` (default 30) after it
+was last written. Claude Code keeps its own session files, with a copy of each image a turn is shown; a
+switch carrying a conversation onto Claude appends to them.
 
 Once a day the server writes a consistent copy of `shuvi.db` and a `git bundle` of `home/` (when it is a
 git repo) to `$SHUVI_DATA_DIR/backups/<time>/`, keeping the last 7. They are on the same disk; copy
 `backups/` elsewhere if the disk itself matters. To restore, stop the server, put the copied `shuvi.db` in
 place (removing any `shuvi.db-wal` / `-shm` beside it), and `git clone home.bundle home`.
+
+## Videos from links (porchkit)
+
+With `SHUVI_PORCHKIT_URL` (e.g. `https://porchkit.example.ts.net`) and `SHUVI_PORCHKIT_TOKEN` set, the
+`media` capability is on (`src/capabilities/media/`, the client in `src/porchkit/`): porchkit is a separate
+service on a home connection that probes, subtitles, sheets and downloads videos, always anonymously and
+within a request budget per site. In a chat whose policy enables `media`, anyone may have the assistant
+look at a video from its link (`video_probe`, `video_subs`, `video_sheet`); `video_fetch`, which puts the
+file in the computer's `~/inbox/`, is the owner's alone. A link to a known video site in the owner's
+message is probed as soon as it arrives (a prewarm), and the console's turn view says whether the turn then
+used it. The token is never logged and is redacted from turn transcripts.
 
 ## Each chat's computer
 

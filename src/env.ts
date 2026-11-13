@@ -11,15 +11,11 @@ import { join, resolve } from "node:path";
  *                             prompts included, is English; this is the one place the owner's language
  *                             is named. Unset: the assistant answers in whatever language it is written to.
  *   SHUVI_DATA_DIR            where shuvi.db and home/ live (default ./data). Private; outside the repo.
- *   SHUVI_MODEL               the model turns run on (Claude: driver's default; openai-compat: required)
- *   SHUVI_BACKEND             turn backend: claude (default) or openai-compat
- *   SHUVI_OPENAI_BASE_URL     OpenAI-compatible API base URL (openai-compat only)
- *   SHUVI_OPENAI_API_KEY      API key (omit only for an endpoint that needs no authentication)
- *   SHUVI_OPENAI_CONTEXT_WINDOW
- *                             context window in tokens, required for compaction (OpenAI-compatible only)
- *   SHUVI_OPENAI_VISION       whether the endpoint accepts image input (default false)
+ *   SHUVI_MODEL               the Claude model a first start's catalog defaults to (default: the CLI's).
+ *                             Which models turns run on is the model catalog (store/models.ts) from then on.
  *   SHUVI_TZ                  the time zone messages are shown to the model in (default: the host's)
- *   SHUVI_CLAUDE_CONFIG_DIR   which Claude login turns run on (default: the process user's)
+ *   SHUVI_CLAUDE_CONFIG_DIR   the Claude login a first start's catalog puts its `claude` provider on
+ *                             (default: the process user's)
  *   SHUVI_TELEGRAM_API_ROOT   the Bot API base URL (default Telegram's; a fake one in tests)
  *   SHUVI_CONTROL_BOT_TOKEN   the control bot's token (src/control/bot.ts), the framework's own channel to
  *                             the owner: status, stop, alerts, approvals. Unset: no control bot; alerts
@@ -53,8 +49,6 @@ export interface Config {
   dbPath: string;
   home: string;
   model?: string;
-  backend: "claude" | "openai-compat";
-  openAICompat?: { baseURL: string; apiKey?: string; contextWindow: number; vision: boolean };
   timeZone: string;
   claudeConfigDir?: string;
   telegramApiRoot?: string;
@@ -90,7 +84,6 @@ export function dataDirFrom(env: Record<string, string | undefined>): string {
 }
 
 export function loadConfig(opts: { needToken?: boolean } = {}): Config {
-  const backend = backendFromEnv(process.env);
   const dataDir = dataDirFrom(process.env);
   const model = process.env.SHUVI_MODEL?.trim();
   const ownerId = Number(required("SHUVI_OWNER_ID"));
@@ -103,8 +96,6 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     dbPath: join(dataDir, "shuvi.db"),
     home: join(dataDir, "home"),
     ...(model ? { model } : {}),
-    backend: backend.backend,
-    ...(backend.openAICompat ? { openAICompat: backend.openAICompat } : {}),
     timeZone: process.env.SHUVI_TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
     ...(process.env.SHUVI_CLAUDE_CONFIG_DIR ? { claudeConfigDir: process.env.SHUVI_CLAUDE_CONFIG_DIR } : {}),
     ...(process.env.SHUVI_TELEGRAM_API_ROOT ? { telegramApiRoot: process.env.SHUVI_TELEGRAM_API_ROOT } : {}),
@@ -117,38 +108,6 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     transcriptDays: days("SHUVI_TRANSCRIPT_DAYS", 30),
     secretsFile: process.env.SHUVI_SECRETS_FILE || DEFAULT_SECRETS_FILE,
     console: consoleFromEnv(process.env),
-  };
-}
-
-export function backendFromEnv(env: Record<string, string | undefined>): Pick<Config, "backend" | "openAICompat"> {
-  const backend = env.SHUVI_BACKEND ?? "claude";
-  if (backend === "claude") return { backend };
-  if (backend !== "openai-compat") throw new Error("SHUVI_BACKEND must be claude or openai-compat");
-  const model = env.SHUVI_MODEL?.trim();
-  if (!model) throw new Error("SHUVI_MODEL is required for openai-compat");
-  const baseURL = env.SHUVI_OPENAI_BASE_URL;
-  if (!baseURL) throw new Error("SHUVI_OPENAI_BASE_URL is required for openai-compat");
-  let url: URL;
-  try {
-    url = new URL(baseURL);
-  } catch {
-    throw new Error("SHUVI_OPENAI_BASE_URL must be an HTTP(S) URL");
-  }
-  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || url.search || url.hash) {
-    throw new Error("SHUVI_OPENAI_BASE_URL must be an HTTP(S) URL without embedded credentials, query, or fragment");
-  }
-  const contextWindow = Number(env.SHUVI_OPENAI_CONTEXT_WINDOW);
-  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) throw new Error("SHUVI_OPENAI_CONTEXT_WINDOW must be a positive integer");
-  const vision = env.SHUVI_OPENAI_VISION ?? "false";
-  if (vision !== "true" && vision !== "false") throw new Error("SHUVI_OPENAI_VISION must be true or false");
-  return {
-    backend,
-    openAICompat: {
-      baseURL: url.toString().replace(/\/$/, ""),
-      ...(env.SHUVI_OPENAI_API_KEY ? { apiKey: env.SHUVI_OPENAI_API_KEY } : {}),
-      contextWindow,
-      vision: vision === "true",
-    },
   };
 }
 

@@ -17,7 +17,9 @@ const CHILD = join(dirname(fileURLToPath(import.meta.url)), "../runner/child.ts"
  * still matches (`isAlive`), and a signal is sent only then (`signalTurn`). Where /proc is not available
  * the start time is null and the check falls back to the pid alone.
  *
- * The child gets the server's environment minus the bot tokens: it never talks to Telegram.
+ * The child gets the server's environment minus the bot tokens: it never talks to Telegram. It runs in the
+ * server's working directory, and Claude Code files a session under the directory it runs in: a session
+ * agent/switch.ts makes is placed for this same one.
  */
 export type SpawnTurn = (turnId: number) => number;
 
