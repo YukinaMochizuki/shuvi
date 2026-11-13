@@ -6,7 +6,8 @@
  *
  * Covers the production adapter and tool boundary, the model catalog (an endpoint whose key is read from
  * the secrets file), conversation persistence across runner processes, prompt refresh and chat visibility,
- * a switch to another model of the same lane (the conversation goes on), a lost history, /new, /stop, and
+ * a lossless switch to another model of the same endpoint (its own conversation, a copy of this one), a lost
+ * history, /new, /stop, and
  * a runner surviving a server process-group restart. No model service or external API is used.
  *
  *   bun scripts/e2e-openai-compat.ts
@@ -318,9 +319,9 @@ check(texts(GROUP.id).at(-1) === "Group has public context only.", "group conver
 check(!seenBodies["group-read"]?.includes("history marker first") && !seenBodies["group-read"]?.includes("PRIVATE PERSONA MARKER"), "group request contains neither DM history nor private persona");
 await until("group visibility turn completion", idle);
 
-// 4. A switch to another model of the same lane: the conversation goes on, on the other model.
+// 4. A lossless switch to another model of the same endpoint: that model's own conversation, a copy of this one.
 const ownerChat = (db.$client.query("select id, backend_session_id from chats where tg_chat_id = ?").get(OWNER) as { id: number; backend_session_id: string });
-check(switchModel(db, ownerChat.id, "fake/fake-openai-other-model", "lossy").mode === "native", "a switch within the OpenAI-compatible lane is native");
+check(switchModel(db, ownerChat.id, "fake/fake-openai-other-model", "lossless").carried > 0, "a lossless switch within the OpenAI-compatible storage copies the conversation");
 before = texts().length;
 push(dmUpdate(update++, "backend switch check"));
 await until("switched model response", () => texts().length > before);
@@ -328,7 +329,7 @@ await until("switched model turn completion", idle);
 check(texts().at(-1) === "Same conversation on the other model.", "the other model is sent the conversation so far");
 check(requests.at(-1)?.model === "fake-openai-other-model", "the request names the model switched to");
 const changedModelTurn = db.$client.query("select opening, backend_session_id from turns order by id desc limit 1").get() as { opening: string; backend_session_id: string };
-check(changedModelTurn.opening === "resumed" && changedModelTurn.backend_session_id === ownerChat.backend_session_id, "the turn resumed the same conversation");
+check(changedModelTurn.opening === "switched" && changedModelTurn.backend_session_id !== ownerChat.backend_session_id, "the turn went on in the other model's own conversation (`switched`)");
 check(!seenBodies.switch?.includes("switched"), "nothing tells the model a switch happened");
 
 db.$client.query("delete from conversations where id = ?").run(changedModelTurn.backend_session_id);

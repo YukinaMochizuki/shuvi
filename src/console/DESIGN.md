@@ -16,7 +16,7 @@ unit of the list is a run of turns, grouped by what the model actually saw (`ses
 
 - **Chat**: as before, a group in the left pane, ordered by last activity.
 - **Conversation**: her conversation, the turns that resumed one backend session. It starts at the chat's
-  first turn, at `/new`, after a switch to a model of another lane, or when a lost session was restarted
+  first turn, at `/new`, after a switch to another model's conversation, or when a lost session was restarted
   fresh, and its header says which. Inside it she
   saw one continuous exchange, except across a **compaction**, after which she saw only a summary: that point
   is a prominent divider (trigger, tokens before → after), and a conversation or segment holding one says so.

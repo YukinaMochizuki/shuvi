@@ -18,10 +18,11 @@ import { IMMEDIATE } from "./turns.ts";
  *   KEYS        never stored: `api_key` names one in the secrets file, `<profile>.<VARIABLE>`, which the turn
  *               reads when it builds the request (agent/backend.ts), and which redaction already hides.
  *   DEFAULT     at most one model (a partial unique index); chats without `chats.model` run on it.
- *   LANES       where a provider keeps a chat's conversation (agent/switch.ts): each Claude login its own
- *               (`claude:<provider>`, its sessions are files in that login's config dir), every
- *               OpenAI-compatible provider the same one (`openai-compat`: the history is ours, and
- *               provider-neutral). A switch within a lane keeps the conversation as it is.
+ *   CONVERSATIONS  a chat has one per model (agent/switch.ts), whatever its provider.
+ *   LANES       only where a model's conversations are STORED, and so which converter carries them: each
+ *               Claude login its own (`claude:<provider>`, its sessions are files in that login's config
+ *               dir), every OpenAI-compatible provider the same tables (`openai-compat`: the history is ours,
+ *               and provider-neutral). Two models of one lane still have two conversations.
  *
  * A first start with an empty catalog seeds it with what turns ran on before there was one (`seedModels`):
  * a `claude` provider on `SHUVI_CLAUDE_CONFIG_DIR`, with `SHUVI_MODEL` (or the CLI's default) as the default.
@@ -51,14 +52,14 @@ export const CLI_DEFAULT_MODEL = "default";
 
 export const OPENAI_COMPAT_LANE = "openai-compat";
 
-/** The provider a first start seeds (`seedModels`): the Claude login conversations from before lanes are in. */
+/** The provider a first start seeds (`seedModels`): the Claude login conversations from before the catalog are in. */
 export const SEEDED_PROVIDER = "claude";
 
 export function modelId(provider: Pick<Provider, "name">, model: Pick<Model, "model">): string {
   return `${provider.name}/${model.model}`;
 }
 
-/** A lane read back: whose conversation home it is (the inverse of `laneOf`). */
+/** A lane read back: where its conversations are stored (the inverse of `laneOf`). */
 export type Lane = { kind: "claude"; provider: string } | { kind: "openai-compat" };
 
 /** What lane `lane` (as `laneOf` wrote it) is. Throws on one this code does not know, never guessing a kind. */
@@ -73,7 +74,7 @@ export function unknownLane(lane: never): never {
   throw new Error(`unknown lane kind "${String((lane as { kind?: unknown }).kind)}"`);
 }
 
-/** The lane a provider keeps conversations in. */
+/** The lane a provider's models keep their conversations in. */
 export function laneOf(provider: Pick<Provider, "kind" | "name">): string {
   switch (provider.kind) {
     case "claude":

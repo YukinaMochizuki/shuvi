@@ -77,10 +77,10 @@ Which models turns run on is the model catalog in `shuvi.db` (`src/store/models.
 login, or an OpenAI-compatible endpoint whose key is named in the secrets file) and their models, one of
 them the default; each chat runs on its own model or the default. A first start seeds it with the Claude
 login of the user the server runs as (or `SHUVI_CLAUDE_CONFIG_DIR`) and `SHUVI_MODEL`, which is what turns
-ran on before. A chat's model can be switched between turns (`src/agent/switch.ts`): to another model that
-keeps its conversation in the same place (the same Claude login, or any endpoint) it simply goes on; to one
-that keeps it elsewhere (Claude and an endpoint, or two logins), the owner chooses whether what was said
-since is carried over (lossless) or not (lossy). The model is never told.
+ran on before. A chat keeps one conversation per model, and its model can be switched (`src/agent/switch.ts`;
+one asked for during a turn stops the turn first): on every switch, between any two models, the owner chooses
+whether what was said since is carried into the other model's conversation (lossless) or that model's own
+conversation resumes as it was left (lossy). The model is never told.
 
 ## Data
 
@@ -91,7 +91,7 @@ private: it lives outside this repository and is never committed or pushed. A co
 OpenAI-compatible model is kept in `shuvi.db` too, one message per row (tool results and images included),
 and so is in its backups; one no chat uses any more is pruned `SHUVI_TRANSCRIPT_DAYS` (default 30) after it
 was last written. Claude Code keeps its own session files, with a copy of each image a turn is shown; a
-switch carrying a conversation onto Claude appends to them.
+switch carrying a conversation onto Claude appends to them, or writes a new one (a copy, within one login).
 
 Once a day the server writes a consistent copy of `shuvi.db` and a `git bundle` of `home/` (when it is a
 git repo) to `$SHUVI_DATA_DIR/backups/<time>/`, keeping the last 7. They are on the same disk; copy

@@ -32,7 +32,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | a capability's hook on each new inbound message, a tool owner-only in some calls, a capability's own credential | `src/capabilities/types.ts` (`inbound`, `ownerOnlyWhen` / `ownerOnlyNote`, `secrets`) |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
 | which models exist, which one a chat runs on, the driver a turn runs on | `src/store/models.ts`, `src/agent/backend.ts` |
-| switching a chat's model: lanes, lossless and lossy, what is carried | `src/agent/switch.ts` (the conversion: agent-runtime/convert) |
+| switching a chat's model: a conversation per model, lossless and lossy, what is carried, switch requests | `src/agent/switch.ts` (the conversion: agent-runtime/convert) |
 | an OpenAI-compatible conversation: its rows, positions, retention | `src/store/conversations.ts` |
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |

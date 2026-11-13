@@ -1,5 +1,6 @@
 import type { Api } from "grammy";
 import type { BotCommand, BotCommandScope } from "grammy/types";
+import { applySwitchRequest, noteStoppedTurn, pendingSwitchRequests, type SwitchOptions, type SwitchRequest } from "../agent/switch.ts";
 import type { Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { enqueueOutbound, forgetConversations, markCommandDone, pendingCommands, type CommandPayload } from "../store/events.ts";
@@ -10,9 +11,9 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  * Owner commands that act on the chat they are sent in (docs/design.md §13):
  *
  *   /stop   stop the turn running in this chat (SIGTERM to its child; it closes as `stopped`)
- *   /new    start a fresh conversation for this chat: the model's conversation is forgotten (on every
- *           model it was carried to: agent/switch.ts), the chat's events and cursor are kept. A running
- *           turn is stopped first.
+ *   /new    start a fresh conversation for this chat: every model's conversation of the chat is forgotten,
+ *           the active one and those parked (agent/switch.ts); the chat's events and cursor are kept. A
+ *           running turn is stopped first.
  *
  * The framework does not speak (invariant 5). It acknowledges a command by reacting 👌 to it, so the
  * owner sees it took effect without a message in the assistant's chat that the assistant did not write.
@@ -20,6 +21,9 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  *
  * The control bot's `/stop <chat>` (src/control/bot.ts) goes through `stopTurn` too, so the two mean the
  * same thing.
+ *
+ * SWITCH REQUESTS (agent/switch.ts `requestSwitch`) are applied here too (`switchRequestPass`): a running turn
+ * is stopped first, and the switch applied once none runs.
  *
  * `MAIN_COMMANDS` is the one list of them: inbound.ts recognises exactly these, and the server registers
  * them with Telegram at startup (`registerCommands`) so the owner's `/` menu offers them, in his private
@@ -127,6 +131,35 @@ export function stopTurn(db: Db, chatId: number, stopSeq: number, signal: Signal
   markStop(db, running.id, stopSeq);
   if (running.pid) signal(running.pid, running.pidStart, "SIGTERM");
   return running;
+}
+
+/**
+ * Apply the pending switch requests (agent/switch.ts), each chat's in the order they were asked. A chat with a
+ * turn running has it stopped (SIGTERM, once per turn, noted on the request) and waits for a later pass: the
+ * waker starts no turn there meanwhile (server/waker.ts). The stop is placed at the turn's start (`stopSeq` =
+ * its `from_seq`), so the cursor does not move past what it was answering: those messages are answered by the
+ * next turn, on the new model, and a lossless switch carries only what the conversation held when the stopped
+ * turn began, so the new model gets them once, as input (agent/switch.ts). Whatever the stopped turn already
+ * sent to Telegram is answered again: accepted, the owner asked to stop it. Once nothing runs the switch is
+ * applied, and its result or error stored on the request. Returns the requests finished in this pass.
+ */
+export function switchRequestPass(db: Db, signal: SignalTurn = signalTurn, opts: SwitchOptions = {}): SwitchRequest[] {
+  const finished: SwitchRequest[] = [];
+  const waiting = new Set<number>();
+  for (const req of pendingSwitchRequests(db)) {
+    if (waiting.has(req.chatId)) continue;
+    const running = runningTurnFor(db, req.chatId);
+    if (running) {
+      if (req.stoppedTurnId !== running.id) {
+        stopTurn(db, req.chatId, running.fromSeq, signal);
+        noteStoppedTurn(db, req.id, running.id);
+      }
+      waiting.add(req.chatId);
+      continue;
+    }
+    finished.push(applySwitchRequest(db, req, opts));
+  }
+  return finished;
 }
 
 export function commandPass(db: Db, signal: SignalTurn = signalTurn): number {

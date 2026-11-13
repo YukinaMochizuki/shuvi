@@ -124,9 +124,9 @@ export function isLostSession(e: unknown): boolean {
  * is told through the control bot.
  *
  * The SWITCHES of the chat's model since the last turn (agent/switch.ts) are recorded by the first turn after
- * them: a transcript note each, saying from what to what and how, and, when one moved the conversation to
- * another lane, the opening `switched`. The model is not told: what it is given is the conversation as it
- * now stands.
+ * them: a transcript note each, saying from what to what and how, and, when one moved the chat to another
+ * model's conversation (every switch does; only `native` rows from before a conversation per model did not),
+ * the opening `switched`. The model is not told: what it is given is the conversation as it now stands.
  *
  * THE TRANSCRIPT (agent/transcript.ts): the turn is recorded as the model saw it, best effort: its system
  * prompt by section, its input, and a timeline of thinking, text blocks (with the message each became),
@@ -358,7 +358,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   }
   // The switches since the last turn (agent/switch.ts) are this turn's to record.
   const switches = claimSwitches(db, chat.id, turnId);
-  const crossLane = switches.some((s) => s.mode !== "native");
+  const switched = switches.some((s) => s.mode !== "native");
   // In a group: from up to GROUP_CONTEXT messages before the first that woke the turn.
   let input = unseen;
   let context = 0;
@@ -463,8 +463,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const sections = buildPromptSections(deps.home, chat, owner, capabilities, chatPolicy, db);
   const systemPrompt = joinSections(sections);
   rec.prompt(sections);
-  // Which conversation this turn is in: resumed, or fresh after its first turn, `/new`, or a switch to another lane.
-  setTurnConversation(db, turnId, { opening: crossLane ? "switched" : chat.backendSessionId ? "resumed" : hadEarlierTurn(db, chat.id, turnId) ? "new" : "first" });
+  // Which conversation this turn is in: resumed, or fresh after its first turn, `/new`, or another model's after a switch.
+  setTurnConversation(db, turnId, { opening: switched ? "switched" : chat.backendSessionId ? "resumed" : hadEarlierTurn(db, chat.id, turnId) ? "new" : "first" });
   const fresh = (p: Prompt) => {
     rec.input(p, false);
     return adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);

@@ -144,7 +144,11 @@ export type Opening = "first" | "new" | "lost" | "switched" | "resumed";
  * a chat's turns by it (src/console/sessions.ts). Bookkeeping, best effort: a failure here is logged, never
  * the turn's.
  */
-export function setTurnConversation(db: Db, id: number, patch: { backendSessionId?: string; opening?: Opening }): void {
+export function setTurnConversation(
+  db: Db,
+  id: number,
+  patch: { backendSessionId?: string; opening?: Opening; conversationStart?: { session: string | null; position: string | null } },
+): void {
   try {
     db.update(turns).set(patch).where(eq(turns.id, id)).run();
   } catch (e) {

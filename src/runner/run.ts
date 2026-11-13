@@ -1,5 +1,5 @@
 import { driverModel, makeDriver } from "../agent/backend.ts";
-import { enterModelLane } from "../agent/switch.ts";
+import { conversationPosition, enterChatModel } from "../agent/switch.ts";
 import { botIdentity } from "../agent/triggers.ts";
 import { runTurn } from "../agent/turn.ts";
 import { enabledCapabilities } from "../capabilities/index.ts";
@@ -10,14 +10,14 @@ import { LiveRedaction } from "../secrets/redaction.ts";
 import { raiseAlert } from "../store/control.ts";
 import { openDb } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
-import { finishTurn, getTurn } from "../store/turns.ts";
+import { finishTurn, getTurn, setTurnConversation } from "../store/turns.ts";
 
 /**
  * The body of a runner child (runner/child.ts, which loads this module only once its SIGTERM handler is in
  * place): run turn `turnId` to its end. `signal` is that handler's stop. Returns the line the child logs.
  *
  * The turn runs on the chat's model in the catalog (store/models.ts), on the driver its provider names
- * (agent/backend.ts), in the lane that model keeps its conversation in (agent/switch.ts `enterModelLane`).
+ * (agent/backend.ts), in that model's own conversation (agent/switch.ts `enterChatModel`).
  * A model no longer in the catalog fails the turn, saying so.
  */
 export async function runChild(turnId: number, signal: AbortSignal): Promise<string> {
@@ -54,15 +54,18 @@ export async function runChild(turnId: number, signal: AbortSignal): Promise<str
   // A capability's own credential (porchkit's token) is redacted too, as `[REDACTED:<label>]`.
   const redact = withCapabilitySecrets((s) => redaction.redact(s), capabilities);
 
-  // The chat's model, and its conversation in that model's lane, before anything is rendered.
-  let model: ReturnType<typeof enterModelLane> | undefined;
+  // The chat's model, and that model's conversation, before anything is rendered.
+  let model: ReturnType<typeof enterChatModel> | undefined;
   try {
-    model = chat && turn?.status === "running" ? enterModelLane(db, chat) : undefined;
+    model = chat && turn?.status === "running" ? enterChatModel(db, chat) : undefined;
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     finishTurn(db, turnId, { status: "failed", error });
     return `turn ${turnId}: failed (${error})`;
   }
+  // Where its conversation stands before the driver writes anything: a switch that stops this turn carries
+  // only up to here (agent/switch.ts).
+  if (model && chat) setTurnConversation(db, turnId, { conversationStart: conversationPosition(db, chat) });
   const turnModel = model ? driverModel(model) : undefined;
 
   const outcome = await runTurn({

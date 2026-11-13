@@ -1,7 +1,7 @@
 import { and, asc, eq, gt, inArray, lt, max, notExists, sql } from "drizzle-orm";
 import type { ConversationStore, ModelMessage } from "agent-runtime/openai-compat";
 import type { Db } from "./db.ts";
-import { chatLanes, chats, conversationMessages, conversations, turns } from "./schema.ts";
+import { chatConversations, chats, conversationMessages, conversations, modelProviders, models, turns } from "./schema.ts";
 import { IMMEDIATE } from "./turns.ts";
 
 /**
@@ -11,10 +11,12 @@ import { IMMEDIATE } from "./turns.ts";
  * which the driver reports as agent-runtime's `LostSessionError`); malformed message JSON stays an ordinary
  * error. Loads read one coherent SQLite snapshot (one statement).
  * Appends, compaction, and pruning use immediate transactions; compaction advances the visible generation,
- * and retention preserves histories used by a chat (active or parked in `chat_lanes`) or a running turn.
+ * and retention preserves the histories a chat uses: its active one, one parked for a model
+ * (`chat_conversations`) while that model is in the catalog, and all of a chat's while a turn runs in it.
+ * A model removed from the catalog leaves its parked conversations to age out like any other.
  * Cascade deletion requires `PRAGMA foreign_keys = ON`, which `openDb` sets on every connection.
  *
- * POSITIONS, for carrying a conversation to another lane (agent/switch.ts): `<generation>:<seq>` of the
+ * POSITIONS, for carrying a conversation to another model's (agent/switch.ts): `<generation>:<seq>` of the
  * last message (`conversationEnd`); `conversationSince` returns what came after one. A compaction since then
  * (a newer generation) leaves only the compacted history to return, which is all of it.
  */
@@ -149,7 +151,13 @@ export function pruneConversations(db: Db, before: string, batch = 500): number 
             lt(conversations.writtenAt, before),
             notExists(tx.select({ one: sql`1` }).from(chats).where(and(eq(chats.id, conversations.chatId), eq(chats.backendSessionId, conversations.id)))),
             notExists(
-              tx.select({ one: sql`1` }).from(chatLanes).where(and(eq(chatLanes.chatId, conversations.chatId), eq(chatLanes.backendSessionId, conversations.id))),
+              // Parked for a model still in the catalog (its id is `<provider>/<model>`).
+              tx
+                .select({ one: sql`1` })
+                .from(chatConversations)
+                .innerJoin(modelProviders, sql`substr(${chatConversations.model}, 1, length(${modelProviders.name}) + 1) = ${modelProviders.name} || '/'`)
+                .innerJoin(models, and(eq(models.providerId, modelProviders.id), eq(chatConversations.model, sql`${modelProviders.name} || '/' || ${models.model}`)))
+                .where(and(eq(chatConversations.chatId, conversations.chatId), eq(chatConversations.backendSessionId, conversations.id))),
             ),
             notExists(tx.select({ one: sql`1` }).from(turns).where(and(eq(turns.chatId, conversations.chatId), eq(turns.status, "running")))),
           ),
