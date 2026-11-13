@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "agent-runtime/openai-compat";
 import { appendToClaudeSession, claudeSessionMessages, findClaudeSession } from "agent-runtime/convert";
-import { conversationPosition, enterChatModel, getSwitchRequest, requestSwitch, switchModel, type SwitchMode } from "../src/agent/switch.ts";
+import { conversationPosition, enterChatModel, getSwitchRequest, previewSwitch, requestSwitch, switchModel, type SwitchMode } from "../src/agent/switch.ts";
 import { switchRequestPass } from "../src/server/commands.ts";
 import { wakerPass } from "../src/server/waker.ts";
 import { appendMessages, conversationSince, conversationStore, pruneConversations } from "../src/store/conversations.ts";
@@ -97,10 +97,10 @@ function started(): World {
 describe("switchModel: a conversation per model, across storages", () => {
   test("the owner's example: T1 Claude → lossless → T2 API → lossy → T3 Claude", () => {
     const w = started();
-    expect(switchModel(w.db, w.chatId, "vllm/qwen", "lossless")).toEqual({ mode: "lossless", changed: true, from: "claude/opus", to: "vllm/qwen", carried: 2, compacted: false });
+    expect(switchModel(w.db, w.chatId, "vllm/qwen", "lossless")).toEqual({ mode: "lossless", changed: true, from: "claude/opus", to: "vllm/qwen", carried: 2, compacted: false, resumed: false });
     expect(active(w)).toEqual({ model: "vllm/qwen", texts: ["T1-PROMPT", "T1-ANSWER"] });
     speak(w, "T2");
-    expect(switchModel(w.db, w.chatId, "claude/opus", "lossy")).toEqual({ mode: "lossy", changed: true, from: "vllm/qwen", to: "claude/opus", carried: 0, compacted: false });
+    expect(switchModel(w.db, w.chatId, "claude/opus", "lossy")).toEqual({ mode: "lossy", changed: true, from: "vllm/qwen", to: "claude/opus", carried: 0, compacted: false, resumed: true });
     speak(w, "T3");
     // Claude holds T1 (its own) and T3: T2 is the black hole.
     expect(active(w)).toEqual({ model: "claude/opus", texts: ["T1-PROMPT", "T1-ANSWER", "T3-PROMPT", "T3-ANSWER"] });
@@ -226,7 +226,7 @@ describe("switchModel: edges", () => {
   test("choosing the current model is a no-op that says so", () => {
     const w = started();
     const before = getChat(w.db, w.chatId)!;
-    expect(switchModel(w.db, w.chatId, "claude/opus", "lossless")).toEqual({ mode: "lossless", changed: false, from: "claude/opus", to: "claude/opus", carried: 0, compacted: false });
+    expect(switchModel(w.db, w.chatId, "claude/opus", "lossless")).toEqual({ mode: "lossless", changed: false, from: "claude/opus", to: "claude/opus", carried: 0, compacted: false, resumed: false });
     expect(getChat(w.db, w.chatId)).toEqual(before);
     expect(w.db.select().from(modelSwitches).all()).toEqual([]);
   });
@@ -401,6 +401,77 @@ describe("a chat with no active conversation takes up its model's parked one", (
     expect(parked(w)).toEqual({});
     // And now it is one.
     expect(switchModel(w.db, w.chatId, "claude/opus", "lossy").changed).toBe(false);
+  });
+});
+
+describe("previewSwitch: what each mode would do, without writing", () => {
+  /** Every row a switch could write, to show the preview wrote none. */
+  const snapshot = (w: World) => JSON.stringify([getChat(w.db, w.chatId), w.db.select().from(chatConversations).all(), w.db.select().from(modelSwitches).all()]);
+
+  test("a target with no conversation: lossless copies all of it, lossy starts fresh; then it has one", () => {
+    const w = started();
+    const before = snapshot(w);
+    expect(previewSwitch(w.db, w.chatId, "vllm/qwen")).toEqual({ to: "vllm/qwen", noop: false, lossless: { kind: "copy", messages: 2 }, lossy: { kind: "fresh" }, running: null });
+    expect(snapshot(w)).toBe(before);
+    switchModel(w.db, w.chatId, "vllm/qwen", "lossless");
+    speak(w, "T2");
+    const parkedAt = w.db.select().from(chatConversations).get()!.parkedAt;
+    // Back to opus: it lacks T2 only, and its own conversation was parked when the chat left it.
+    expect(previewSwitch(w.db, w.chatId, "claude/opus")).toEqual({ to: "claude/opus", noop: false, lossless: { kind: "carry", messages: 2 }, lossy: { kind: "resume", since: parkedAt }, running: null });
+    // The preview's count is what the switch then carries.
+    expect(switchModel(w.db, w.chatId, "claude/opus", "lossless").carried).toBe(2);
+  });
+
+  test("the model the chat is on is a no-op; the mode is still previewed for a model of the same storage", () => {
+    const w = started();
+    expect(previewSwitch(w.db, w.chatId, "claude/opus").noop).toBe(true);
+    expect(previewSwitch(w.db, w.chatId, "claude/sonnet")).toMatchObject({ noop: false, lossless: { kind: "copy", messages: 2 }, lossy: { kind: "fresh" } });
+  });
+
+  test("a running turn is named, and lossless counts only what came before it", () => {
+    const w = started();
+    switchModel(w.db, w.chatId, "vllm/qwen", "lossless");
+    speak(w, "T2");
+    const turn = claimTurn(w.db, w.chatId)!;
+    setTurnConversation(w.db, turn.id, { conversationStart: conversationPosition(w.db, getChat(w.db, w.chatId)!) });
+    speak(w, "T3"); // what the running turn wrote: a switch request stops it, and does not carry it
+    expect(previewSwitch(w.db, w.chatId, "claude/opus")).toMatchObject({ lossless: { kind: "carry", messages: 2 }, running: turn.id });
+  });
+
+  test("a model the catalog does not have is refused", () => {
+    const w = started();
+    expect(() => previewSwitch(w.db, w.chatId, "vllm/nope")).toThrow('there is no model "vllm/nope"');
+  });
+
+  /**
+   * A Claude session with a tool call, as the CLI writes it: the user entry after the tool call holds the tool's
+   * result AND text, which converts to two messages. Active on claude/opus.
+   */
+  function withToolCall(): World {
+    const w = setup();
+    enterChatModel(w.db, getChat(w.db, w.chatId)!);
+    const sid = "11111111-1111-4111-8111-111111111111";
+    const dir = join(w.configDir, "projects", "-srv");
+    mkdirSync(dir, { recursive: true });
+    const base = { sessionId: sid, cwd: "/srv", isSidechain: false, userType: "external", version: "2.0.0" };
+    const entries = [
+      { ...base, type: "user", uuid: "u1", parentUuid: null, timestamp: "2026-11-13T00:00:01Z", message: { role: "user", content: "T1-PROMPT" } },
+      { ...base, type: "assistant", uuid: "a1", parentUuid: "u1", timestamp: "2026-11-13T00:00:02Z", message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] } },
+      { ...base, type: "user", uuid: "u2", parentUuid: "a1", timestamp: "2026-11-13T00:00:03Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }, { type: "text", text: "also this" }] } },
+      { ...base, type: "assistant", uuid: "a2", parentUuid: "u2", timestamp: "2026-11-13T00:00:04Z", message: { id: "m2", role: "assistant", content: [{ type: "text", text: "T1-ANSWER" }] } },
+    ];
+    writeFileSync(join(dir, `${sid}.jsonl`), entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    saveSession(w.db, w.chatId, sid);
+    return w;
+  }
+
+  test("with tool calls, the preview counts what the switch then reports: a fork within one login, a conversion to another storage", () => {
+    for (const to of ["claude/sonnet", "vllm/qwen", "work/opus"]) {
+      const w = withToolCall();
+      const p = previewSwitch(w.db, w.chatId, to);
+      expect(p.lossless).toEqual({ kind: "copy", messages: 5 });
+      expect(switchModel(w.db, w.chatId, to, "lossless", { cwd: "/srv" }).carried).toBe(5);
+    }
   });
 });
 

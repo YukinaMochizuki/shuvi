@@ -376,7 +376,34 @@ stickers:
     outbound rows still pending, and the deployed commit.
   - `/stop <chat>`: stop that chat's turn, with the same semantics as `/stop` in the chat.
   - `/turn <id>`: one paragraph on a turn, and its link in the console.
+  - `/model <chat>`: a card to switch that chat's model (below); `/model <chat> <provider>/<model>
+    lossless|lossy` switches with no card and replies with the result.
+  - `/models`: the catalog as a card: each model's id, label, default ★, context window, vision and probe
+    state, with Make default, Re-probe and Remove (which first names the chats whose own model it is; the
+    default cannot be removed). `/models add <provider>/<model> [<context_window>]` adds one directly.
+  - `/provider add <name> <base_url> [<profile>.<VAR>]` adds an OpenAI-compatible endpoint; the card then
+    lists the endpoint's `/models`, and pressing one adds it with the listed context window. `/provider add
+    <name> claude [<config_dir>]` adds a Claude login; `/provider remove <name>` names its models and the
+    chats on them, then removes them all. A key is only ever named (`<profile>.<VAR>` in the secrets file),
+    never entered or shown.
   - Planned: jobs and cost in `/status`, cancelling jobs, reverting `home/`.
+- **The switch card** (src/control/model-cards.ts) is one control-bot message, edited in place, opened by
+  `/model` in the main chat (acknowledged there with 👌 only) or by `/model <chat>` here. First the model:
+  the catalog, 6 a page, the chat's model ✓ and a model whose last probe got no tool call ⚠ (still
+  selectable: without tools she cannot speak). Then the mode, always offered, between any two models:
+  Lossless and Lossy, each with a line on what it would do in this chat now ("carries 14 new messages into
+  X's conversation", "resumes X's conversation from 3 days ago", …), and the running turn it will stop.
+  The press asks for the switch (agent/switch.ts `requestSwitch`): the server stops a running turn, then
+  switches, and the card goes from "switching…" to the result with no buttons. A card's state is a
+  `control_cards` row and a press is recorded in the control batch's transaction, so a restart between
+  steps loses nothing, and a press on an old step or a closed card changes nothing ("This card is
+  closed."). A newer switch card for the chat, or a newer `/models` card, supersedes the older open ones. An
+  open card follows what it shows: `/models` and `/provider add` cards when the catalog changes, a mode
+  step when a turn starts or ends in its chat; a relative time moving on alone is not edited.
+- **Probes** of OpenAI-compatible models run in the server, in the background (src/server/probes.ts,
+  agent-runtime `probeModel`): when a model is added and on Re-probe. The result (tool call ok, text
+  instead, or failed and why; latency; whether a picture was accepted) is on the model's row, sets its
+  vision unless the owner set it, and edits the cards that show it. One a restart interrupted runs again.
 - **The framework's messages are a durable queue** of their own, `control_messages` (pending → sent), never
   `chat_events`: an alert raised just before a restart is still delivered, and nothing of it reaches the
   assistant's chats. Anything may queue there, a runner child included; only the server sends. Delivery is

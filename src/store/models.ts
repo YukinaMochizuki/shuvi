@@ -1,7 +1,7 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import { type Chat } from "./events.ts";
-import { modelProviders, models } from "./schema.ts";
+import { chats, modelProviders, models } from "./schema.ts";
 import { IMMEDIATE } from "./turns.ts";
 
 /**
@@ -26,6 +26,12 @@ import { IMMEDIATE } from "./turns.ts";
  *
  * A first start with an empty catalog seeds it with what turns ran on before there was one (`seedModels`):
  * a `claude` provider on `SHUVI_CLAUDE_CONFIG_DIR`, with `SHUVI_MODEL` (or the CLI's default) as the default.
+ *
+ *   REMOVING    a model, or a provider with all its models (ON DELETE CASCADE). The default cannot go until
+ *               another model is the default. Chats whose `chats.model` it was fail their next turn, saying
+ *               so (`chatModel`), until they get another model; their callers name them first (`chatsOn`).
+ *   PROBES      an OpenAI-compatible model's last probe is on its row (schema.ts `models`); `markProbing`
+ *               asks for one, which the server runs (server/probes.ts) and records (`recordProbe`).
  */
 
 export type Provider = typeof modelProviders.$inferSelect;
@@ -210,6 +216,101 @@ export function chatModel(db: Db, chat: Pick<Chat, "model">): CatalogModel {
   const d = defaultModel(db);
   if (!d) throw new Error("the model catalog has no default model: add one, or pick a model for this chat");
   return d;
+}
+
+/** The model whose row id is `rowId`. */
+export function modelByRowId(db: Pick<Db, "select">, rowId: number): CatalogModel | undefined {
+  const r = db.select().from(models).innerJoin(modelProviders, eq(models.providerId, modelProviders.id)).where(eq(models.id, rowId)).get();
+  return r ? { id: modelId(r.model_providers, r.models), model: r.models, provider: r.model_providers } : undefined;
+}
+
+/** The models of provider `name`, in the order they were added. */
+export function providerModels(db: Db, name: string): CatalogModel[] {
+  return listModels(db).filter((m) => m.provider.name === name);
+}
+
+/** The chats whose own model (`chats.model`) is one of `ids`: their next turn fails once it is removed. */
+export function chatsOn(db: Pick<Db, "select">, ids: readonly string[]): Chat[] {
+  return ids.length ? db.select().from(chats).where(inArray(chats.model, [...ids])).orderBy(asc(chats.id)).all() : [];
+}
+
+/** Remove model `id`. Refused for the default: another model is made the default first. */
+export function removeModel(db: Db, id: string): CatalogModel {
+  const m = findModel(db, id);
+  if (!m) throw new Error(`there is no model "${id}"`);
+  if (m.model.isDefault) throw new Error(`${id} is the default model: make another model the default first`);
+  db.delete(models).where(eq(models.id, m.model.id)).run();
+  return m;
+}
+
+/** Remove provider `name` and its models. Refused while one of them is the default. Returns the models removed. */
+export function removeProvider(db: Db, name: string): CatalogModel[] {
+  if (!getProvider(db, name)) throw new Error(`there is no provider named "${name}"`);
+  const its = providerModels(db, name);
+  const def = its.find((m) => m.model.isDefault);
+  if (def) throw new Error(`${def.id} is the default model: make a model of another provider the default first`);
+  db.delete(modelProviders).where(eq(modelProviders.name, name)).run();
+  return its;
+}
+
+/** Set whether model `id` takes images, as the owner says: from now on a probe no longer changes it. */
+export function setModelVision(db: Db, id: string, vision: boolean): void {
+  const m = findModel(db, id);
+  if (!m) throw new Error(`there is no model "${id}"`);
+  db.update(models).set({ vision, visionSet: true }).where(eq(models.id, m.model.id)).run();
+}
+
+/**
+ * Ask for a probe of model `rowId` (server/probes.ts runs it). Only an OpenAI-compatible model is probed: false
+ * for any other (nothing to probe: a Claude login's models are the CLI's).
+ */
+export function markProbing(db: Pick<Db, "select" | "update">, rowId: number): boolean {
+  const m = modelByRowId(db, rowId);
+  if (!m) return false;
+  switch (m.provider.kind) {
+    case "claude":
+      return false;
+    case "openai-compat":
+      db.update(models).set({ probeStatus: "checking" }).where(eq(models.id, rowId)).run();
+      return true;
+    default:
+      return unknownKind(m.provider.kind);
+  }
+}
+
+/** The models a probe was asked for (`checking`), a restart's interrupted ones included. */
+export function modelsToProbe(db: Db): CatalogModel[] {
+  return listModels(db).filter((m) => m.model.probeStatus === "checking");
+}
+
+export interface ProbeRecord {
+  status: "ok" | "text-instead" | "failed";
+  error: string | null;
+  /** Null: nothing was sent (a key that cannot be read). */
+  latencyMs: number | null;
+  /** Whether a picture was accepted; null: the probe learned nothing about it. */
+  vision: boolean | null;
+}
+
+/**
+ * Record a finished probe of model `rowId`. Vision follows what it learned, unless the owner set it
+ * (`vision_set`); a probe that learned nothing about pictures keeps what the last one did.
+ */
+export function recordProbe(db: Db, rowId: number, r: ProbeRecord, now = Date.now()): void {
+  const row = db.select().from(models).where(eq(models.id, rowId)).get();
+  if (!row) return; // removed while it ran
+  const probeVision = r.vision ?? row.probeVision;
+  db.update(models)
+    .set({
+      probeStatus: r.status,
+      probeError: r.error,
+      probeLatencyMs: r.latencyMs,
+      probedAt: new Date(now).toISOString(),
+      probeVision,
+      ...(row.visionSet || probeVision === null ? {} : { vision: probeVision }),
+    })
+    .where(eq(models.id, rowId))
+    .run();
 }
 
 /** On a first start with an empty catalog: what turns ran on before there was one. Idempotent. */

@@ -1,10 +1,11 @@
 import type { Api } from "grammy";
 import type { BotCommand, BotCommandScope } from "grammy/types";
 import { applySwitchRequest, noteStoppedTurn, pendingSwitchRequests, type SwitchOptions, type SwitchRequest } from "../agent/switch.ts";
+import { openSwitchCard } from "../control/model-cards.ts";
 import type { Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { enqueueOutbound, forgetConversations, markCommandDone, pendingCommands, type CommandPayload } from "../store/events.ts";
-import { markStop, runningTurnFor, type Turn } from "../store/turns.ts";
+import { IMMEDIATE, markStop, runningTurnFor, type Turn } from "../store/turns.ts";
 import { signalTurn, type SignalTurn } from "./spawn.ts";
 
 /**
@@ -14,6 +15,9 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  *   /new    start a fresh conversation for this chat: every model's conversation of the chat is forgotten,
  *           the active one and those parked (agent/switch.ts); the chat's events and cursor are kept. A
  *           running turn is stopped first.
+ *   /model  switch this chat's model: the control bot sends the owner a card for this chat
+ *           (control/model-cards.ts), so nobody else in a group sees it. A running turn is NOT stopped here;
+ *           the card says it will be, and the switch it asks for stops it.
  *
  * The framework does not speak (invariant 5). It acknowledges a command by reacting 👌 to it, so the
  * owner sees it took effect without a message in the assistant's chat that the assistant did not write.
@@ -34,6 +38,7 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
 export const MAIN_COMMANDS = [
   { command: "new", description: "Start a fresh conversation" },
   { command: "stop", description: "Stop the running turn" },
+  { command: "model", description: "Switch this chat's model (a card in the control bot)" },
 ] as const satisfies readonly (BotCommand & { command: CommandPayload["command"] })[];
 
 /**
@@ -166,15 +171,39 @@ export function commandPass(db: Db, signal: SignalTurn = signalTurn): number {
   let handled = 0;
   for (const cmd of pendingCommands(db)) {
     const p = cmd.payload as unknown as CommandPayload;
-    const running = stopTurn(db, cmd.chatId, cmd.seq, signal);
-    let note = running ? `stopped turn ${running.id}` : "no turn running";
-    if (p.command === "new") {
-      forgetConversations(db, cmd.chatId);
-      note += "; conversation reset";
+    let note: string;
+    switch (p.command) {
+      case "stop":
+      case "new": {
+        const running = stopTurn(db, cmd.chatId, cmd.seq, signal);
+        note = running ? `stopped turn ${running.id}` : "no turn running";
+        if (p.command === "new") {
+          forgetConversations(db, cmd.chatId);
+          note += "; conversation reset";
+        }
+        break;
+      }
+      case "model":
+        // One transaction: the card, its message, the 👌 and the command marked done all happen, or none does,
+        // so a crash in between never leaves the command done with no card (or a card's key used with none).
+        db.transaction((tx) => {
+          const t = tx as unknown as Db;
+          const card = openSwitchCard(t, cmd.chatId, `command:${cmd.seq}`);
+          acknowledge(t, cmd.chatId, cmd.seq, card ? `model card ${card.id} sent to the control bot` : "model card already sent");
+        }, IMMEDIATE);
+        handled++;
+        continue;
+      default:
+        throw new Error(`unknown command "${String(p.command satisfies never)}"`);
     }
-    enqueueOutbound(db, { chatId: cmd.chatId, kind: "bot_reaction", payload: { targetSeq: cmd.seq, emoji: "👌" }, idemKey: `command:${cmd.seq}` });
-    markCommandDone(db, cmd.seq, note);
+    acknowledge(db, cmd.chatId, cmd.seq, note);
     handled++;
   }
   return handled;
+}
+
+/** React 👌 to command `seq` and mark it done. */
+function acknowledge(db: Db, chatId: number, seq: number, note: string): void {
+  enqueueOutbound(db, { chatId, kind: "bot_reaction", payload: { targetSeq: seq, emoji: "👌" }, idemKey: `command:${seq}` });
+  markCommandDone(db, seq, note);
 }

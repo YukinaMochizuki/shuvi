@@ -48,6 +48,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` (the entry point), `src/runner/run.ts` (the turn's body) |
 | turn liveness, the wall-clock limit | `src/server/spawn.ts`, `src/server/waker.ts` |
 | telling the owner anything (alerts, /status, approvals) | `src/control/bot.ts`, `src/store/control.ts`, `src/control/approvals.ts` |
+| the control bot's model cards (`/model`, `/models`, `/provider`), and probing models in the background | `src/control/model-cards.ts`, `src/server/probes.ts` |
 | the sticker library: its format and index, ranking, the rules `sticker` enforces | `src/capabilities/stickers/` (`library.ts`, `find.ts`, `rules.ts`) |
 | each chat's computer (Hangar), exec, secrets, files | `src/capabilities/computer/index.ts`, then `state.ts` (who may touch it when) and `secrets.ts` (redaction: `src/secrets/`) |
 | what each chat may do (policy.yaml), and changing it only by approval | `src/policy/policy.ts`, `src/policy/load.ts`, `src/policy/write.ts` |

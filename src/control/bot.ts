@@ -8,12 +8,13 @@ import { defaultPolicy, type Policy } from "../policy/policy.ts";
 import { findListed, listedChats, policyDetail, policyOverview, type PolicyViewInput } from "../policy/view.ts";
 import { stopTurn } from "../server/commands.ts";
 import type { SignalTurn } from "../server/spawn.ts";
-import { markControlFailed, markControlSent, pendingControl, queueHtmlReply, queueReply, raiseAlert, approvalCard, type ControlMessage } from "../store/control.ts";
+import { markControlFailed, markControlSent, pendingControl, queueHtmlReply, queueReply, raiseAlert, approvalCard, cardMessage, type ControlMessage } from "../store/control.ts";
 import type { Db } from "../store/db.ts";
 import { allChats, getChat, kvGet, kvSet, type Speaker } from "../store/events.ts";
 import { approvals, chatEvents, OUTBOUND_KINDS, turns } from "../store/schema.ts";
 import { chatLabel, IMMEDIATE, runningTurns } from "../store/turns.ts";
 import { answerApproval, cardKeyboard, getApproval, parseCallback } from "./approvals.ts";
+import { CLOSED, getCard, isCardButton, modelCommand, modelsCommand, pressCard, providerCommand } from "./model-cards.ts";
 import { turnSummary } from "./turn-summary.ts";
 
 /**
@@ -28,7 +29,15 @@ import { turnSummary } from "./turn-summary.ts";
  *                    what is off; <chat> is the number /policy shows, or the Telegram id. Telegram HTML,
  *                    queued as `reply_html` rows, one per message
  *   /turn <id>       one paragraph on that turn, and its link in the console (turn-summary.ts)
- *   approval buttons recorded through approvals.ts
+ *   /model <chat> [<provider>/<model> lossless|lossy]
+ *                    a card to switch that chat's model (the same card `/model` in the chat opens), or, with
+ *                    a model and a mode, the switch at once, its result a reply (model-cards.ts)
+ *   /models [add <provider>/<model> [<context_window>]]
+ *                    the catalog as a card (default, re-probe, remove), or add a model and probe it
+ *   /provider add <name> <base_url> [<profile>.<VAR>] | add <name> claude [<config_dir>] | remove <name>
+ *                    add an OpenAI-compatible endpoint (a card listing its /models) or a Claude login, or
+ *                    remove one with its models after a confirmation; a key is only ever named, never sent
+ *   approval buttons recorded through approvals.ts; card buttons (`cd:`) through model-cards.ts
  *
  * `CONTROL_COMMANDS` is the one list of the commands: /help is built from it, and the server registers it
  * with Telegram at startup (server/commands.ts `registerCommands`) for the owner's `/` menu. A new command
@@ -75,6 +84,9 @@ export const CONTROL_COMMANDS = [
   { command: "stop", description: "Stop a chat's turn: /stop <chat> (the number from /status)" },
   { command: "policy", description: "What each chat may do; /policy <chat> for one in detail" },
   { command: "turn", description: "One turn in a paragraph, with its console link: /turn <id>" },
+  { command: "model", description: "Switch a chat's model: /model <chat> [<provider>/<model> lossless|lossy]" },
+  { command: "models", description: "The model catalog; /models add <provider>/<model> [<context_window>]" },
+  { command: "provider", description: "/provider add <name> <base_url> [<profile>.<VAR>] | add <name> claude [<dir>] | remove <name>" },
 ] as const satisfies readonly BotCommand[];
 
 const HELP = ["Commands:", ...CONTROL_COMMANDS.map((c) => `/${c.command}: ${c.description}`)].join("\n");
@@ -190,9 +202,13 @@ function handleUpdate(db: Db, u: Update, deps: ControlDeps, out: Handled): void 
   const cq = u.callback_query;
   if (cq) {
     if (cq.from.id !== deps.ownerId) return; // not the owner: no answer at all
+    if (isCardButton(cq.data)) {
+      out.callbacks.push({ id: cq.id, text: guarded(db, (t) => pressCard(t, cq.data!), (error) => oneLine(`Failed: ${error}`, 190)) });
+      return;
+    }
     const parsed = parseCallback(cq.data);
     const r = parsed ? answerApproval(db, parsed.approvalId, parsed.option, speakerOf(cq.from), now) : { result: "closed" as const };
-    out.callbacks.push({ id: cq.id, text: r.result === "answered" ? `Recorded: ${r.label}` : "This card is closed." });
+    out.callbacks.push({ id: cq.id, text: r.result === "answered" ? `Recorded: ${r.label}` : CLOSED });
     return;
   }
   const m = u.message;
@@ -210,7 +226,25 @@ function handleUpdate(db: Db, u: Update, deps: ControlDeps, out: Handled): void 
     return queueReply(db, key, stopped ? `Stopping turn ${stopped.id} in ${chatLabel(chat)}.` : `No turn is running in ${chatLabel(chat)}.`);
   }
   if (name === "turn") return queueReply(db, key, /^\d+$/.test(arg) ? turnSummary(db, Number(arg), deps.timeZone) : "Usage: /turn <id>");
+  const failed = (error: string) => queueReply(db, key, `/${name} failed: ${error}`);
+  if (name === "model") return guarded(db, (t) => modelCommand(t, key, arg, (a) => findChat(t, a)), failed);
+  if (name === "models") return guarded(db, (t) => modelsCommand(t, key, arg), failed);
+  if (name === "provider") return guarded(db, (t) => providerCommand(t, key, arg), failed);
   queueReply(db, key, HELP);
+}
+
+/**
+ * Run `fn` in a savepoint of the batch's transaction: if it throws, what it wrote is undone and `onError` answers
+ * instead, so one bad command or press never rolls back (and so re-delivers forever) the whole batch.
+ */
+function guarded<T>(db: Db, fn: (db: Db) => T, onError: (error: string) => T): T {
+  try {
+    return db.transaction((sp) => fn(sp as unknown as Db));
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    console.error(`control: ${error}`);
+    return onError(error);
+  }
 }
 
 /** Handle one batch and advance the offset past it, atomically. */
@@ -235,7 +269,7 @@ export async function controlPollOnce(db: Db, api: Api, deps: ControlDeps & { si
   const out = recordControlBatch(db, updates, deps);
   for (const s of out.signals) deps.signal(s.pid, s.start, "SIGTERM");
   // Best effort: an unanswered callback only leaves the button's spinner on for a few seconds.
-  for (const c of out.callbacks) await api.answerCallbackQuery(c.id, { text: c.text }).catch(() => {});
+  for (const c of out.callbacks) await api.answerCallbackQuery(c.id, c.text ? { text: c.text } : {}).catch(() => {});
   return updates.length;
 }
 
@@ -243,28 +277,59 @@ const clip = (s: string) => (s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT - 1)}â
 
 class Wait extends Error {}
 
+/** Edit a sent message; an edit to what it already says is not an error. */
+async function edit(api: Api, ownerId: number, messageId: number, text: string, keyboard: { text: string; callback_data: string }[][]): Promise<void> {
+  try {
+    await api.editMessageText(ownerId, messageId, clip(text), { reply_markup: { inline_keyboard: keyboard } });
+  } catch (e) {
+    if (!(e instanceof GrammyError && /message is not modified/i.test(e.description))) throw e;
+  }
+}
+
 async function deliver(db: Db, api: Api, ownerId: number, row: ControlMessage): Promise<void> {
-  if (row.kind === "approval") {
-    const a = getApproval(db, row.approvalId!);
-    // A card answered or expired before it was ever sent has nothing left to ask.
-    if (!a || a.status !== "pending") return markControlSent(db, row.id, null);
-    const msg = await api.sendMessage(ownerId, clip(row.text), { reply_markup: { inline_keyboard: cardKeyboard(a) } });
-    return markControlSent(db, row.id, msg.message_id);
-  }
-  if (row.kind === "approval_closed") {
-    const card = approvalCard(db, row.approvalId!);
-    if (card?.status === "pending") throw new Wait(); // the card itself goes first (it is older; this only guards)
-    if (!card?.tgMessageId) return markControlSent(db, row.id, null);
-    try {
-      await api.editMessageText(ownerId, card.tgMessageId, clip(row.text), { reply_markup: { inline_keyboard: [] } });
-    } catch (e) {
-      if (!(e instanceof GrammyError && /message is not modified/i.test(e.description))) throw e;
+  switch (row.kind) {
+    case "approval": {
+      const a = getApproval(db, row.approvalId!);
+      // A card answered or expired before it was ever sent has nothing left to ask.
+      if (!a || a.status !== "pending") return markControlSent(db, row.id, null);
+      const msg = await api.sendMessage(ownerId, clip(row.text), { reply_markup: { inline_keyboard: cardKeyboard(a) } });
+      return markControlSent(db, row.id, msg.message_id);
     }
-    return markControlSent(db, row.id, card.tgMessageId);
+    case "approval_closed": {
+      const card = approvalCard(db, row.approvalId!);
+      if (card?.status === "pending") throw new Wait(); // the card itself goes first (it is older; this only guards)
+      if (!card?.tgMessageId) return markControlSent(db, row.id, null);
+      await edit(api, ownerId, card.tgMessageId, row.text, []);
+      return markControlSent(db, row.id, card.tgMessageId);
+    }
+    // A model card (model-cards.ts) is sent, and edited, as its row is NOW: a later edit shows the latest step.
+    case "card": {
+      const card = getCard(db, row.cardId!);
+      if (!card) return markControlSent(db, row.id, null);
+      const msg = await api.sendMessage(ownerId, clip(card.text), { reply_markup: { inline_keyboard: card.keyboard } });
+      return markControlSent(db, row.id, msg.message_id);
+    }
+    case "card_edit": {
+      const sent = cardMessage(db, row.cardId!);
+      if (sent?.status === "pending") throw new Wait(); // as for approval_closed
+      const card = getCard(db, row.cardId!);
+      if (!card || !sent?.tgMessageId) return markControlSent(db, row.id, null);
+      await edit(api, ownerId, sent.tgMessageId, card.text, card.keyboard);
+      return markControlSent(db, row.id, sent.tgMessageId);
+    }
+    case "reply_html": {
+      // An HTML part is cut to fit by its maker (policy/view.ts), never here: a cut could end inside a tag.
+      const msg = await api.sendMessage(ownerId, row.text, { parse_mode: "HTML" });
+      return markControlSent(db, row.id, msg.message_id);
+    }
+    case "reply":
+    case "alert": {
+      const msg = await api.sendMessage(ownerId, clip(row.text));
+      return markControlSent(db, row.id, msg.message_id);
+    }
+    default:
+      throw new Error(`unknown control message kind "${String(row.kind satisfies never)}"`);
   }
-  // An HTML part is cut to fit by its maker (policy/view.ts), never here: a cut could end inside a tag.
-  const msg = row.kind === "reply_html" ? await api.sendMessage(ownerId, row.text, { parse_mode: "HTML" }) : await api.sendMessage(ownerId, clip(row.text));
-  markControlSent(db, row.id, msg.message_id);
 }
 
 /** How long to wait before trying again while the control bot cannot reach the owner at all. */

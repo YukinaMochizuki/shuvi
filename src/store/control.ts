@@ -101,6 +101,24 @@ export function queueControl(db: Db, m: { kind: "approval" | "approval_closed"; 
   db.insert(controlMessages).values({ ...m, idemKey: m.key, status: "pending" }).onConflictDoNothing().run();
 }
 
+/**
+ * Queue the sending of card `cardId` (control_cards), or an edit of its message: either way the sender shows the
+ * card as it is when it delivers. An edit is keyed on the card's `rev`, so each change queues one edit at most.
+ */
+export function queueCardMessage(db: Db, kind: "card" | "card_edit", cardId: number, rev: number): void {
+  const key = kind === "card" ? `card:${cardId}` : `card-edit:${cardId}:${rev}`;
+  db.insert(controlMessages).values({ kind, text: "", idemKey: key, cardId, status: "pending" }).onConflictDoNothing().run();
+}
+
+/** The row that sends card `cardId` (its Telegram message id once sent). */
+export function cardMessage(db: Db, cardId: number): ControlMessage | undefined {
+  return db
+    .select()
+    .from(controlMessages)
+    .where(and(eq(controlMessages.cardId, cardId), eq(controlMessages.kind, "card")))
+    .get();
+}
+
 /** Undelivered rows, oldest first. */
 export function pendingControl(db: Db): ControlMessage[] {
   return db.select().from(controlMessages).where(eq(controlMessages.status, "pending")).orderBy(asc(controlMessages.id)).all();

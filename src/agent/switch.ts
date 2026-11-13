@@ -100,6 +100,8 @@ export interface SwitchResult {
   carried: number;
   /** What was carried starts with a compaction's summary (see the header). */
   compacted: boolean;
+  /** The target's own conversation was taken up (it had one); false: it starts on a new one, or none moved. */
+  resumed: boolean;
 }
 
 export interface SwitchOptions {
@@ -121,7 +123,7 @@ export function switchModel(db: Db, chatId: number, to: string, mode: SwitchMode
   const resume = !chat.backendSessionId && hasParked(db, chat.id, target.id);
   if (resume) return moveChat(db, chat, active === target.id ? null : active, target, mode, opts);
   if (runsOn(db, chat) === target.id && (active === null || active === target.id)) {
-    return { mode, changed: false, from: active, to: target.id, carried: 0, compacted: false };
+    return { mode, changed: false, from: active, to: target.id, carried: 0, compacted: false, resumed: false };
   }
   if (active === target.id) {
     // Its conversation is already the target's (the chat's model was moved without a switch): only the model.
@@ -129,9 +131,59 @@ export function switchModel(db: Db, chatId: number, to: string, mode: SwitchMode
       refuseIfRunning(tx, chat.id);
       tx.update(chats).set({ model: target.id, conversationModel: target.id }).where(eq(chats.id, chat.id)).run();
     }, IMMEDIATE);
-    return { mode, changed: true, from: active, to: target.id, carried: 0, compacted: false };
+    return { mode, changed: true, from: active, to: target.id, carried: 0, compacted: false, resumed: false };
   }
   return moveChat(db, chat, active, target, mode, opts);
+}
+
+/**
+ * What switching chat `chatId` to `to` would do now, in either mode, computed by the rules `switchModel` follows
+ * and without writing anything: for the control bot's switch card (control/model-cards.ts), which offers both
+ * modes and says what each would do in this chat.
+ */
+export interface SwitchPreview {
+  to: string;
+  /** The chat is already on `to`, its conversation `to`'s: `switchModel` would do nothing. */
+  noop: boolean;
+  /**
+   * lossless: `carry` N messages into the target's conversation, or, the target having none, `copy` the whole
+   * current one (N messages). Nothing to carry (no active conversation) is 0.
+   */
+  lossless: { kind: "carry" | "copy"; messages: number };
+  /** lossy: the target's conversation `resume`s as it was left (`since`: when, null: it is the active one already), or it starts `fresh`. */
+  lossy: { kind: "resume"; since: string | null } | { kind: "fresh" };
+  /** The turn running in the chat, which a switch request stops first (null: none). */
+  running: number | null;
+}
+
+export function previewSwitch(db: Db, chatId: number, to: string): SwitchPreview {
+  const chat = getChat(db, chatId);
+  if (!chat) throw new Error(`there is no chat ${chatId}`);
+  const target = findModel(db, to);
+  if (!target) throw new Error(`there is no model "${to}" in the catalog`);
+  const running = runningTurnFor(db, chatId)?.id ?? null;
+  const active = activeModel(db, chat);
+  // As in switchModel: with no active conversation the target's parked one is resumed.
+  const resume = !chat.backendSessionId && hasParked(db, chat.id, target.id);
+  const noop = !resume && runsOn(db, chat) === target.id && (active === null || active === target.id);
+  if (!resume && active === target.id) return { to: target.id, noop, lossless: { kind: "carry", messages: 0 }, lossy: { kind: "resume", since: null }, running };
+  const from = resume && active === target.id ? null : active;
+  const parked = parkedConversation(db, chat.id, target.id);
+  const hadTarget = !!parked && laneHas(db, laneOf(target.provider), parked.backendSessionId);
+  let messages = 0;
+  const lane = from && chat.backendSessionId ? laneOfModel(db, from) : null;
+  if (lane && chat.backendSessionId) {
+    const source = { lane, session: chat.backendSessionId };
+    // A request stops the running turn first, and carries only up to where it began (moveChat).
+    messages = carryPart(db, source, hadTarget ? chat.enteredAt : null, carryLimit(db, running, source)).messages.length;
+  }
+  return {
+    to: target.id,
+    noop,
+    lossless: { kind: hadTarget ? "carry" : "copy", messages },
+    lossy: hadTarget ? { kind: "resume", since: parked!.parkedAt } : { kind: "fresh" },
+    running,
+  };
 }
 
 /**
@@ -285,11 +337,29 @@ export function conversationPosition(db: Db, chat: Chat): { session: string | nu
 }
 
 function hasParked(db: Reader, chatId: number, model: string): boolean {
-  return !!db
-    .select({ m: chatConversations.model })
+  return !!parkedConversation(db, chatId, model);
+}
+
+function parkedConversation(db: Reader, chatId: number, model: string) {
+  return db
+    .select()
     .from(chatConversations)
     .where(and(eq(chatConversations.chatId, chatId), eq(chatConversations.model, model)))
     .get();
+}
+
+/**
+ * What a lossless switch carries of `source`: what it holds after `after` (null: all of it), cut where `limit`
+ * says. `whole` when `after` was compacted away, so that is all it holds.
+ */
+function carryPart(db: Db, source: { lane: string; session: string }, after: string | null, limit: CarryLimit): { messages: ModelMessage[]; whole: boolean } {
+  if (limit.kind === "none") return { messages: [], whole: false };
+  const p = laneRead(db, source.lane, source.session, after);
+  if (limit.kind === "upTo") {
+    const added = laneRead(db, source.lane, source.session, limit.position);
+    if (!added.whole) p.messages = p.messages.slice(0, Math.max(0, p.messages.length - added.messages.length));
+  }
+  return p;
 }
 
 /**
@@ -316,12 +386,9 @@ function moveChat(db: Db, chat: Chat, from: string | null, target: CatalogModel,
   // The conversation left: A's, where A's provider keeps it (null lane: the provider is gone, nothing to read).
   const source = from && chat.backendSessionId ? { model: from, session: chat.backendSessionId, lane: laneOfModel(db, from) } : null;
   const toLane = laneOf(target.provider);
-  const parked = db
-    .select()
-    .from(chatConversations)
-    .where(and(eq(chatConversations.chatId, chat.id), eq(chatConversations.model, target.id)))
-    .get();
+  const parked = parkedConversation(db, chat.id, target.id);
   let session = parked && laneHas(db, toLane, parked.backendSessionId) ? parked.backendSessionId : null;
+  const resumed = !!session;
   let contextTokens = session ? (parked?.contextTokens ?? null) : null;
   let carried = 0;
   let compacted = false;
@@ -335,12 +402,7 @@ function moveChat(db: Db, chat: Chat, from: string | null, target: CatalogModel,
     // What B lacks: what A's gained since it was entered; all of it, when B has no conversation. Never what a
     // stopped turn added (`limit`). Sets `carried` and `compacted`.
     const part = (): ModelMessage[] => {
-      if (limit.kind === "none") return [];
-      const p = laneRead(db, from.lane, from.session, hadTarget ? chat.enteredAt : null);
-      if (limit.kind === "upTo") {
-        const added = laneRead(db, from.lane, from.session, limit.position);
-        if (!added.whole) p.messages = p.messages.slice(0, Math.max(0, p.messages.length - added.messages.length));
-      }
+      const p = carryPart(db, from, hadTarget ? chat.enteredAt : null, limit);
       carried = p.messages.length;
       compacted = carried > 0 && p.whole && hadTarget && !!chat.enteredAt;
       if (carried) contextTokens = null; // grown by what was carried: let the driver measure it again
@@ -355,7 +417,9 @@ function moveChat(db: Db, chat: Chat, from: string | null, target: CatalogModel,
         const whole = limit.kind === "all" || (limit.kind === "upTo" && canFork && limit.position === laneEnd(db, from.lane, from.session));
         if (canFork && whole && login) {
           session = forkClaudeSession(from.session, login.dir ? { configDir: login.dir } : {}).sessionId;
-          carried = readClaudeSession(session, login.dir ? { configDir: login.dir } : {}).messages.length;
+          // Counted as every other carry is (and as `previewSwitch` counts it): in converted messages, not in
+          // the session's own entries (a tool result and text in one user entry are two).
+          carried = laneRead(db, from.lane, from.session, null).messages.length;
           contextTokens = chat.contextTokens; // the same conversation, the same size
         } else {
           const messages = part();
@@ -398,7 +462,7 @@ function moveChat(db: Db, chat: Chat, from: string | null, target: CatalogModel,
       .values({ chatId: chat.id, fromModel, toModel: target.id, mode, fromSessionId: chat.backendSessionId, toSessionId: session, carried, compacted })
       .run();
   }, IMMEDIATE);
-  return { mode, changed: true, from, to: target.id, carried, compacted };
+  return { mode, changed: true, from, to: target.id, carried, compacted, resumed };
 }
 
 function refuseIfRunning(tx: Reader, chatId: number): void {
