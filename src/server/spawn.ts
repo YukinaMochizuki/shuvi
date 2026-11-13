@@ -9,7 +9,9 @@ const CHILD = join(dirname(fileURLToPath(import.meta.url)), "../runner/child.ts"
  * process group, which is the whole mechanism by which a turn outlives a server restart.
  *
  * Under systemd that also needs the unit's `KillMode=process`, or stopping the unit kills every process
- * in its cgroup, detached or not (see the README's deploy notes). There is no separate supervisor process
+ * in its cgroup, detached or not (see the README's deploy notes). In a container nothing outlives the
+ * server, so a stop drains instead (drain.ts): the server waits for its turns before it exits, and `tini`
+ * (PID 1) reaps a child whose server has gone. There is no separate supervisor process
  * here (workstream has one); a turn's liveness is its row's pid AND that pid's process start time
  * (`/proc/<pid>/stat`, field 22), both recorded at spawn. A pid alone is not enough: once the child is gone
  * the kernel may hand the same pid to an unrelated process, which would keep a dead turn "running"

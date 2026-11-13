@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildSystemPrompt } from "../src/agent/prompt.ts";
 import { LostSessionError, type AdapterRunOptions, type AdapterRunResult, type ToolBoundary } from "agent-runtime";
-import { GAP_NOTE_MINUTES, isLostSession, runTurn } from "../src/agent/turn.ts";
+import { RETRY_NOTE } from "../src/agent/render.ts";
+import { GAP_NOTE_MINUTES, isLostSession, isRetryAfterDrain, runTurn } from "../src/agent/turn.ts";
 import { controlMessagesOf } from "../src/store/control.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
 import { enqueueOutbound, getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
-import { claimTurn, getTurn } from "../src/store/turns.ts";
+import { claimTurn, DRAIN_STOP, finishTurn, getTurn, markDrainStop, markStop, saveSession } from "../src/store/turns.ts";
 import { lastSeq, memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./helpers.ts";
 
 const emptyHome = mkdtempSync(join(tmpdir(), "shuvi-home-"));
@@ -441,5 +442,63 @@ describe("runTurn: a lost conversation", () => {
     expect(outcome).toBe("failed");
     expect(adapter.calls.map((c) => c.method)).toEqual(["continueRun"]);
     expect(getChat(db, ownerChatId(db))!.backendSessionId).toBe("kept-session");
+  });
+});
+
+describe("runTurn: the retry of a turn a restart cut off", () => {
+  /** A chat whose turn on "hello" was stopped at a draining server's deadline (server/drain.ts), in `session`. */
+  function cutOff(db: Db, session: string | null) {
+    ownerSays(db, "hello");
+    if (session) saveSession(db, ownerChatId(db), session);
+    const t = claimTurn(db, ownerChatId(db))!;
+    if (session) db.$client.run("update turns set backend_session_id = ? where id = ?", [session, t.id]);
+    markDrainStop(db, t.id);
+    markStop(db, t.id, t.fromSeq);
+    finishTurn(db, t.id, { status: "stopped" });
+    return getTurn(db, t.id)!;
+  }
+
+  test("in the same conversation, the same messages come again under the retry note, once", async () => {
+    const db = memDb();
+    const stopped = cutOff(db, "s-1");
+    expect(stopped.error).toBe(DRAIN_STOP);
+    expect(getChat(db, ownerChatId(db))!.cursorSeq).toBe(stopped.fromSeq);
+    const { adapter, turn } = await turnWith(db, [{ token: "Hi again." }]);
+    expect(turn.fromSeq).toBe(stopped.fromSeq);
+    const prompt = String(adapter.calls[0]!.prompt);
+    expect(prompt).toContain(RETRY_NOTE);
+    expect(prompt.split(RETRY_NOTE).length).toBe(2);
+    expect(prompt.indexOf(RETRY_NOTE)).toBeLessThan(prompt.indexOf("hello"));
+    // And only that once: the turn after it is an ordinary one.
+    ownerSays(db, "thanks");
+    const next = await turnWith(db, [{ token: "Any time." }]);
+    expect(String(next.adapter.calls[0]!.prompt)).not.toContain(RETRY_NOTE);
+  });
+
+  test("no note in a fresh conversation (after /new, a lost session), nor after a stop that was not the drain's", async () => {
+    const db = memDb();
+    cutOff(db, null);
+    const fresh = await turnWith(db, [{ token: "Hello." }]);
+    expect(String(fresh.adapter.calls[0]!.prompt)).not.toContain(RETRY_NOTE);
+
+    const db2 = memDb();
+    ownerSays(db2, "hello");
+    saveSession(db2, ownerChatId(db2), "s-2");
+    const t = claimTurn(db2, ownerChatId(db2))!;
+    markStop(db2, t.id, t.fromSeq); // a switch's stop: no DRAIN_STOP
+    finishTurn(db2, t.id, { status: "stopped" });
+    const after = await turnWith(db2, [{ token: "Hello." }]);
+    expect(String(after.adapter.calls[0]!.prompt)).not.toContain(RETRY_NOTE);
+  });
+
+  test("not when the conversation resumed is another than the one the stopped turn ran in", () => {
+    const db = memDb();
+    const stopped = cutOff(db, "s-1");
+    ownerSays(db, "x");
+    const next = claimTurn(db, ownerChatId(db))!;
+    expect(next.fromSeq).toBe(stopped.fromSeq);
+    expect(isRetryAfterDrain(db, next, "s-1")).toBe(true);
+    expect(isRetryAfterDrain(db, next, "s-other")).toBe(false);
+    expect(isRetryAfterDrain(db, next, null)).toBe(false);
   });
 });

@@ -32,12 +32,26 @@ import {
 } from "../store/events.ts";
 import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
-import { chatLabel, extendTurn, finishTurn, getTurn, hadEarlierTurn, saveSession, setTurnConversation } from "../store/turns.ts";
+import { chatLabel, DRAIN_STOP, extendTurn, finishTurn, getTurn, hadEarlierTurn, saveSession, setTurnConversation, type Turn } from "../store/turns.ts";
 import { buildPromptSections, joinSections } from "./prompt.ts";
 import { claimSwitches, switchNote } from "./switch.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, timeNote, type InputOptions, type Perceive } from "./render.ts";
 import { recordingBoundary, TurnRecorder, type RecorderOptions } from "./transcript.ts";
 import { isTrigger, type BotIdentity } from "./triggers.ts";
+
+/**
+ * Whether turn `turn` answers again what a turn cut off by a restart was answering, in the conversation that
+ * turn ran in (render.ts `RETRY_NOTE`): the chat's previous turn was stopped at a draining server's deadline
+ * (store/turns.ts `DRAIN_STOP`), from the same cursor, and the conversation resumed now is the one it ran in.
+ * A fresh conversation (`/new`, a lost session, a switch) never held the stopped turn's part: no note.
+ */
+export function isRetryAfterDrain(db: Db, turn: Turn, session: string | null): boolean {
+  if (!session) return false;
+  const prev = db.$client
+    .query("select status, error, from_seq as fromSeq, backend_session_id as session from turns where chat_id = ? and id < ? order by id desc limit 1")
+    .get(turn.chatId, turn.id) as { status: string; error: string | null; fromSeq: number; session: string | null } | null;
+  return !!prev && prev.status === "stopped" && prev.error === DRAIN_STOP && prev.fromSeq === turn.fromSeq && (prev.session === null || prev.session === session);
+}
 
 /** How many earlier events a fresh conversation opens with (docs/design.md §13, `/new`). */
 export const HISTORY_ON_NEW = 10;
@@ -427,7 +441,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     chatPolicy,
     ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}),
   });
-  const opening = withNote(!chat.backendSessionId);
+  const opening: InputOptions = { ...withNote(!chat.backendSessionId), ...(isRetryAfterDrain(db, turn, chat.backendSessionId) ? { retry: true } : {}) };
   const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive, opening) : renderTurnInput(input, deps.timeZone, perceive, opening);
   let lastThinking = false;
   const opts = {

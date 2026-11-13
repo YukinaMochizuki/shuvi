@@ -4,6 +4,7 @@ import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
+import { backupBeforeMigrate } from "./migrate-backup.ts";
 import * as schema from "./schema.ts";
 
 export type Db = BunSQLiteDatabase<typeof schema> & { $client: Database };
@@ -15,7 +16,7 @@ const MIGRATIONS = join(dirname(fileURLToPath(import.meta.url)), "../../drizzle"
  * runs in WAL mode with a busy timeout: a writer waits for another instead of failing. `path` ":memory:"
  * gives a private database (tests).
  */
-export function openDb(path: string, opts: { migrate?: boolean } = {}): Db {
+export function openDb(path: string, opts: { migrate?: boolean; migrationsFolder?: string } = {}): Db {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const client = new Database(path, { create: true });
   client.exec("PRAGMA journal_mode = WAL;");
@@ -24,6 +25,14 @@ export function openDb(path: string, opts: { migrate?: boolean } = {}): Db {
   const db = drizzle(client, { schema }) as Db;
   // Only the server migrates. A runner child opens the store as it is: a child applying migrations
   // underneath a server that has not would be the wrong process changing the schema.
-  if (opts.migrate) migrate(db, { migrationsFolder: MIGRATIONS });
+  // With migrations pending, a copy of the file first (store/migrate-backup.ts); no copy, no migration.
+  if (opts.migrate) {
+    const migrationsFolder = opts.migrationsFolder ?? MIGRATIONS;
+    if (path !== ":memory:") {
+      const copy = backupBeforeMigrate(client, path, migrationsFolder);
+      if (copy) console.log(`store: migrations pending; copied the store to ${copy} first`);
+    }
+    migrate(db, { migrationsFolder });
+  }
   return db;
 }

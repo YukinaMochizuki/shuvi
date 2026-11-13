@@ -61,6 +61,7 @@ bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POS
 bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
 bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
 bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed probe, sheets of a link, a fetch into ~/inbox
+bun scripts/e2e-drain.ts     # SIGTERM drains: a running turn finishes and is delivered, exit 0; the deadline stops and retries
 bun scripts/console-fixture.ts  # the console over made-up fixture data, on 127.0.0.1:8787, to look at
 ```
 
@@ -211,9 +212,111 @@ file, or a file that turns unreadable, is still redacted; with neither usable, o
 
 ## Deploying
 
-Each turn runs in its own detached process, so restarting the server never interrupts one. Under systemd
-that only holds with `KillMode=process`; the default kills every process in the unit's cgroup, turns
-included:
+shuvi runs as a container: the `Dockerfile` at the root builds it (Bun on Debian slim, a non-root user,
+`tini` as PID 1), and `.github/workflows/release.yml` pushes it to a private registry after CI passes on
+`main`. docs/design.md §16 has the reasoning.
+
+### The container
+
+Configuration is environment variables only, as above. Two volumes must survive a redeploy; both must be
+**owned** by uid 10001, the image's `shuvi` user (`chown -R 10001:10001`), not merely writable by it: git
+refuses to work in a `home/` owned by someone else ("dubious ownership"), so memory edits would fail:
+
+| volume | variable (set by the image) | holds |
+|---|---|---|
+| `/data` | `SHUVI_DATA_DIR` | `shuvi.db`, `home/`, `media/`, `backups/` |
+| `/claude` | `SHUVI_CLAUDE_CONFIG_DIR` | the Claude login and Claude Code's session files |
+
+Log in to Claude once, into the volume, with the CLI the image carries:
+
+```bash
+docker exec -it -e CLAUDE_CONFIG_DIR=/claude <container> \
+  node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude /login   # -linux-arm64 on arm
+```
+
+or copy an existing login's directory into it. `SHUVI_CLAUDE_CONFIG_DIR` is applied on every start: the
+`claude` login in the model catalog is pointed at it if it says otherwise (logged), so a store moved from
+another machine uses the volume.
+
+**Moving an existing store in** (from a VM, say): stop the old server, copy its data dir into `/data` and
+its Claude login dir into `/claude`, `chown -R 10001:10001` both, then start the container. Claude Code files
+sessions by working directory, and the image's is `/app`, not the old checkout's, so each chat's Claude
+conversation is not found once and starts over, opening with the chat's last messages (as after a lost
+session); its history in `shuvi.db` is untouched.
+
+**One server per data dir.** The old container must have stopped before the new one starts (compose's
+default stop-then-start does this; a blue-green or rolling deploy does not). A turn's liveness is a process
+id, which means nothing across containers, so a second server on the same `/data` would take the first's
+running turns for dead and run them again beside the originals.
+
+A compose service looks like this (the host paths and the env file are yours):
+
+```yaml
+services:
+  shuvi:
+    image: registry.example.ts.net/shuvi:main
+    env_file: shuvi.env            # SHUVI_BOT_TOKEN, SHUVI_OWNER_ID, SHUVI_CONTROL_BOT_TOKEN, …
+    volumes:
+      - /srv/shuvi/data:/data
+      - /srv/shuvi/claude:/claude
+      # With SHUVI_SECRETS_FILE=/etc/shuvi/secrets.yaml, if used. Writable: its .known file is kept beside it.
+      - /srv/shuvi/secrets:/etc/shuvi
+    stop_grace_period: 11m         # longer than SHUVI_DRAIN_SEC (600) + 30 s
+    restart: unless-stopped
+```
+
+**Stopping drains.** On SIGTERM the server stops polling Telegram and starts no new turn, waits for the
+running turns to finish and their messages to go out (up to `SHUVI_DRAIN_SEC`, default 600), then exits 0.
+A turn still running at the deadline is stopped and answered again by the next server; the owner is told in
+the control bot. Messages sent meanwhile wait with Telegram, so nothing is lost; a deploy does mean up to
+`SHUVI_DRAIN_SEC` without answers. The runtime's stop timeout must be longer than the drain
+(`SHUVI_DRAIN_SEC` + `SHUVI_DRAIN_GRACE_SEC` (15) + a few seconds), or it kills the server partway; a second
+signal ends the drain at once.
+
+**Health and metrics.** `/healthz` and `/metrics` (Prometheus) listen on `SHUVI_METRICS_LISTEN`, loopback
+only, default `127.0.0.1:8788` (anything else is refused at startup); the image's `HEALTHCHECK` calls
+`/healthz`. Loopback is the container's own, so Prometheus cannot reach it from another container directly:
+publish it with `tailscale serve` from a tailnet sidecar that shares the container's network namespace, and
+scrape that. The metric names are listed in docs/design.md §16. They are counts and times only.
+
+**Backups before a migration.** A start with schema migrations pending first copies `shuvi.db` to
+`$SHUVI_DATA_DIR/backups/pre-migrate-<from>-<to>-<time>.db` (the last 5 are kept). To roll a deploy back,
+stop the server, put that copy in place as `shuvi.db` (removing `shuvi.db-wal` / `-shm`), and run the image
+the copy came from. Older copies are pruned before a new one is taken; if the copy still cannot be written
+(a full disk), the server refuses to start rather than migrate without one: free space, and start it again.
+
+### CI and the release
+
+`.github/workflows/ci.yml` runs on every push and pull request: `typecheck`, `unit tests`, and one job per
+`scripts/e2e-*.ts` (with ffmpeg, so nothing skips; against fakes only, so it needs no secret). Require the
+one check **`ci passed`** on `main`: it is green only when every other job is, new e2e scripts included.
+
+`.github/workflows/release.yml` runs when CI passes on a push to `main`: it joins the tailnet, checks the
+registry credentials can push, pushes `<REGISTRY>/shuvi:sha-<12>`, and points `<REGISTRY>/shuvi:main` at it
+only if that commit is still the tip of `main` (so a late release of an older commit never moves it back). It
+fails, naming what is missing, until the repository has (Settings → Secrets and variables → Actions):
+
+| kind | name | value |
+|---|---|---|
+| variable | `REGISTRY` | the registry's host name, e.g. `registry.<tailnet>.ts.net` |
+| secret | `TS_OAUTH_CLIENT_ID` | a Tailscale OAuth client (admin console → Settings → OAuth clients) with the **Auth Keys: write** scope and the tag **`tag:ci`**. The tailnet policy must let `tag:ci` reach the registry on 443 |
+| secret | `TS_OAUTH_SECRET` | that client's secret |
+| secret | `REGISTRY_USER` | a registry user allowed to push (writes need a password there; reads are anonymous) |
+| secret | `REGISTRY_PASSWORD` | its password |
+
+The CI node joins as an ephemeral `tag:ci` device and leaves when the job ends. The computer image has its
+own workflow (`computer-image.yml`, to ghcr.io), untouched by this one.
+
+### The old way: systemd on a VM
+
+Before the container, shuvi ran from a checkout under systemd. It still can, but stopping now behaves
+differently. SIGTERM drains there too: a restart means up to `SHUVI_DRAIN_SEC` (default 600 s) without
+polling Telegram while running turns finish, where before the server exited at once and the turns carried on
+in their own processes. That is a regression on a VM, accepted because the container is the deployment;
+lower `SHUVI_DRAIN_SEC` there if restarts must be quick (a turn still running at the deadline is stopped and
+answered again). `TimeoutStopSec` must exceed the drain, so systemd does not kill it partway. Keep
+`KillMode=process` (the default kills every process in the unit's cgroup): it still lets a turn outlive a
+server that dies without draining (a crash, SIGKILL), which the next server then picks up.
 
 ```ini
 [Service]
@@ -222,4 +325,6 @@ WorkingDirectory=/opt/shuvi
 EnvironmentFile=/etc/shuvi.env
 KillMode=process
 Restart=always
+# Let the drain finish: SHUVI_DRAIN_SEC + SHUVI_DRAIN_GRACE_SEC + a little.
+TimeoutStopSec=640
 ```

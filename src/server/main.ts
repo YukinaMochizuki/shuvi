@@ -18,12 +18,18 @@
  *   control   when `SHUVI_CONTROL_BOT_TOKEN` is set, the control bot's poller and sender (control/bot.ts)
  *   prune     drop turn transcripts and abandoned conversations older than SHUVI_TRANSCRIPT_DAYS
  *   console   when SHUVI_CONSOLE_USERS or SHUVI_CONSOLE_TOKEN is set, the read-only web console (src/console/)
+ *   health    /healthz and /metrics on SHUVI_METRICS_LISTEN, loopback (health.ts)
  *
  * and, alongside them, the loops of every enabled capability (src/capabilities/), through the same
  * loop helper (loop.ts).
  *
  * Everything it knows is in the store, so stopping it at any moment and starting it again loses nothing:
- * running turns carry on in their own processes, and the loops resume from the rows.
+ * the loops resume from the rows. SIGTERM (or SIGINT) DRAINS (drain.ts): the poller stops, the waker starts
+ * no new turn, and the server waits for the running turns and their messages, up to SHUVI_DRAIN_SEC, before
+ * it exits 0. A second signal exits at once. A server that dies without draining (SIGKILL, a crash) leaves
+ * its turns running in their own detached processes where the host lets them outlive it (systemd with
+ * `KillMode=process`), and the next server picks them up; in a container they die with it, and the next
+ * server reaps and retries them (waker.ts).
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,12 +48,15 @@ import { PolicyWatch } from "../policy/load.ts";
 import { applyPolicyApprovals } from "../policy/write.ts";
 import { openDb } from "../store/db.ts";
 import { pruneConversations } from "../store/conversations.ts";
-import { seedModels } from "../store/models.ts";
+import { reconcileClaudeLogin, seedModels } from "../store/models.ts";
 import { getChat, type ChatEvent } from "../store/events.ts";
 import { pruneTranscripts } from "../store/transcripts.ts";
+import { pendingControl } from "../store/control.ts";
 import { runningTurns } from "../store/turns.ts";
 import { telegramFiles } from "../telegram/files.ts";
 import { commandPass, GroupMenus, MAIN_COMMANDS, registerCommands, switchRequestPass } from "./commands.ts";
+import { drain } from "./drain.ts";
+import { newVitals, startHealth } from "./health.ts";
 import { loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
 import { backgroundPass } from "./probes.ts";
@@ -61,6 +70,9 @@ checkConsole(cfg.console);
 const db = openDb(cfg.dbPath, { migrate: true });
 // A first start's model catalog: what turns ran on before there was one (store/models.ts).
 seedModels(db, { ...(cfg.claudeConfigDir ? { claudeConfigDir: cfg.claudeConfigDir } : {}), ...(cfg.model ? { model: cfg.model } : {}) });
+// And on every start: SHUVI_CLAUDE_CONFIG_DIR, when set, is where that login is (a volume, in a container).
+const moved = reconcileClaudeLogin(db, cfg.claudeConfigDir);
+if (moved) console.log(`models: the claude login moved from ${moved.from ?? "the server user's default"} to ${moved.to} (SHUVI_CLAUDE_CONFIG_DIR); sessions filed under the old one start over`);
 const api = new Api(cfg.botToken, cfg.telegramApiRoot ? { apiRoot: cfg.telegramApiRoot } : undefined);
 const capabilities = enabledCapabilities();
 const me = await api.getMe();
@@ -75,19 +87,37 @@ void registerCommands(api, cfg.ownerId, MAIN_COMMANDS, "main bot");
 // The same menu, for the owner only, in each group policy lists; synced by the policy loop below.
 const groupMenus = new GroupMenus(api, cfg.ownerId);
 
+// `stop` ends every loop; `intake` only the Telegram poller, which a drain stops first (drain.ts).
 const stop = new AbortController();
+const intake = new AbortController();
 const loop = (name: string, body: () => Promise<number | void>, everyMs: number) => runLoop(name, body, everyMs, stop.signal);
+// What /healthz and /metrics report of this process (health.ts).
+const vitals = newVitals();
 
 // The poller's own long poll is its wait; it loops straight back.
 const onRecorded = (events: ChatEvent[]) => capabilityInbound(capabilities, events, policies.current(), { db, ownerId: cfg.ownerId });
-void loop("poller", async () => void (await pollOnce(db, api, cfg.ownerId, () => ({ botUsername: me.username, policy: policies.current(), home: cfg.home, onRecorded }), 25, stop.signal)), 0);
+void runLoop(
+  "poller",
+  async () => {
+    try {
+      await pollOnce(db, api, cfg.ownerId, () => ({ botUsername: me.username, policy: policies.current(), home: cfg.home, onRecorded }), 25, intake.signal);
+      vitals.lastPollAt = Date.now();
+    } catch (e) {
+      if (!intake.signal.aborted) vitals.pollErrors++;
+      throw e;
+    }
+  },
+  0,
+  intake.signal,
+);
 void loop(
   "waker",
   async () => {
     commandPass(db);
     switchRequestPass(db);
     switchCardPass(db);
-    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers });
+    // Draining: still reap and enforce the limit, start nothing.
+    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers, wake: !vitals.draining });
   },
   300,
 );
@@ -103,7 +133,8 @@ void loop(
 );
 // Started in the background; the rows say what is asked, so a restart's interrupted ones start again here.
 void loop("catalog", async () => void backgroundPass(db, { secretsFile: cfg.secretsFile }), 1000);
-void loop("sender", async () => (await sendPass(db, api)).backoffMs, 300);
+// Awaited at exit (`shutdown`), so the server never exits in the middle of a send.
+const senders: Promise<void>[] = [loop("sender", async () => (await sendPass(db, api)).backoffMs, 300)];
 void loop(
   "typing",
   async () => {
@@ -148,24 +179,65 @@ if (consoleOn(cfg.console)) {
     5000,
   );
 } else console.log("console off (neither SHUVI_CONSOLE_USERS nor SHUVI_CONSOLE_TOKEN is set)");
+{
+  let served = false;
+  // From a loop, like the console: a failure to bind (the port taken by something else) is logged and retried.
+  // The address itself was checked at startup (env.ts).
+  void loop(
+    "health",
+    async () => {
+      if (served) return;
+      const port = startHealth(cfg.metricsListen, db, vitals, stop.signal);
+      served = true;
+      console.log(`health: /healthz and /metrics on port ${port}`);
+    },
+    5000,
+  );
+}
 
 if (cfg.controlBotToken) {
   const control = new Api(cfg.controlBotToken, cfg.controlApiRoot ? { apiRoot: cfg.controlApiRoot } : undefined);
   const deps = { ownerId: cfg.ownerId, commit: deployedCommit(join(dirname(fileURLToPath(import.meta.url)), "../..")), timeZone: cfg.timeZone, signal: signalTurn, policy: () => policies.current(), enabled: new Set(capabilities.map((c) => c.capability.id)) };
   void registerCommands(control, cfg.ownerId, CONTROL_COMMANDS, "control bot");
   void loop("control-poller", async () => void (await controlPollOnce(db, control, deps, 25, stop.signal)), 0);
-  void loop("control-sender", async () => (await controlSendPass(db, control, cfg.ownerId)).backoffMs, 500);
+  senders.push(loop("control-sender", async () => (await controlSendPass(db, control, cfg.ownerId)).backoffMs, 500));
   console.log(`control bot on, ${deps.commit}`);
 } else console.log("control bot off (SHUVI_CONTROL_BOT_TOKEN unset): alerts are queued and logged only");
 
 const files = telegramFiles(api, cfg.botToken, cfg.telegramApiRoot);
 startLoops(capabilityLoops(capabilities, { db, home: cfg.home, timeZone: cfg.timeZone, ownerId: cfg.ownerId, files, signal: stop.signal }), stop.signal);
 
-function shutdown(signal: string): void {
-  // Running turns are NOT stopped: they are detached, and outliving this process is why they are.
-  console.log(`${signal}: shuvi server exiting; ${runningTurns(db).length} turn(s) left running`);
+/** At exit, how long the drain's alerts may take to reach the owner, and how long a send in flight may take. */
+const CONTROL_FLUSH_MS = 5_000;
+const SEND_SETTLE_MS = 10_000;
+
+async function shutdown(signal: string): Promise<void> {
+  if (vitals.draining) {
+    // A second signal: the operator wants out now. Turns left running are reaped by the next server.
+    console.log(`${signal} again: shuvi server exiting without draining; ${runningTurns(db).length} turn(s) left running`);
+    process.exit(0);
+  }
+  vitals.draining = true;
+  vitals.drainDeadline = Date.now() + cfg.drainMs;
+  intake.abort();
+  console.log(`${signal}: shuvi server draining: no new updates or turns; ${runningTurns(db).length} turn(s) running, up to ${Math.round(cfg.drainMs / 1000)} s`);
+  try {
+    const r = await drain({ db, drainMs: cfg.drainMs, graceMs: cfg.drainGraceMs });
+    console.log(`drain: ${r.outcome === "idle" ? "done" : `deadline; stopped ${r.stopped.length} turn(s), killed ${r.killed.length}`}; ${r.pendingLeft} outbound row(s) left for the next server`);
+  } catch (e) {
+    console.error("drain failed:", e);
+  }
+  // The control bot gets a few seconds to deliver what the drain told the owner.
+  if (cfg.controlBotToken) {
+    const until = Date.now() + CONTROL_FLUSH_MS;
+    while (pendingControl(db).length && Date.now() < until) await Bun.sleep(200);
+  }
+  // Stop every loop, and let the senders finish the pass in flight (capped): a send cut off between Telegram
+  // accepting it and its id being recorded would be sent again by the next server.
   stop.abort();
+  const settled = await Promise.race([Promise.all(senders).then(() => true), Bun.sleep(SEND_SETTLE_MS).then(() => false)]);
+  console.log(`shuvi server exiting${settled ? "" : " (a send was still in flight after the cap)"}`);
   process.exit(0);
 }
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));

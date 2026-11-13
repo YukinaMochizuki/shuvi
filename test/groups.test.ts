@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Update } from "grammy/types";
-import { CALLED_PREFIX, CONTEXT_HEADING } from "../src/agent/render.ts";
+import { CALLED_PREFIX, CONTEXT_HEADING, formatTime } from "../src/agent/render.ts";
 import { runTurn } from "../src/agent/turn.ts";
 import { isTrigger, TriggerScan, type BotIdentity } from "../src/agent/triggers.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
@@ -516,10 +516,15 @@ describe("a group turn", () => {
     record(db, policy, groupUpdate("@shuvi_test_bot good night", ALICE));
     await run(db, policy, [{ token: "Good night." }]);
     const chat = groupChat(db);
-    db.$client.run("update chat_events set status = 'sent', at = '2026-11-10T22:00:00.000Z' where chat_id = ?", [chat.id]);
+    // Relative to now, so the test cannot rot: the night before is ~2 days ago, the morning a minute ago.
+    const night = new Date(Date.now() - 2 * 24 * 3600_000 - 3 * 3600_000).toISOString();
+    const morning = new Date(Date.now() - 60_000).toISOString();
+    db.$client.run("update chat_events set status = 'sent', at = ? where chat_id = ?", [night, chat.id]);
+    // The good-night turn ended that night too, so the morning's chatter is not a follow-up to it.
+    db.$client.run("update turns set started_at = ?, ended_at = ? where chat_id = ?", [night, night, chat.id]);
     for (let i = 1; i <= 12; i++) record(db, policy, groupUpdate(`chatter ${i}`, i % 2 ? ALICE : BOB));
     record(db, policy, groupUpdate("@shuvi_test_bot morning, what did I miss?", ALICE));
-    db.$client.run("update chat_events set at = '2026-11-13T01:00:00.000Z' where chat_id = ? and at > '2026-11-11'", [chat.id]);
+    db.$client.run("update chat_events set at = ? where chat_id = ? and at > ?", [morning, chat.id, night]);
     const { adapter } = await run(db, policy, [{ token: "Not much." }]);
     expect(adapter.calls[0]!.method).toBe("continueRun");
     const prompt = String(adapter.calls[0]!.prompt);
@@ -532,13 +537,16 @@ describe("a group turn", () => {
     record(db2, policy, groupUpdate("@shuvi_test_bot good night", ALICE));
     await run(db2, policy, [{ token: "Good night." }]);
     const chat2 = groupChat(db2);
-    db2.$client.run("update chat_events set status = 'sent', at = '2026-11-10T22:00:00.000Z' where chat_id = ?", [chat2.id]);
+    db2.$client.run("update chat_events set status = 'sent', at = ? where chat_id = ?", [night, chat2.id]);
+    db2.$client.run("update turns set started_at = ?, ended_at = ? where chat_id = ?", [night, night, chat2.id]);
     record(db2, policy, groupUpdate("morning all", BOB));
     record(db2, policy, groupUpdate("@shuvi_test_bot morning, what did I miss?", ALICE));
-    db2.$client.run("update chat_events set at = '2026-11-13T01:00:00.000Z' where chat_id = ? and at > '2026-11-11'", [chat2.id]);
+    db2.$client.run("update chat_events set at = ? where chat_id = ? and at > ?", [morning, chat2.id, night]);
     const b = await run(db2, policy, [{ token: "Not much." }]);
     const p2 = String(b.adapter.calls[0]!.prompt);
-    expect(p2).toMatch(/^\(It is now [^\n]+\. The last message here was [^\n]+ ago\.\)\n\(Earlier, before you were called; context only:\)\n\[#\d+ · Fri 11\/13 01:00 · Bob Lee\] morning all/);
+    expect(p2).toMatch(/^\(It is now [^\n]+\. The last message here was [^\n]+ ago\.\)\n\(Earlier, before you were called; context only:\)\n\[#\d+ · [^\]]+ · Bob Lee\] morning all/);
+    expect(p2).toContain(`· ${formatTime(morning, "UTC")} · Bob Lee] morning all`);
+    expect(p2).toContain("The last message here was 2 days ago");
   });
 
   test("B1: the person she answers writes again while she thinks, and the turn makes no tool call: the next turn answers it", async () => {

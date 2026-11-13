@@ -223,6 +223,8 @@ const note = (unread: number | undefined): PromptPart[] => (unread ? [text(unrea
 export interface InputOptions extends RenderOptions {
   /** The "It is now…" line (`timeNote`), first of all, when the turn opens after a gap or a fresh start. */
   timeNote?: string;
+  /** The input repeats a turn a restart cut off, in the same conversation: `RETRY_NOTE` before it. */
+  retry?: boolean;
   /** How many older unread messages are not shown. */
   unread?: number;
   /** How many of the first events are context from before she was called (they carry no authority). */
@@ -232,6 +234,13 @@ export interface InputOptions extends RenderOptions {
 }
 
 export const CONTEXT_HEADING = "(Earlier, before you were called; context only:)";
+/**
+ * Before the input of a turn that answers again what a turn cut off by a restart was answering (a draining
+ * server's deadline, server/drain.ts), in the same conversation: the model has already seen these messages,
+ * and may have said part of its answer. A framework line, like the time line: no message can produce it.
+ */
+export const RETRY_NOTE =
+  "(Your previous turn on the messages below was cut off by a restart before it finished. They are shown again so you can finish answering them: what you already sent was delivered, or will be, so do not repeat it.)";
 export const CALLED_PREFIX = "(You were called by";
 /** The heading before the messages that called her: which ones did (the owner's carry `⚙ owner`). */
 export function calledHeading(seqs: number[]): string {
@@ -257,7 +266,7 @@ export function renderTurnInput(events: ChatEvent[], timeZone: string, perceive:
   return joinParts([...timeLine(opts), ...inputParts(events, timeZone, perceive, opts)]);
 }
 
-const timeLine = (opts: InputOptions): PromptPart[] => (opts.timeNote ? [text(opts.timeNote)] : []);
+const timeLine = (opts: InputOptions): PromptPart[] => [...(opts.timeNote ? [text(opts.timeNote)] : []), ...(opts.retry ? [text(RETRY_NOTE)] : [])];
 
 /** The opening of a fresh conversation: the recent exchange for context, then what to answer now. */
 export function renderWithHistory(history: ChatEvent[], input: ChatEvent[], timeZone: string, perceive: Perceive = blind, opts: InputOptions = {}): Prompt {

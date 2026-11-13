@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import { parseLoopbackListen } from "./listen.ts";
 
 /**
  * Configuration, all from the environment, read in one place. The server and the runner child read the
@@ -36,6 +37,12 @@ import { join, resolve } from "node:path";
  *                             /login for a session cookie. With neither set, the console is off
  *   SHUVI_CONSOLE_URL         the console as the owner opens it (https://<host>.<tailnet>.ts.net): links to a
  *                             turn in the control bot, and the one non-loopback Host the console answers
+ *   SHUVI_DRAIN_SEC           on SIGTERM, how long running turns get to finish before they are stopped
+ *                             (default 600; server/drain.ts). A container's stop timeout must exceed it
+ *   SHUVI_DRAIN_GRACE_SEC     after the stop at the drain deadline, how long a turn has to close itself
+ *                             before it is killed (default 15)
+ *   SHUVI_METRICS_LISTEN      where /healthz and /metrics listen, LOOPBACK ONLY (default 127.0.0.1:8788;
+ *                             server/health.ts); anything else is refused here, at startup
  *
  * These are the framework's own variables. A capability reads its own (e.g. SHUVI_WEB,
  * SHUVI_TAVILY_API_KEY) in its own module, src/capabilities/<id>/, which lists them in its header.
@@ -59,10 +66,29 @@ export interface Config {
   transcriptDays: number;
   secretsFile: string;
   console: { listen: string; users?: string[]; token?: string; url?: string };
+  drainMs: number;
+  drainGraceMs: number;
+  metricsListen: string;
 }
 
 export const DEFAULT_CONSOLE_LISTEN = "127.0.0.1:8787";
 export const DEFAULT_SECRETS_FILE = "/etc/shuvi.secrets.yaml";
+export const DEFAULT_DRAIN_SEC = 600;
+export const DEFAULT_METRICS_LISTEN = "127.0.0.1:8788";
+export const DEFAULT_DRAIN_GRACE_SEC = 15;
+
+/** SHUVI_METRICS_LISTEN → Bun.serve's options; refuses anything that is not loopback. */
+export function parseMetricsListen(listen: string): { hostname: string; port: number } {
+  return parseLoopbackListen("SHUVI_METRICS_LISTEN", listen, DEFAULT_METRICS_LISTEN);
+}
+
+function seconds(name: string, fallback: number): number {
+  const v = process.env[name];
+  if (!v) return fallback * 1000;
+  const n = Number(v);
+  if (!(n >= 0)) throw new Error(`${name} must be a number of seconds, 0 or more`);
+  return Math.round(n * 1000);
+}
 
 function minutes(name: string, fallback: number): number {
   const v = process.env[name];
@@ -108,7 +134,17 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     transcriptDays: days("SHUVI_TRANSCRIPT_DAYS", 30),
     secretsFile: process.env.SHUVI_SECRETS_FILE || DEFAULT_SECRETS_FILE,
     console: consoleFromEnv(process.env),
+    drainMs: seconds("SHUVI_DRAIN_SEC", DEFAULT_DRAIN_SEC),
+    drainGraceMs: seconds("SHUVI_DRAIN_GRACE_SEC", DEFAULT_DRAIN_GRACE_SEC),
+    metricsListen: metricsListenFrom(process.env),
   };
+}
+
+/** SHUVI_METRICS_LISTEN, checked: a non-loopback address throws, so the server refuses to start. */
+export function metricsListenFrom(env: Record<string, string | undefined>): string {
+  const listen = env.SHUVI_METRICS_LISTEN?.trim() || DEFAULT_METRICS_LISTEN;
+  parseMetricsListen(listen);
+  return listen;
 }
 
 function days(name: string, fallback: number): number {

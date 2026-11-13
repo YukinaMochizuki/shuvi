@@ -1,0 +1,18 @@
+# The image takes package.json, bun.lock, tsconfig.json, drizzle/ and src/ (Dockerfile); nothing else needs
+# to reach the build, and data/ must never.
+.git
+.github
+.ws-cache
+node_modules
+data
+home
+.env*
+*.env
+*secrets*
+*.db
+*.db-wal
+*.db-shm
+computer
+docs
+scripts
+test
