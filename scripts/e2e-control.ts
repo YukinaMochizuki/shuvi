@@ -17,6 +17,12 @@
  *      messages, with no failure attempt used and one alert. This pins the driver's real error text.
  *   6. The console's links: a failed turn's alert links to its page, `/turn <id>` answers a paragraph and
  *      the link, and the page itself opens with the token fallback (a session cookie from /login).
+ *   7. Models: `/provider add` against a fake OpenAI-compatible endpoint lists its `/models` on a card;
+ *      pressing two adds them and the server probes them in the background (one calls the tool, one answers
+ *      in text: ⚠), and the card and `/models` show it. Then `/model` in the DM while a turn runs: 👌 and
+ *      nothing else in the chat, a card in the control bot; a model, then lossless: the card says the turn
+ *      will be stopped, the turn is stopped, the switch is applied, and the card is edited to the result.
+ *      The stopped turn's message is answered on the new model.
  *
  *   bun scripts/e2e-control.ts
  */
@@ -58,6 +64,9 @@ function reply(text: string): Response {
 }
 let approvalPrompt = "";
 let freshPrompt = "";
+/** "stall" hangs its first turn (until the switch stops it); answered after that. */
+let stalled = false;
+const turnModels: string[] = [];
 const anthropic = Bun.serve({
   port: 0,
   idleTimeout: 120,
@@ -71,7 +80,13 @@ const anthropic = Bun.serve({
     // Only what is new in the last message: a fresh conversation opens with the chat's earlier messages
     // ("please fail", "hang" among them) before "(New messages:)".
     const last = JSON.stringify(body.messages?.at(-1)).split("(New messages:)").at(-1)!;
+    turnModels.push(String((body as { model?: string }).model));
     if (last.includes("still there")) freshPrompt = all;
+    if (last.includes("stall") && !stalled) {
+      stalled = true;
+      await Bun.sleep(60_000); // only ever cut short by the switch (or the wall-clock limit)
+      return reply("must not be sent");
+    }
     // "hang" first: a continued conversation may fold the earlier, failed "please fail" into the same
     // user message.
     if (last.includes("hang")) {
@@ -81,6 +96,21 @@ const anthropic = Bun.serve({
     if (last.includes("please fail")) return Response.json({ type: "error", error: { type: "invalid_request_error", message: "forced failure for the e2e" } }, { status: 400 });
     if (all.includes("Approval #")) approvalPrompt = all;
     return reply("Noted.");
+  },
+});
+
+// ---- a fake OpenAI-compatible endpoint: its /models, and the probes' Chat Completions -------------------
+const sse = (chunks: unknown[]) => new Response(chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+const chunk = (delta: unknown, finish: string | null = null) => ({ id: "c", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta, finish_reason: finish }] });
+const lab = Bun.serve({
+  port: 0,
+  async fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === "/v1/models") return Response.json({ data: [{ id: "qwen3", max_model_len: 32768 }, { id: "chatty", max_model_len: 8192 }, { id: "nolen" }] });
+    const body = (await req.json()) as { model: string; tools?: unknown[] };
+    if (!body.tools) return Response.json({ error: { message: "this model does not support image input" } }, { status: 400 });
+    if (body.model === "chatty") return sse([chunk({ role: "assistant", content: "pong!" }), chunk({}, "stop")]);
+    return sse([chunk({ role: "assistant", content: null, tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "ping", arguments: "{}" } }] }), chunk({}, "tool_calls")]);
   },
 });
 
@@ -121,6 +151,7 @@ function cleanup() {
   tg.stop();
   control.stop();
   anthropic.stop(true);
+  lab.stop(true);
 }
 const controlTexts = () => control.sent().map((b) => String(b.text));
 const chatTexts = () => tg.sent().map((b) => String(b.text));
@@ -144,7 +175,7 @@ const ownerScope = JSON.stringify({ type: "chat", chat_id: OWNER });
 const groupScope = (g: number) => JSON.stringify({ type: "chat_member", chat_id: g, user_id: OWNER });
 await until("the group menu", () => menu(tg).length >= 2);
 check(
-  [...menu(tg)].sort().join("|") === [`${ownerScope} new,stop`, `${groupScope(-1009999999999)} new,stop`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn`,
+  [...menu(tg)].sort().join("|") === [`${ownerScope} new,stop,model`, `${groupScope(-1009999999999)} new,stop,model`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn,model,models,provider`,
   `each bot registered its commands for the owner's chat, and the main bot for the owner in the listed group (${menu(tg)} / ${menu(control)})`,
 );
 
@@ -162,7 +193,7 @@ check(detail!.includes("<b>2. Fake Hiking Club</b>") && detail!.includes("<b>Off
 writeFileSync(join(dataDir, "home", "policy.yaml"), `chats:\n  "-1008888888888":\n    title: Fake Chess Club\n`);
 await until("the group menus to follow the policy change", () => menu(tg).length >= 3 && tg.sent("deleteMyCommands").length >= 1);
 await Bun.sleep(1500); // a few more policy passes: nothing changed, so no more calls
-check(menu(tg).length === 3 && menu(tg)[2] === `${groupScope(-1008888888888)} new,stop`, `a group added to policy gets the owner's menu (${menu(tg)})`);
+check(menu(tg).length === 3 && menu(tg)[2] === `${groupScope(-1008888888888)} new,stop,model`, `a group added to policy gets the owner's menu (${menu(tg)})`);
 check(tg.sent("deleteMyCommands").map((b) => JSON.stringify(b.scope)).join("|") === groupScope(-1009999999999), `a group removed from policy has its menu cleared (${JSON.stringify(tg.sent("deleteMyCommands"))})`);
 
 // ---- 2. a forced failure, retried to the cap ---------------------------------------------------------
@@ -242,6 +273,86 @@ check(login.status === 303 && cookie.startsWith("shuvi_console="), "the token bu
 const failedPage = await fetch(`${consoleBase}/turns/${failedTurn.id}`, { headers: { cookie } });
 const failedHtml = await failedPage.text();
 check(failedPage.status === 200 && failedHtml.includes("Why it ended that way") && failedHtml.includes("System prompt"), "and with it the failed turn's page opens, saying why it failed");
+
+// ---- 7. models: /provider add, probes, /models, and the switch card -----------------------------------------
+type Kb = { inline_keyboard: { text: string; callback_data: string }[][] };
+let nextControlUpdate = 100;
+const controlSay = (text: string) => control.updates.push(dmUpdate(nextControlUpdate++, text));
+const pressButton = (data: string) => control.updates.push({ update_id: nextControlUpdate++, callback_query: { id: `cq${nextControlUpdate}`, from: { id: OWNER, is_bot: false, first_name: "Owner" }, chat_instance: "x", data } } as unknown as Update);
+/** The control message whose first text starts with `start`: its id, and what it shows now (its last send or edit). */
+function cardNow(start: string | RegExp): { id: number; text: string; buttons: { text: string; callback_data: string }[] } | null {
+  const sends = control.calls.filter((c) => c.method === "sendMessage");
+  const i = sends.findIndex((c) => (typeof start === "string" ? String(c.body.text).startsWith(start) : start.test(String(c.body.text))));
+  if (i < 0) return null;
+  const id = 9000 + i; // FakeTelegram numbers the messages it was sent from 9000
+  const last = [...control.calls].reverse().find((c) => (c.method === "editMessageText" && c.body.message_id === id) || c === sends[i]!)!;
+  return { id, text: String(last.body.text), buttons: ((last.body.reply_markup as Kb | undefined)?.inline_keyboard ?? []).flat() };
+}
+const buttonOf = (card: ReturnType<typeof cardNow>, text: string) => {
+  const b = card?.buttons.find((x) => x.text === text);
+  return b ? b.callback_data : fail(`no button "${text}" on the card (${card?.buttons.map((x) => x.text).join(" | ")})`);
+};
+
+const labUrl = `http://127.0.0.1:${lab.port}/v1`;
+// The card is sent as it is when the sender gets to it: the listing may already be on it.
+const LAB_CARD = /^(Added provider lab|lab \(http)/;
+controlSay(`/provider add lab ${labUrl}`);
+await until("the listing on the provider card", () => !!cardNow(LAB_CARD)?.text.includes("lists 3 models"));
+let labCard = cardNow(LAB_CARD)!;
+check(labCard.buttons.map((b) => b.text).join("|") === "qwen3 · 32768 tokens|chatty · 8192 tokens|nolen · no context length|Done", `/provider add lists the endpoint's /models on its card (${labCard.buttons.map((b) => b.text).join("|")})`);
+pressButton(buttonOf(labCard, "qwen3 · 32768 tokens"));
+await until("qwen3 added", () => !!cardNow(LAB_CARD)?.text.includes("Added lab/qwen3"));
+pressButton(buttonOf(cardNow(LAB_CARD), "chatty · 8192 tokens"));
+await until("both probes to finish on the card", () => /lab\/qwen3: probe ok, \d+ ms/.test(cardNow(LAB_CARD)!.text) && /lab\/chatty: probe ⚠ text-instead/.test(cardNow(LAB_CARD)!.text), 30_000);
+labCard = cardNow(LAB_CARD)!;
+check(labCard.buttons.map((b) => b.text).slice(0, 2).join("|") === "✓ qwen3 · 32768 tokens|✓ ⚠ chatty · 8192 tokens", `the probes ran in the server, and the card marks both models, ⚠ the one that answered in text (${labCard.buttons.map((b) => b.text).join("|")})`);
+const labRows = db.$client.query("select model, context_window, probe_status from models where provider_id = (select id from model_providers where name = 'lab') order by id").all() as { model: string; context_window: number; probe_status: string }[];
+check(JSON.stringify(labRows) === JSON.stringify([{ model: "qwen3", context_window: 32768, probe_status: "ok" }, { model: "chatty", context_window: 8192, probe_status: "text-instead" }]), `the catalog has them with their context windows and probe states (${JSON.stringify(labRows)})`);
+
+controlSay("/models add claude/opus");
+await until("the /models add reply", () => controlTexts().includes("Added claude/opus."));
+controlSay("/models");
+await until("the /models card", () => !!cardNow(/^Models/));
+const modelsCard = cardNow(/^Models/)!;
+check(
+  modelsCard.text.includes("1. claude/claude-sonnet-4-5 ★") && /3\. lab\/qwen3\n   32768 tokens · no vision · probe ok, \d+ ms/.test(modelsCard.text) && /4\. lab\/chatty\n   8192 tokens · no vision · probe ⚠ text-instead, \d+ ms/.test(modelsCard.text),
+  `/models shows each model with its probe state (${JSON.stringify(modelsCard.text)})`,
+);
+
+// A turn that hangs, then /model in the DM.
+const cardsBefore = control.sent().length;
+tg.updates.push(dmUpdate(4, "stall here"));
+await until("the stalled turn to start", () => (db.$client.query("select count(*) as n from turns where status = 'running' and pid is not null").get() as { n: number }).n === 1, 40_000);
+const stalledTurn = (db.$client.query("select id from turns where status = 'running'").get() as { id: number }).id;
+const reactionsBefore = tg.sent("setMessageReaction").length;
+const chatBefore = chatTexts().length;
+tg.updates.push(dmUpdate(5, "/model"));
+await until("the model card", () => control.sent().length > cardsBefore && !!cardNow("Model for chat 1"));
+await until("the 👌", () => tg.sent("setMessageReaction").length > reactionsBefore);
+check(JSON.stringify(tg.sent("setMessageReaction").at(-1)!.reaction) === JSON.stringify([{ type: "emoji", emoji: "👌" }]) && chatTexts().length === chatBefore, "/model in the DM gets 👌 and nothing else in the chat");
+let switchCard = cardNow("Model for chat 1")!;
+check(switchCard.text.startsWith("Model for chat 1 (tg 1001): now claude/claude-sonnet-4-5") && switchCard.buttons.map((b) => b.text).join("|") === "✓ claude/claude-sonnet-4-5|claude/opus|lab/qwen3|⚠ lab/chatty|Cancel", `the control bot sent the card: the current model ✓, the one whose probe got no tool call ⚠ (${switchCard.buttons.map((b) => b.text).join("|")})`);
+check((db.$client.query("select status from turns where id = ?").get(stalledTurn) as { status: string }).status === "running", "and the running turn was not stopped by /model itself");
+pressButton(buttonOf(switchCard, "claude/opus"));
+await until("the mode step", () => cardNow("Model for chat 1")!.text.startsWith("Switch chat 1"));
+switchCard = cardNow("Model for chat 1")!;
+check(
+  /^Switch chat 1 \(tg 1001\) to claude\/opus:\nLossless: copies the whole conversation \(\d+ messages\) to claude\/opus\nLossy: claude\/opus starts fresh with the last 10 messages\nturn \d+ is running and will be stopped$/.test(switchCard.text) && switchCard.text.endsWith(`turn ${stalledTurn} is running and will be stopped`),
+  `the mode step says what each mode does here, and that the running turn will be stopped (${JSON.stringify(switchCard.text)})`,
+);
+const requestsBefore = turnModels.length;
+pressButton(buttonOf(switchCard, "Lossless"));
+await until("the card to show the result", () => cardNow("Model for chat 1")!.text.includes("(lossless,"), 20_000);
+switchCard = cardNow("Model for chat 1")!;
+const stoppedTurn = db.$client.query("select status, error from turns where id = ?").get(stalledTurn) as { status: string; error: string | null };
+check(stoppedTurn.status === "stopped" && stoppedTurn.error !== WALL_CLOCK_STOP, `the running turn was stopped by the switch (${stoppedTurn.status}, ${stoppedTurn.error})`);
+check(
+  new RegExp(`^chat 1 \\(tg 1001\\) → claude/opus \\(lossless, \\d+ messages? carried\\); stopped turn ${stalledTurn}$`).test(switchCard.text) && switchCard.buttons.length === 0,
+  `the card was edited to the result, with no buttons (${JSON.stringify(switchCard.text)})`,
+);
+check((db.$client.query("select model, conversation_model from chats where id = ?").get(chatId) as { model: string }).model === "claude/opus", "the chat runs on the new model");
+await until("the stopped turn's message answered on the new model", () => chatTexts().filter((t) => t === "Noted.").length >= 3, 30_000);
+check(turnModels.slice(requestsBefore).some((m) => m.includes("opus")), `the next turn ran on opus (${turnModels.slice(requestsBefore).join(", ")})`);
 
 log("PASS");
 cleanup();
