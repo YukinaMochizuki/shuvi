@@ -90,7 +90,10 @@ const SECURITY_HEADERS: Record<string, string> = {
   // Inline style attributes only (a size bar's width, a speaker's colour); no inline script at all.
   "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "x-content-type-options": "nosniff",
-  "referrer-policy": "no-referrer",
+  // Not `no-referrer`: under it a browser serializes a form POST's Origin as `null` (Fetch, "append a
+  // request Origin header"), and every write from the Settings page would be refused. `same-origin` sends
+  // the Origin (and a Referer) to this origin only, and nothing to any other site.
+  "referrer-policy": "same-origin",
   "cache-control": "no-store",
 };
 

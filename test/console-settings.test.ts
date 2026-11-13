@@ -126,6 +126,13 @@ describe("the Settings page reads the catalog", () => {
     expect(html).toContain(`name="csrf" value="${CSRF}"`);
   });
 
+  test("the page lets a browser send its Origin on the forms' POSTs: its referrer policy is same-origin, never no-referrer", async () => {
+    // Under `no-referrer` a browser sends `Origin: null` on a form POST (Fetch, "append a request Origin
+    // header"), and every write from this page was refused. Checked in real Chromium when it was found.
+    const res = await handleConsole(deps(setup()), new Request(`${BASE}/settings`, { headers: { [LOGIN_HEADER]: LOGIN } }));
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
+  });
+
   test("an empty catalog opens the add-provider form", async () => {
     const db = memDb();
     const t = text(await get(db, "/settings"));
