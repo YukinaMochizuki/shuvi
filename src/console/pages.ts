@@ -52,12 +52,34 @@ export interface PageContext {
   now?: number;
   /** How long transcripts are kept (SHUVI_TRANSCRIPT_DAYS), to say why one is gone. */
   transcriptDays?: number;
-  /** This session's CSRF token (server.ts), for the delete form. Unset: no form (a test rendering a page). */
+  /** This session's CSRF token (server.ts), for the page's writes: the delete form, the chat page's Profile select. Unset: no form (a test rendering a page). */
   csrf?: string;
   /** The page's own path and query, where a delete without script comes back to. */
   here?: string;
   /** A delete's result, shown once at the top of the page it came back to (delete-write.ts). */
   notice?: Raw;
+  /** The chat page's Profile select: the profiles there are, and the result of the last switch (shown once). */
+  profiles?: ProfileChoice;
+}
+
+export interface ProfileChoice {
+  names: readonly { name: string; label?: string }[];
+  /** The chat's profile, as stored (it may name one that no longer exists). */
+  current?: string;
+  flash?: { tone: "ok" | "refused" | "failed"; text: string };
+}
+
+/**
+ * The Profile select next to a chat's title: Base or one of the profiles, posted at once (`/chats/<id>/profile`,
+ * a write: console.js submits it on change; without script, the Switch button does).
+ */
+function profileSelect(chatId: number, csrf: string | undefined, p: ProfileChoice): Raw {
+  const known = p.current === undefined || p.names.some((n) => n.name === p.current);
+  return html`<form class="chprof" method="post" action="/chats/${chatId}/profile"><input type="hidden" name="csrf" value="${csrf ?? ""}">
+<label>Profile <select name="profile" data-autosubmit aria-label="Profile"><option value=""${p.current === undefined ? raw(" selected") : ""}>Base</option>${p.names.map(
+    (n) => html`<option value="${n.name}"${n.name === p.current ? raw(" selected") : ""}>${n.name}${n.label ? ` · ${n.label}` : ""}</option>`,
+  )}${known ? "" : html`<option value="${p.current}" selected disabled>${p.current} (gone: runs on Base)</option>`}</select></label>
+<button class="btn" type="submit" data-autosubmit-btn>Switch</button></form>`;
 }
 
 export const TURNS_PER_PAGE = 50;
@@ -691,7 +713,10 @@ function promptTab(ctx: PageContext, turn: Turn, prompt: PromptText | undefined,
   const sizes = prompt.sections.map((s) => s.end - s.start);
   const max = Math.max(1, ...sizes);
   const allId = "prompt-all";
+  // The profile the turn ran under (capabilities/memory/layers.ts), recorded at its start; each section's layer below.
+  const profile = turn.profile;
   const summary = html`<div class="psum"><span><b class="num">${tokens(prompt.text.length)}</b> chars · ~${short(Math.round(prompt.text.length / 4))} tokens · ${prompt.sections.length} sections · <span class="mono">${prompt.hash.slice(0, 10)}</span></span>
+<span class="pprof">on ${profile ? html`profile <b>${profile}</b>` : "Base"}</span>
 <span>${prev ? (changed ? html`changed since <a href="/turns/${prev.turnId}?tab=prompt">turn ${prev.turnId}</a>` : html`unchanged since <a href="/turns/${prev.turnId}?tab=prompt">turn ${prev.turnId}</a>`) : "the first recorded in this chat"}</span>
 <span class="right">${changed ? html`<a href="${link(showDiff ? { tab: "prompt" } : { tab: "prompt", diff: "1" })}">${showDiff ? "Hide diff" : "Show diff"}</a>` : ""}<button class="copy" type="button" data-copy="${allId}" hidden>copy all</button></span></div><pre id="${allId}" hidden>${prompt.text}</pre>`;
   let diff: Raw = raw("");
@@ -705,7 +730,8 @@ function promptTab(ctx: PageContext, turn: Turn, prompt: PromptText | undefined,
   }
   const sections = prompt.sections.map((s, i) => {
     const text = prompt.text.slice(s.start, s.end);
-    return html`<details ${openAttr()}><summary><span class="lbl">${s.label}</span><span class="bar"><i style="width:${Math.max(2, Math.round((sizes[i]! / max) * 100))}%"></i></span><span class="size">${size(text)}</span></summary><div class="inner">${block("", text, { prose: true, open: true })}</div></details>`;
+    const layer = s.layer;
+    return html`<details ${openAttr()}><summary><span class="lbl">${s.label}${layer ? html`<span class="psrc src-${layer === "base" ? "base" : layer === "code" ? "code" : "profile"}">· ${layer}</span>` : ""}</span><span class="bar"><i style="width:${Math.max(2, Math.round((sizes[i]! / max) * 100))}%"></i></span><span class="size">${size(text)}</span></summary><div class="inner">${block("", text, { prose: true, open: true })}</div></details>`;
   });
   return html`${summary}${diff}<div class="sections">${sections}</div>`;
 }
@@ -948,7 +974,8 @@ export function chatPage(ctx: PageContext, chatId: number, q: URLSearchParams = 
   const failed = spans.filter((t) => t.status === "failed").length;
   const detail = html`<div class="detail">
 <a class="back" href="${href("/turns", currentFilters(q))}">← All chats</a>
-<div class="head"><div class="title"><h1>${chatName(chat)}</h1><span class="meta">${chat.kind === "group" ? "group" : "direct chat"}</span></div>
+<div class="head"><div class="title"><h1>${chatName(chat)}</h1><span class="meta">${chat.kind === "group" ? "group" : "direct chat"}</span>${ctx.profiles ? profileSelect(chat.id, ctx.csrf, ctx.profiles) : ""}</div>
+${ctx.profiles?.flash ? html`<p class="notice ${ctx.profiles.flash.tone} chflash" role="status">${ctx.profiles.flash.text}</p>` : ""}
 <p class="facts">telegram <span class="mono">${chat.tgChatId}</span><span class="sep"></span>cursor <span class="mono">#${chat.cursorSeq}</span><span class="sep"></span>${
     chat.backendSessionId ? html`conversation with <b>${short(chat.contextTokens)}</b> tokens of context` : "a fresh conversation next"
   }<span class="sep"></span><a href="${href("/turns", { chat: chat.id })}">${spans.length} turn${spans.length === 1 ? "" : "s"}</a>${failed ? html`, <span class="c-failed">${failed} failed</span>` : ""}</p></div>

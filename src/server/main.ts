@@ -185,7 +185,20 @@ if (consoleOn(cfg.console)) {
     "console",
     async () => {
       if (served) return;
-      startConsole(cfg.console, { db, timeZone: cfg.timeZone, dataDir: cfg.dataDir, ownerId: cfg.ownerId, transcriptDays: cfg.transcriptDays }, stop.signal);
+      startConsole(
+        cfg.console,
+        {
+          db,
+          timeZone: cfg.timeZone,
+          dataDir: cfg.dataDir,
+          ownerId: cfg.ownerId,
+          transcriptDays: cfg.transcriptDays,
+          home: cfg.home,
+          // Home's Preview builds a chat's prompt as a turn would (the owner's name is a turn's own, from his message).
+          prompt: { capabilities, policy: () => policies.current(), ownerId: cfg.ownerId, owner: cfg.ownerLanguage ? { language: cfg.ownerLanguage } : {} },
+        },
+        stop.signal,
+      );
       served = true;
     },
     5000,

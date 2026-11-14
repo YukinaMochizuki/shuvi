@@ -9,6 +9,8 @@
 /** What a page (or a piece swapped into one) needs once it is in: its copy buttons shown, the selected row in view. */
 function arrive(root) {
   for (const b of root.querySelectorAll("button.copy[data-copy][hidden]")) b.hidden = false;
+  // A select that acts on change (the chat page's Profile, Home's Preview chat): its button is for no script only.
+  for (const b of root.querySelectorAll("[data-autosubmit-btn]")) b.hidden = true;
   const on = root.querySelector(".rows a.row.on");
   if (on) on.scrollIntoView({ block: "nearest" });
   // A link to one tool call (`#call-<id>`, from Home's history): open that call and bring it into view.
@@ -36,6 +38,11 @@ document.addEventListener("click", async (e) => {
     b.textContent = "copy failed";
   }
   setTimeout(() => (b.textContent = "copy"), 1200);
+});
+
+document.addEventListener("change", (e) => {
+  const s = e.target instanceof HTMLSelectElement && e.target.hasAttribute("data-autosubmit") ? e.target : null;
+  if (s?.form) s.form.requestSubmit();
 });
 
 document.addEventListener("keydown", (e) => {

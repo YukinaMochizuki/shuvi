@@ -301,7 +301,10 @@ const turnPage = await consoleGet(`/turns/${last.id}`, "owner@example.com");
 const turnHtml = await turnPage.text();
 check(turnPage.status === 200, `the console serves turn ${last.id} to a tailnet user on the list`);
 const promptHtml = await (await consoleGet(`/turns/${last.id}?tab=prompt`, "owner@example.com")).text();
-check(promptHtml.includes('<span class="lbl">capability: speech</span>') && promptHtml.includes('<span class="lbl">capability: stickers</span>'), "its system prompt tab shows the prompt, by section");
+check(
+  promptHtml.includes('<span class="lbl">capability: speech<span class="psrc src-code">· code</span></span>') && promptHtml.includes('<span class="lbl">capability: stickers<span class="psrc src-code">· code</span></span>') && promptHtml.includes('<span class="pprof">on Base</span>'),
+  "its system prompt tab shows the prompt, by section, each with its layer, and the profile it ran under (none)",
+);
 check(turnHtml.includes('<span class="name">find_sticker</span>') && turnHtml.includes("&quot;hello&quot;") && turnHtml.includes("Sent Cats/1."), "its conversation shows the tool calls, with their arguments and results");
 check(turnHtml.includes(`<b>${last.input_tokens.toLocaleString("en-US")}</b> in / <b>${last.output_tokens.toLocaleString("en-US")}</b> out`) && turnHtml.includes("cache <b>"), `and the usage (${last.input_tokens} in / ${last.output_tokens} out)`);
 check(turnHtml.includes("send me a sticker"), "and the input");

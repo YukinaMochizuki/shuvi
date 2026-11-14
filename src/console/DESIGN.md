@@ -195,6 +195,38 @@ Three panes, full height, each scrolling on its own (home.ts):
 - **History** (320px, folds to a 28px strip): entries as rows, the selected one marked like a list row.
 - Under 760px one pane at a time (`?pane=files|edit|history`), with ‹ back links and a History button.
 
+**Profiles** (docs/console.md "Profiles"; home.ts `layerSwitch`, `layerBar`, `previewPane`):
+
+```
+┌ FILES ─────────────────────────┐┌ directives.md │ Preview ─────────────────────────────────┐
+│ [Base] [Work hours · work ▾] +New││ work / directives.md               your rules for her  │
+│ Work hours work             ⋯  ││ ● work's own version. … [Base's version][Remove the …] │
+│ Used by: DM · Owner, …         ││   Base changed since … (2 changes) · View · [Apply them]│
+│ HERSELF                        ││  1 - Answer in bullet points…   (CodeMirror)           │
+│ directives.md          2m ago  ││ [Note (optional)                     ] [Save to work]  │
+│ own · ● edited by shuvi        │└─────────────────────────────────────────────────────────┘
+│ persona/public.md      1d ago  │
+│ inherits · ● edited by you     │
+└────────────────────────────────┘
+```
+
+- **The switch**: one row: Base (filled when it is the layer shown), a select of the profiles (filled accent when
+  one is shown; picking one opens it), "+ New profile" small at the right. Under it, on a profile: its label and
+  name, the ⋯ menu (Rename, Duplicate, Delete open a small form under the switch; Delete in red, naming the chats
+  that go back to Base), "Used by", and how many files it has of its own. On Base: "Used by" the chats on none.
+- **A row** in a profile's view: the name and when, then ONE line: the status first (`own` in the accent,
+  `inherits` faint, `hidden` in pink, `only in <p>` in the accent), then who edited it. A hidden playbook's name is
+  struck through. Nothing else in a row: Hide / Unhide is in the open playbook's bar.
+- **The bar** over a file, under the header (whose right keeps the file's hint, small and faint): inherited
+  (grey: Edit in Base, Make a version, Hide in <p> for a playbook), own (accent tint: Copy from Base when empty,
+  Base's version, Hide, Remove the version; and a second line when Base changed since), hidden (pink: Edit in
+  Base, Unhide), asking to remove (red). Each button is a small POST form of its own: a profile write never
+  carries the editor's text.
+- **Preview**: a tab beside the file's; a chat picker in the header; the sections as the turn page's System
+  prompt tab draws them, each label followed by its source (`· base` faint, `· <p>` accent, `· code` faint).
+- **A chat's page**: a Profile select next to the title (console.js posts it on change; a Switch button without
+  script), and the result once under it.
+
 The editor (editor/editor.ts) is the page's only extra script, bundled by Bun in the server (editor/bundle.ts), and
 only an upgrade: the page is a textarea and a form without it. It never rewrites text; the colours of its changes
 are GitHub's, as in the diff.

@@ -2289,6 +2289,380 @@ details.step.tool.targeted {
   margin-bottom: var(--s2);
 }
 
+/* ---- home: profiles, overlays of her files (home.ts) ------------------------------------------------- */
+.hlayers {
+  padding: 0 var(--s4) var(--s3);
+  margin-bottom: var(--s3);
+  border-bottom: 1px solid var(--line-soft);
+}
+.hlrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.hlbase {
+  flex: none;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--s3);
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  font-size: var(--t-small);
+}
+.hlbase:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+.hlbase.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--surface);
+  font-weight: 600;
+}
+.hlpick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: var(--s1);
+}
+.hlpick select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  background: var(--surface-2);
+  color: var(--ink-dim);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 var(--s1);
+  font-size: var(--t-small);
+}
+.hlpick.on select {
+  background: rgb(122 162 247 / 0.16);
+  border-color: var(--accent);
+  color: var(--ink);
+  font-weight: 600;
+}
+.hlnew {
+  flex: none;
+  font-size: var(--t-meta);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.hprof {
+  margin-top: var(--s3);
+}
+.hp1 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  font-size: var(--t-ui);
+}
+.hp1 .faint {
+  font-size: var(--t-meta);
+}
+.hp2,
+.hp3 {
+  margin-top: 2px;
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+}
+.hp3 {
+  color: var(--ink-faint);
+}
+.pmenu {
+  position: relative;
+  margin-left: auto;
+}
+.pmenu > summary {
+  list-style: none;
+  cursor: pointer;
+  color: var(--ink-dim);
+  padding: 0 var(--s2);
+  border-radius: 6px;
+  line-height: 22px;
+}
+.pmenu > summary::-webkit-details-marker {
+  display: none;
+}
+.pmenu > summary:hover,
+.pmenu[open] > summary {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+.pmenu-list {
+  position: absolute;
+  right: 0;
+  top: 26px;
+  z-index: 10;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  padding: var(--s1);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+  font-size: var(--t-small);
+}
+.pmenu-list a {
+  padding: var(--s1) var(--s2);
+  border-radius: 4px;
+  color: var(--ink);
+}
+.pmenu-list a.c-failed {
+  color: var(--failed);
+}
+.pmenu-list a:hover {
+  background: var(--surface-3);
+  text-decoration: none;
+}
+.hpanel {
+  margin-top: var(--s3);
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  font-size: var(--t-small);
+}
+.hpanel.danger {
+  border-color: rgb(255 138 139 / 0.5);
+  background: rgb(255 138 139 / 0.06);
+}
+.hpanel .hpt {
+  font-weight: 600;
+  color: var(--ink);
+}
+.hpanel label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+}
+.hpanel input[type="text"] {
+  height: 28px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 var(--s2);
+  font-size: var(--t-small);
+}
+.hpanel input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.hpanel .faint {
+  font-size: var(--t-meta);
+}
+.hpbtns {
+  display: flex;
+  gap: var(--s2);
+}
+.btn.tiny {
+  height: 22px;
+  padding: 0 var(--s2);
+  font-size: var(--t-meta);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink-dim);
+}
+.btn.tiny:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+.lmark {
+  font-size: var(--t-meta);
+}
+.lmark.inh {
+  color: var(--ink-faint);
+}
+.lmark.own {
+  color: var(--accent);
+}
+.ldot {
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  align-self: center;
+}
+a.hfile.inh .hpath {
+  color: var(--ink-dim);
+}
+a.hfile.hidden-pb .hpath {
+  text-decoration: line-through;
+  color: var(--ink-faint);
+}
+.lmark.lhidden {
+  color: var(--refused);
+}
+.hform {
+  display: contents;
+}
+.hlform {
+  display: inline-flex;
+}
+.hlchanged {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--line-soft);
+}
+.hbchanges {
+  list-style: none;
+  margin: var(--s2) 0 0;
+  padding: 0;
+  font-size: var(--t-small);
+}
+.hbchanges li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: 2px 0;
+}
+.htabs {
+  display: flex;
+  gap: var(--s1);
+  padding: var(--s2) var(--s5) 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: var(--t-small);
+}
+.htabs a {
+  padding: var(--s1) var(--s3) var(--s2);
+  color: var(--ink-dim);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.htabs a:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+.htabs a.on {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+.hnone > .htabs {
+  align-self: stretch;
+  margin-bottom: auto;
+}
+.hnone > .empty {
+  margin-bottom: auto;
+}
+.hlayer-of {
+  color: var(--accent);
+  font-weight: 500;
+}
+.hlbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  margin: var(--s3) var(--s5) 0;
+  padding: var(--s2) var(--s3);
+  border-radius: 8px;
+  font-size: var(--t-small);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+}
+.hlbar.own {
+  background: rgb(122 162 247 / 0.08);
+  border-color: rgb(122 162 247 / 0.3);
+}
+.hlbar.hid {
+  background: rgb(214 123 168 / 0.08);
+  border-color: rgb(214 123 168 / 0.3);
+}
+.hlbar.ask {
+  background: rgb(255 138 139 / 0.08);
+  border-color: rgb(255 138 139 / 0.4);
+}
+.hlact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-left: auto;
+}
+.hcode.ro .cm-editor,
+.hcode.ro textarea {
+  opacity: 0.8;
+}
+.hpick {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.hpick select,
+.chprof select {
+  height: 26px;
+  max-width: 260px;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 var(--s1);
+  font-size: var(--t-small);
+}
+.hpnote {
+  margin: var(--s3) var(--s5) var(--s2);
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.hpsections {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--s5) var(--s6);
+}
+.psrc {
+  margin-left: var(--s2);
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+}
+.psrc.src-profile {
+  color: var(--accent);
+}
+.hpsections pre.prose {
+  white-space: pre-wrap;
+  font-family: var(--sans);
+  font-size: var(--t-small);
+}
+/* the chat page's Profile select (pages.ts) */
+.chprof {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-left: var(--s3);
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.chprof .btn {
+  height: 26px;
+}
+.btn[hidden] {
+  display: none;
+}
+.head .notice.chflash {
+  margin-top: var(--s2);
+}
+
 /* ---- a GitHub-style diff (ghdiff.ts); GitHub's dark colours ------------------------------------------- */
 .gdiff {
   --g-add-line: rgb(46 160 67 / 0.15);
@@ -2497,6 +2871,47 @@ details.step.tool.targeted {
   }
   .kbd {
     display: none;
+  }
+  .htabs,
+  .hlbar,
+  .hpnote {
+    margin-left: 0;
+    margin-right: 0;
+    padding-left: var(--s4);
+    padding-right: var(--s4);
+  }
+  .hlbar {
+    margin: var(--s3) var(--s4) 0;
+    padding: var(--s2) var(--s3);
+  }
+  .hpsections {
+    padding: 0 var(--s4) var(--s6);
+  }
+  .hlbar > .ldot {
+    display: none;
+  }
+  .hpsections > details > summary {
+    grid-template-columns: 14px minmax(0, 1fr) 72px;
+  }
+  .hpsections .bar {
+    display: none;
+  }
+  .hpsections .lbl {
+    white-space: normal;
+  }
+  .hpick {
+    margin-left: 0;
+    width: 100%;
+  }
+  .hpick label {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+  }
+  .hpick select {
+    flex: 1;
+    max-width: none;
   }
   .hsides {
     grid-template-columns: 1fr;

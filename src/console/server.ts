@@ -8,8 +8,10 @@ import type { Db } from "../store/db.ts";
 import { sniffImage } from "../store/media.ts";
 import { editorBundle } from "./editor/bundle.ts";
 import { activityPage, changedBanner, homePage } from "./home.ts";
-import { allHistory, loadHome, watch } from "./home-data.ts";
-import { HOME_WRITES, homeSave, takeResult } from "./home-write.ts";
+import { allHistory, loadHome, watch, type PromptDeps } from "./home-data.ts";
+import { CHAT_PROFILE_WRITE, chatProfileWrite, HOME_WRITES, homeSave, PROFILE_WRITES, profileWrite, takeResult } from "./home-write.ts";
+import { HomeLayers, listProfiles } from "../capabilities/memory/layers.ts";
+import { chatById } from "./queries.ts";
 import { cardPage, html } from "./html.ts";
 import { chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
 import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
@@ -38,10 +40,12 @@ import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } 
  *     token ends every session, and a restart ends none); `Authorization: Bearer <token>` works too, for a
  *     script. Anything else gets 401 and the sign-in form.
  *
- * READ ONLY, but for THREE WRITE PATHS: GET and HEAD everywhere, plus POST /login, plus POST to the Settings
- * page's write routes (`/settings/<area>/<verb>`, settings-write.ts `SETTINGS_WRITES`), to the Home page's save
- * (`/home/save`, home-write.ts `HOME_WRITES`: saving one of her files in home/), and to the delete of chat
- * messages (`/messages/delete`, `/messages/undo`: delete-write.ts, store/deletions.ts), and to nothing else. A
+ * READ ONLY, but for a few writes: GET and HEAD everywhere, plus POST /login, plus POST to the Settings page's write
+ * routes (`/settings/<area>/<verb>`, settings-write.ts `SETTINGS_WRITES`), to the Home page's (`/home/save`,
+ * home-write.ts `HOME_WRITES`: saving one of her files in home/; `/home/profile/<verb>`, `PROFILE_WRITES`: her
+ * profiles, capabilities/memory/layers.ts), to a chat page's Profile select (`/chats/<id>/profile`,
+ * `CHAT_PROFILE_WRITE`), and to the delete of chat messages (`/messages/delete`, `/messages/undo`:
+ * delete-write.ts, store/deletions.ts), and to nothing else. A
  * POST anywhere else, or any other method, gets 405; a GET to a write route gets 405 too. A write must pass,
  * after the Host check and the sign-in above, BOTH:
  *   - ORIGIN: an `Origin` header naming one of `allowedOrigins` (index.ts: SHUVI_CONSOLE_URL's origin, and
@@ -95,6 +99,8 @@ export interface ConsoleDeps {
   ownerId?: number;
   /** How long transcripts are kept (SHUVI_TRANSCRIPT_DAYS), to say why one is gone. Default 30. */
   transcriptDays?: number;
+  /** What Home's Preview builds a chat's prompt with: the enabled capabilities, the policy, the owner. */
+  prompt?: PromptDeps;
   now?: () => number;
 }
 
@@ -260,7 +266,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   const path = url.pathname.replace(/\/+$/, "") || "/";
   // Only a Home save and a delete may be large (`MAX_BODY`, Bun's own limit); anything else keeps the small one.
   if (!LARGE_BODY_WRITES.has(path) && Number(req.headers.get("content-length") ?? 0) > MAX_SMALL_BODY) return respond("too large", 413, "text/plain");
-  const write = isSettingsWrite(path) || HOME_WRITES.has(path) || isDeleteWrite(path);
+  const write = isSettingsWrite(path) || HOME_WRITES.has(path) || isDeleteWrite(path) || PROFILE_WRITES.has(path) || CHAT_PROFILE_WRITE.test(path);
   if (write ? req.method !== "POST" : !["GET", "HEAD"].includes(req.method) && !(req.method === "POST" && path === "/login")) {
     return write ? respond("a write: POST only", 405, "text/plain", { allow: "POST" }) : respond("read only", 405, "text/plain", { allow: "GET, HEAD" });
   }
@@ -292,16 +298,23 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
         return "json" in r ? respond(r.json.body, r.json.status, "application/json; charset=utf-8") : respond(null, 303, "text/plain", { location: r.location });
       }
       if (isSettingsWrite(path)) return respond(null, 303, "text/plain", { location: settingsWrite(deps.db, path, form, ctx.now) });
+      if (PROFILE_WRITES.has(path)) return respond(null, 303, "text/plain", { location: profileWrite(deps.db, homeOf(deps), path, form, auth.who, ctx.now!) });
+      const chatWrite = CHAT_PROFILE_WRITE.exec(path);
+      if (chatWrite) return respond(null, 303, "text/plain", { location: chatProfileWrite(deps.db, homeOf(deps), Number(chatWrite[1]), form, ctx.now!) });
       return respond(null, 303, "text/plain", { location: homeSave(deps.db, homeOf(deps), form, auth.who, ctx.now!) });
     }
     if (path === "/home" || path === "/home/history" || path === "/home/watch") {
-      const hctx = { csrf, timeZone: ctx.timeZone, now: ctx.now!, ...(ctx.who ? { who: ctx.who } : {}) };
+      const hctx = { csrf, timeZone: ctx.timeZone, now: ctx.now!, ...(ctx.who ? { who: ctx.who } : {}), ...(deps.prompt ? { prompt: deps.prompt } : {}) };
       if (path === "/home/history") return htmlResponse(activityPage({ ...allHistory(deps.db, homeOf(deps), url.searchParams.get("before") ?? undefined), ...hctx }));
       if (path === "/home/watch") {
         // The editor's poll (home.ts): a banner when the file changed since the version it opened, else nothing.
+        // In a profile, its own copy (capabilities/memory/layers.ts); else the file itself.
         const file = url.searchParams.get("file") ?? "";
-        const changed = watch(deps.db, homeOf(deps), file, url.searchParams.get("base") ?? "");
-        return htmlResponse(changed ? changedBanner(changed, file).s : "");
+        const profile = url.searchParams.get("profile") ?? undefined;
+        const layers = HomeLayers.of(homeOf(deps), profile);
+        const phys = layers.profile && layers.hasOwn(file) ? layers.ownPath(file)! : file;
+        const changed = watch(deps.db, homeOf(deps), phys, url.searchParams.get("base") ?? "");
+        return htmlResponse(changed ? changedBanner(changed, file, layers.name ?? undefined).s : "");
       }
       return htmlResponse(homePage(loadHome(deps.db, homeOf(deps), url.searchParams, hctx, takeResult(url.searchParams.get("r"), ctx.now!))));
     }
@@ -321,7 +334,11 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     }
     const chat = /^\/chats\/(\d+)$/.exec(path);
     if (chat) {
-      const out = chatPage(ctx, Number(chat[1]), url.searchParams);
+      // The Profile select (pages.ts): the profiles there are, the chat's, and the result of a switch, once.
+      const c = chatById(deps.db, Number(chat[1]));
+      const flash = takeResult(url.searchParams.get("r"), ctx.now!)?.flash;
+      const profiles = { names: listProfiles(homeOf(deps)).map((p) => ({ name: p.name, ...(p.label ? { label: p.label } : {}) })), ...(c?.profile ? { current: c.profile } : {}), ...(flash ? { flash } : {}) };
+      const out = chatPage({ ...ctx, csrf, profiles }, Number(chat[1]), url.searchParams);
       return out ? htmlResponse(out) : notFound(ctx.who);
     }
     // Segments were first served at /sessions/<id>; an old link still finds its segment.

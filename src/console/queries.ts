@@ -11,10 +11,10 @@ export const TURN_COLUMNS = `t.id, t.chat_id as chatId, t.status, t.pid, t.pid_s
   t.to_seq as toSeq, t.trigger_seq as triggerSeq, t.stop_seq as stopSeq, t.error, t.cost_micro_usd as costMicroUsd,
   t.input_tokens as inputTokens, t.output_tokens as outputTokens, t.cache_read_tokens as cacheReadTokens,
   t.cache_creation_tokens as cacheCreationTokens, t.backend_session_id as backendSessionId, t.opening,
-  t.started_at as startedAt, t.ended_at as endedAt`;
+  t.profile, t.started_at as startedAt, t.ended_at as endedAt`;
 
 export const CHAT_COLUMNS = `c.id, c.tg_chat_id as tgChatId, c.kind, c.title, c.cursor_seq as cursorSeq, c.backend_session_id as backendSessionId,
-  c.context_tokens as contextTokens, c.created_at as createdAt,
+  c.context_tokens as contextTokens, c.profile, c.created_at as createdAt,
   (select json_extract(e.payload, '$.from.name') from chat_events e where e.chat_id = c.id and e.kind = 'message' order by e.seq desc limit 1) as person`;
 
 const EVENT_COLUMNS = `seq, chat_id as chatId, kind, payload, tg_update_id as tgUpdateId, tg_message_id as tgMessageId, idem_key as idemKey,
