@@ -1,5 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { layersOf, type HomeLayers } from "../capabilities/memory/layers.ts";
 import type { EnabledCapability, OwnerInfo } from "../capabilities/types.ts";
 import { defaultPolicy, GROUP_DEFAULTS, resolveChat, type ChatPolicy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
@@ -30,17 +29,29 @@ import { playbookIndex } from "./playbooks.ts";
  * bytes, so the prompt cache holds; an edit costs it once.
  */
 
-function read(home: string, rel: string): string | null {
-  const p = join(home, rel);
-  if (!existsSync(p)) return null;
-  const s = readFileSync(p, "utf8").trim();
+/** The file's text in effect for this chat's layers (memory/layers.ts), trimmed; null when absent or empty. */
+function read(layers: HomeLayers, rel: string): string | null {
+  const s = layers.read(rel)?.trim();
   return s || null;
 }
+
+/**
+ * The stickers section comes from the profile when anything it is built from does: the preferences, or the packs
+ * whose words it lists (a pack of the profile's own, or one it hides).
+ */
+const stickersOverlaid = (layers: HomeLayers): boolean =>
+  !!layers.profile && (layers.resolve("stickers/preferences.md").from === "profile" || layers.packFiles().some((f) => f.from === "profile") || !!layers.profile.hidePacks?.length);
 
 /** One part of the system prompt and where it came from (`persona/public.md`, `capability: web`, …). */
 export interface PromptSection {
   label: string;
   text: string;
+  /**
+   * For the console only (never in the prompt): the layer its file came from, `base` or the profile's name, or
+   * `code` for a section written in code (memory/layers.ts). A section built from a file and code (this chat, with
+   * its notes) is labelled by the file.
+   */
+  layer?: string;
 }
 
 /** How sections are joined into the prompt. */
@@ -55,23 +66,26 @@ export const SECTION_JOIN = "\n\n";
  * Without any (a bare call), the prompt has no capability sections at all, not even speech. `db` is
  * handed to the sections to read from (a section never writes; capabilities/types.ts `PromptContext`).
  */
-export function buildPromptSections(home: string, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy, db?: Db): PromptSection[] {
+export function buildPromptSections(home: string | HomeLayers, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy, db?: Db): PromptSection[] {
   const cp = chatPolicy ?? resolveChat(defaultPolicy(), chat) ?? { ...GROUP_DEFAULTS, key: String(chat.tgChatId), ownerDm: false };
   const isOwnerDm = cp.ownerDm && chat.kind === "private";
+  const layers = layersOf(home);
   const sections: PromptSection[] = [];
-  const push = (label: string, text: string) => sections.push({ label, text });
+  const of = (rel: string) => (layers.resolve(rel).from === "profile" ? layers.name! : "base");
+  const push = (label: string, text: string, layer: string) => sections.push({ label, text, layer });
 
-  const pub = cp.persona.includes("public") ? read(home, "persona/public.md") : null;
-  if (pub) push("persona/public.md", pub);
+  const pub = cp.persona.includes("public") ? read(layers, "persona/public.md") : null;
+  if (pub) push("persona/public.md", pub, of("persona/public.md"));
   if (isOwnerDm && cp.persona.includes("private")) {
-    const priv = read(home, "persona/private.md");
-    if (priv) push("persona/private.md", priv);
+    const priv = read(layers, "persona/private.md");
+    if (priv) push("persona/private.md", priv, of("persona/private.md"));
   }
 
-  const directives = read(home, "directives.md");
-  if (directives) push("directives.md", `## Rules\n\n${directives}`);
+  const directives = read(layers, "directives.md");
+  if (directives) push("directives.md", `## Rules\n\n${directives}`, of("directives.md"));
 
-  const notes = cp.memory.includes("chat") ? read(home, `chats/${chat.tgChatId}.md`) : null;
+  const notesPath = `chats/${chat.tgChatId}.md`;
+  const notes = cp.memory.includes("chat") ? read(layers, notesPath) : null;
   push(
     notes ? `this chat (with chats/${chat.tgChatId}.md)` : "this chat",
     (isOwnerDm
@@ -81,30 +95,32 @@ export function buildPromptSections(home: string, chat: Chat, owner: OwnerInfo, 
       : `## This chat\n\nThe group "${chat.title ?? "untitled"}". Everyone in it reads what you write here, so nothing private to the owner belongs here.${
           owner.language ? ` The owner speaks ${owner.language}; reply to each person in the language they write in.` : ""
         }`) + (notes ? `\n\n### Your notes on this chat\n\n${notes}` : ""),
+    notes ? of(notesPath) : "code",
   );
 
   // Each capability's section, in registry order, labelled with the capability it came from.
-  const ctx = { home, chat, owner, chatPolicy: cp, ...(db ? { db } : {}) };
+  const ctx = { home: layers.home, layers, chat, owner, chatPolicy: cp, ...(db ? { db } : {}) };
   for (const { capability, config } of capabilities) {
     const s = capability.section?.(ctx, config);
-    if (s != null) push(`capability: ${capability.id}`, s);
+    if (s != null) push(`capability: ${capability.id}`, s, capability.id === "stickers" && stickersOverlaid(layers) ? layers.name! : "code");
   }
 
   if (capabilities.some((c) => c.capability.id === "playbooks")) {
-    const index = playbookIndex(home);
-    if (index) push("playbooks index", index);
+    const index = playbookIndex(layers);
+    const overlaid = !!layers.name && (layers.playbookFiles().some((f) => f.from === "profile") || !!layers.profile?.hides.length);
+    if (index) push("playbooks index", index, overlaid ? layers.name! : "base");
   }
 
   if (isOwnerDm && cp.memory.includes("private")) {
-    const mem = read(home, "memory/private.md");
-    if (mem) push("memory/private.md", `## Memory\n\n${mem}`);
+    const mem = read(layers, "memory/private.md");
+    if (mem) push("memory/private.md", `## Memory\n\n${mem}`, of("memory/private.md"));
   }
 
   return sections;
 }
 
 /** The system prompt: `buildPromptSections`, joined. */
-export function buildSystemPrompt(home: string, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy, db?: Db): string {
+export function buildSystemPrompt(home: string | HomeLayers, chat: Chat, owner: OwnerInfo, capabilities: readonly EnabledCapability[] = [], chatPolicy?: ChatPolicy, db?: Db): string {
   return joinSections(buildPromptSections(home, chat, owner, capabilities, chatPolicy, db));
 }
 

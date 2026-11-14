@@ -23,10 +23,14 @@
  *      nothing else in the chat, a card in the control bot; a model, then lossless: the card says the turn
  *      will be stopped, the turn is stopped, the switch is applied, and the card is edited to the result.
  *      The stopped turn's message is answered on the new model.
+ *   8. Profiles: `/profile` in the DM gets 👌 and nothing else in the chat, and a card in the control bot
+ *      listing Base and the profile in home/profiles/; pressing it switches the chat. The next turn's system
+ *      prompt carries the profile's directives (and nothing names a profile), and her edit_home in that turn
+ *      lands in the profile's copy, Base's untouched; the turn records the profile it ran under.
  *
  *   bun scripts/e2e-control.ts
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Update } from "grammy/types";
@@ -53,6 +57,15 @@ async function until(what: string, cond: () => boolean, ms = 60_000): Promise<vo
 
 // ---- fake Anthropic: "please fail" is refused, "hang" never answers, anything else gets "Noted." ------
 const ev = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`;
+function toolUse(id: string, name: string, input: unknown): Response {
+  let out = ev("message_start", { message: { id: `msg_${id}`, type: "message", role: "assistant", model: "claude-fake", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 30, output_tokens: 1 } } });
+  out += ev("content_block_start", { index: 0, content_block: { type: "tool_use", id, name, input: {} } });
+  out += ev("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } });
+  out += ev("content_block_stop", { index: 0 });
+  out += ev("message_delta", { delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 9 } });
+  out += ev("message_stop", {});
+  return new Response(out, { headers: { "content-type": "text/event-stream" } });
+}
 function reply(text: string): Response {
   let out = ev("message_start", { message: { id: "msg_x", type: "message", role: "assistant", model: "claude-fake", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 30, output_tokens: 1 } } });
   out += ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
@@ -63,6 +76,9 @@ function reply(text: string): Response {
   return new Response(out, { headers: { "content-type": "text/event-stream" } });
 }
 let approvalPrompt = "";
+/** Section 8: the system prompt of the turn after the /profile switch, and her edit's result. */
+let profileSystem = "";
+let profileEdit = "";
 let freshPrompt = "";
 /** "stall" hangs its first turn (until the switch stops it); answered after that. */
 let stalled = false;
@@ -81,6 +97,15 @@ const anthropic = Bun.serve({
     // ("please fail", "hang" among them) before "(New messages:)".
     const last = JSON.stringify(body.messages?.at(-1)).split("(New messages:)").at(-1)!;
     turnModels.push(String((body as { model?: string }).model));
+    // Section 8: on the profile, she edits the rules she was given.
+    if (last.includes("toolu_profile")) {
+      profileEdit = last;
+      return reply("Changed the rule.");
+    }
+    if (last.includes("profile check")) {
+      profileSystem = JSON.stringify((body as { system?: unknown }).system ?? "");
+      return toolUse("toolu_profile", "mcp__shuvi__edit_home", { path: "directives.md", old_string: "- WORK-RULE-E2E", new_string: "- WORK-RULE-E2E, revised", why: "the owner asked" });
+    }
     if (last.includes("still there")) freshPrompt = all;
     if (last.includes("stall") && !stalled) {
       stalled = true;
@@ -121,6 +146,11 @@ const dataDir = mkdtempSync(join(tmpdir(), "shuvi-e2e-control-"));
 // One fake group, for /policy.
 mkdirSync(join(dataDir, "home"), { recursive: true });
 writeFileSync(join(dataDir, "home", "policy.yaml"), `chats:\n  "-1009999999999":\n    title: Fake Hiking Club\n    tools: { web: {}, stickers: {} }\n`);
+// A base and one profile, `work`, that replaces the directives (section 8).
+writeFileSync(join(dataDir, "home", "directives.md"), "- BASE-RULE-E2E\n");
+mkdirSync(join(dataDir, "home", "profiles", "work"), { recursive: true });
+writeFileSync(join(dataDir, "home", "profiles", "work", "profile.yaml"), 'label: "Work e2e"\nhides: []\n');
+writeFileSync(join(dataDir, "home", "profiles", "work", "directives.md"), "- WORK-RULE-E2E\n");
 // The console binds any free port (0); the server's log says which (`tapLines`).
 let consolePort = 0;
 const CONSOLE_URL = "https://example-host.example-tailnet.ts.net";
@@ -175,7 +205,7 @@ const ownerScope = JSON.stringify({ type: "chat", chat_id: OWNER });
 const groupScope = (g: number) => JSON.stringify({ type: "chat_member", chat_id: g, user_id: OWNER });
 await until("the group menu", () => menu(tg).length >= 2);
 check(
-  [...menu(tg)].sort().join("|") === [`${ownerScope} new,stop,model`, `${groupScope(-1009999999999)} new,stop,model`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn,model,models,provider`,
+  [...menu(tg)].sort().join("|") === [`${ownerScope} new,stop,model,profile`, `${groupScope(-1009999999999)} new,stop,model,profile`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn,model,models,profile,provider`,
   `each bot registered its commands for the owner's chat, and the main bot for the owner in the listed group (${menu(tg)} / ${menu(control)})`,
 );
 
@@ -193,7 +223,7 @@ check(detail!.includes("<b>2. Fake Hiking Club</b>") && detail!.includes("<b>Off
 writeFileSync(join(dataDir, "home", "policy.yaml"), `chats:\n  "-1008888888888":\n    title: Fake Chess Club\n`);
 await until("the group menus to follow the policy change", () => menu(tg).length >= 3 && tg.sent("deleteMyCommands").length >= 1);
 await Bun.sleep(1500); // a few more policy passes: nothing changed, so no more calls
-check(menu(tg).length === 3 && menu(tg)[2] === `${groupScope(-1008888888888)} new,stop,model`, `a group added to policy gets the owner's menu (${menu(tg)})`);
+check(menu(tg).length === 3 && menu(tg)[2] === `${groupScope(-1008888888888)} new,stop,model,profile`, `a group added to policy gets the owner's menu (${menu(tg)})`);
 check(tg.sent("deleteMyCommands").map((b) => JSON.stringify(b.scope)).join("|") === groupScope(-1009999999999), `a group removed from policy has its menu cleared (${JSON.stringify(tg.sent("deleteMyCommands"))})`);
 
 // ---- 2. a forced failure, retried to the cap ---------------------------------------------------------
@@ -353,6 +383,34 @@ check(
 check((db.$client.query("select model, conversation_model from chats where id = ?").get(chatId) as { model: string }).model === "claude/opus", "the chat runs on the new model");
 await until("the stopped turn's message answered on the new model", () => chatTexts().filter((t) => t === "Noted.").length >= 3, 30_000);
 check(turnModels.slice(requestsBefore).some((m) => m.includes("opus")), `the next turn ran on opus (${turnModels.slice(requestsBefore).join(", ")})`);
+
+// ---- 8. profiles: /profile, the card, and a turn on the profile -----------------------------------------
+const reactionsBeforeProfile = tg.sent("setMessageReaction").length;
+const chatBeforeProfile = chatTexts().length;
+tg.updates.push(dmUpdate(6, "/profile"));
+await until("the profile card", () => !!cardNow("Profile for chat 1"));
+await until("the 👌 for /profile", () => tg.sent("setMessageReaction").length > reactionsBeforeProfile);
+check(chatTexts().length === chatBeforeProfile, "/profile in the DM gets 👌 and nothing else in the chat");
+let profileCard = cardNow("Profile for chat 1")!;
+check(
+  profileCard.text.startsWith("Profile for chat 1 (tg 1001): now Base.") && profileCard.buttons.map((b) => b.text).join("|") === "✓ Base|work · Work e2e|Cancel",
+  `the card lists Base and the profile, Base marked (${JSON.stringify(profileCard.text)}: ${profileCard.buttons.map((b) => b.text).join("|")})`,
+);
+pressButton(buttonOf(profileCard, "work · Work e2e"));
+await until("the card to say the switch", () => cardNow("Profile for chat 1")!.text.includes("now runs on work"));
+profileCard = cardNow("Profile for chat 1")!;
+check(profileCard.text === "chat 1 (tg 1001) now runs on work, from its next turn." && profileCard.buttons.length === 0, `the card says the switch (${JSON.stringify(profileCard.text)})`);
+check((db.$client.query("select profile from chats where id = ?").get(chatId) as { profile: string }).profile === "work", "the chat is on work");
+tg.updates.push(dmUpdate(7, "profile check: change the rule"));
+await until("her reply after the edit", () => chatTexts().includes("Changed the rule."), 40_000);
+check(profileSystem.includes("WORK-RULE-E2E") && !profileSystem.includes("BASE-RULE-E2E"), "the turn after the switch sends the profile's directives in its system prompt");
+check(!/profiles\/|\bwork e2e\b/i.test(profileSystem), "and nothing in it names the profile");
+const work = readFileSync(join(dataDir, "home", "profiles", "work", "directives.md"), "utf8");
+const baseRules = readFileSync(join(dataDir, "home", "directives.md"), "utf8");
+check(work === "- WORK-RULE-E2E, revised\n" && baseRules === "- BASE-RULE-E2E\n", `her edit in that turn landed in the profile's copy, Base untouched (${JSON.stringify(work)}, ${JSON.stringify(baseRules)})`);
+check(profileEdit.includes("Saved directives.md") && !profileEdit.includes("profiles/"), "her edit's result speaks of directives.md only");
+const lastTurn = db.$client.query("select profile from turns where chat_id = ? order by id desc limit 1").get(chatId) as { profile: string | null };
+check(lastTurn.profile === "work", "the turn recorded the profile it ran under");
 
 log("PASS");
 cleanup();

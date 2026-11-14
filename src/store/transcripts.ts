@@ -65,9 +65,8 @@ export type StepInsert = Omit<typeof turnSteps.$inferInsert, "id" | "turnId" | "
 
 export const hashText = (s: string) => createHash("sha256").update(s).digest("hex");
 
-/** Store a system prompt once, by its hash; returns the hash. */
-export function savePrompt(db: Db, text: string, sections: PromptText["sections"]): string {
-  const hash = hashText(text);
+/** Store a system prompt once, by its hash (default: the text's; agent/transcript.ts gives its own); returns the hash. */
+export function savePrompt(db: Db, text: string, sections: PromptText["sections"], hash = hashText(text)): string {
   db.insert(promptTexts).values({ hash, text, sections }).onConflictDoNothing().run();
   return hash;
 }

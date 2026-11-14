@@ -35,6 +35,9 @@ import {
 import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
 import { chatLabel, DRAIN_STOP, extendTurn, finishTurn, getTurn, hadEarlierTurn, saveSession, setTurnConversation, type Turn } from "../store/turns.ts";
+import { HomeLayers } from "../capabilities/memory/layers.ts";
+import { turns } from "../store/schema.ts";
+import { eq } from "drizzle-orm";
 import { withCall } from "./call-context.ts";
 import { buildPromptSections, joinSections } from "./prompt.ts";
 import { claimSwitches, switchNote } from "./switch.ts";
@@ -433,6 +436,22 @@ interface CompactionSeen {
 
 export type TurnOutcome = "done" | "stopped" | "failed" | "empty";
 
+/**
+ * home/ as `chat` sees it this turn (capabilities/memory/layers.ts): its profile overlaid on the base. A profile the
+ * chat is set to that no longer exists runs the turn on the base, and tells the owner once (per chat and profile).
+ */
+export function chatLayers(db: Db, home: string, chat: Pick<Chat, "id" | "profile">): HomeLayers {
+  if (!chat.profile) return HomeLayers.base(home);
+  const layers = HomeLayers.of(home, chat.profile);
+  if (layers.profile) return layers;
+  const c = getChat(db, chat.id);
+  raiseAlert(db, {
+    key: `profile-missing:${chat.id}:${chat.profile}`,
+    text: `${c ? chatLabel(c) : `Chat ${chat.id}`} is set to profile ${chat.profile}, which no longer exists (home/profiles/${chat.profile}/ is gone). It runs on Base until you pick another: /profile ${chat.id}`,
+  });
+  return layers;
+}
+
 /** Run turn `turnId` to the end and close it. Never throws: a failure is recorded on the turn. */
 export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const { db, turnId } = deps;
@@ -492,6 +511,9 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   };
   deps.signal?.addEventListener("abort", () => (s.stopping = true), { once: true });
   extendTurn(db, turnId, s.toSeq);
+  // The chat's profile, read now: a switch made while this turn runs applies from the next one.
+  const layers = chatLayers(db, deps.home, chat);
+  db.update(turns).set({ profile: layers.name }).where(eq(turns.id, turnId)).run();
 
   const rec = new TurnRecorder(db, turnId, deps.record ?? { dataDir: dirname(deps.home) });
   for (const s of switches) rec.note(switchNote(s));
@@ -521,6 +543,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const tools = capabilityTools(capabilities, {
     db,
     home: deps.home,
+    layers,
     chat,
     turnId,
     timeZone: deps.timeZone,
@@ -563,7 +586,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   // Built fresh every turn and sent on a resume too, so an edit to home/ reaches the model from the next
   // turn without `/new`. The driver decides whether a resume honours it: the runner's Claude driver does
   // (`liveSystemPrompt`), and openai-compat always sends the prompt it is given.
-  const sections = buildPromptSections(deps.home, chat, owner, capabilities, chatPolicy, db);
+  const sections = buildPromptSections(layers, chat, owner, capabilities, chatPolicy, db);
   const systemPrompt = joinSections(sections);
   rec.prompt(sections);
   // Which conversation this turn is in: resumed, or fresh after its first turn, `/new`, or another model's after a switch.

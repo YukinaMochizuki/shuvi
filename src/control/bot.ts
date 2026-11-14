@@ -14,7 +14,7 @@ import { allChats, getChat, kvGet, kvSet, type Speaker } from "../store/events.t
 import { approvals, chatEvents, OUTBOUND_KINDS, turns } from "../store/schema.ts";
 import { chatLabel, IMMEDIATE, runningTurns } from "../store/turns.ts";
 import { answerApproval, cardKeyboard, getApproval, parseCallback } from "./approvals.ts";
-import { CLOSED, getCard, isCardButton, modelCommand, modelsCommand, pressCard, providerCommand } from "./model-cards.ts";
+import { CLOSED, getCard, isCardButton, modelCommand, modelsCommand, pressCard, profileCommand, providerCommand } from "./model-cards.ts";
 import { turnSummary } from "./turn-summary.ts";
 
 /**
@@ -66,6 +66,8 @@ const MAX_TEXT = 4096;
 
 export interface ControlDeps {
   ownerId: number;
+  /** Her files (env.ts `home`): the profiles a `/profile` card lists. */
+  home?: string;
   /** The deployed commit, shown by /status. */
   commit: string;
   timeZone: string;
@@ -86,6 +88,7 @@ export const CONTROL_COMMANDS = [
   { command: "turn", description: "One turn in a paragraph, with its console link: /turn <id>" },
   { command: "model", description: "Switch a chat's model: /model <chat> [<provider>/<model> lossless|lossy]" },
   { command: "models", description: "The model catalog; /models add <provider>/<model> [<context_window>]" },
+  { command: "profile", description: "Switch a chat's profile: /profile <chat>" },
   { command: "provider", description: "/provider add <name> <base_url> [<profile>.<VAR>] | add <name> claude [<dir>] | remove <name>" },
 ] as const satisfies readonly BotCommand[];
 
@@ -203,7 +206,7 @@ function handleUpdate(db: Db, u: Update, deps: ControlDeps, out: Handled): void 
   if (cq) {
     if (cq.from.id !== deps.ownerId) return; // not the owner: no answer at all
     if (isCardButton(cq.data)) {
-      out.callbacks.push({ id: cq.id, text: guarded(db, (t) => pressCard(t, cq.data!), (error) => oneLine(`Failed: ${error}`, 190)) });
+      out.callbacks.push({ id: cq.id, text: guarded(db, (t) => pressCard(t, cq.data!, deps.home), (error) => oneLine(`Failed: ${error}`, 190)) });
       return;
     }
     const parsed = parseCallback(cq.data);
@@ -230,6 +233,7 @@ function handleUpdate(db: Db, u: Update, deps: ControlDeps, out: Handled): void 
   if (name === "model") return guarded(db, (t) => modelCommand(t, key, arg, (a) => findChat(t, a)), failed);
   if (name === "models") return guarded(db, (t) => modelsCommand(t, key, arg), failed);
   if (name === "provider") return guarded(db, (t) => providerCommand(t, key, arg), failed);
+  if (name === "profile") return guarded(db, (t) => profileCommand(t, key, arg, (a) => findChat(t, a), deps.home), failed);
   queueReply(db, key, HELP);
 }
 

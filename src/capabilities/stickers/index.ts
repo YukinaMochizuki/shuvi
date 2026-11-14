@@ -1,16 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { z } from "zod";
 import { err, ok, type ToolContent, type ToolDef } from "agent-runtime";
 import { dataDirFrom } from "../../env.ts";
 import { enqueueOutbound } from "../../store/events.ts";
 import { imageFromFile } from "../../store/media.ts";
 import { isOwnerDm, ownerIdFrom } from "../access.ts";
-import { commitHomeEdit, lastRemoval } from "../memory/home.ts";
-import { defineCapability } from "../types.ts";
+import { commitHomeEdit, commitHomeEdits, lastRemoval, STICKER_PREFERENCES } from "../memory/home.ts";
+import { profileDir, profileFile, profileYaml } from "../memory/layers.ts";
+import { defineCapability, layersIn } from "../types.ts";
 import { fetchPass, getSet, requestMissingSets, requestSet, setStickers, waitForSet } from "./fetch.ts";
 import { findStickers, getSticker, LIST_PAGE, listStickers, RECENT_DAYS, vocabulary, type Candidate, type LibrarySticker } from "./find.ts";
-import { fileOfPack, libraryPacks, PACK_NAME, packFileName, packSkeleton, parsePack, ROLES, stickersDir, syncLibrary, type PackFile, type Role, type SyncResult, type Tier } from "./library.ts";
+import { fileOfPack, libraryPacks, logicalOfKey, PACK_NAME, packFileName, packSkeleton, parsePack, ROLES, scopeKeys, syncLibrary, type PackFile, type Role, type SyncResult, type Tier } from "./library.ts";
 import { refusal } from "./rules.ts";
 import { renderContactSheet } from "./sheet.ts";
 
@@ -68,7 +67,14 @@ export interface StickersConfig {
 export const FETCH_WAIT_MS = 60_000;
 
 /** A line per library file that could not be indexed. */
-const errorLines = (r: SyncResult) => r.errors.map((e) => `stickers/${e.file} has an error and was not re-read (its previous version is still in use): ${e.error}`);
+const errorLines = (r: SyncResult, scope: readonly string[]) =>
+  r.errors.filter((e) => scope.includes(e.file)).map((e) => logicalOnly(`${logicalOfKey(e.file)} has an error and was not re-read (its previous version is still in use): ${e.error}`));
+
+/**
+ * A text she will read, with any profile's path put back in logical terms (`profiles/<name>/stickers/x.yaml` →
+ * `stickers/x.yaml`): she never learns that profiles exist (memory/layers.ts).
+ */
+export const logicalOnly = (text: string) => text.replace(/\bprofiles\/[a-z0-9][a-z0-9-]{0,31}\//g, "");
 
 /** Fewer find_sticker candidates than this, and its result also shows the vocabulary. */
 export const SMALL_RESULT = 3;
@@ -104,8 +110,12 @@ export const stickers = defineCapability<StickersConfig>({
   },
   ownerOnly: ["add_sticker_pack", "remove_sticker_pack"],
 
-  tools({ db, home, chat, state: s }, { dataDir, ownerId, fetchWaitMs }) {
+  tools(ctx, { dataDir, ownerId, fetchWaitMs }) {
+    const { db, home, chat, state: s } = ctx;
     const inDm = isOwnerDm(chat, ownerId);
+    // The packs in effect in this chat (memory/layers.ts): a profile may have its own copy of some, or its own.
+    const layers = layersIn(ctx);
+    const scope = () => scopeKeys(layers, db);
 
     const find: ToolDef<{ terms: string[]; pack?: string }> = {
       name: "find_sticker",
@@ -117,11 +127,12 @@ export const stickers = defineCapability<StickersConfig>({
       },
       async handler({ terms, pack }) {
         const sync = syncLibrary(db, home);
-        const { candidates, unfetched } = findStickers(db, { terms, ...(pack ? { pack } : {}), inDm });
+        const sc = scope();
+        const { candidates, unfetched } = findStickers(db, { terms, ...(pack ? { pack } : {}), inDm, scope: sc });
         const notes = [
           ...(unfetched ? [`${unfetched} more matched but their pack is not fetched from Telegram yet.`] : []),
-          ...(candidates.length < SMALL_RESULT ? [hint(vocabulary(db, inDm))] : []),
-          ...errorLines(sync),
+          ...(candidates.length < SMALL_RESULT ? [hint(vocabulary(db, inDm, undefined, sc))] : []),
+          ...errorLines(sync, sc),
         ];
         if (!candidates.length) return ok(["No sticker matches.", ...notes].join("\n"));
         return ok([`${candidates.length} candidate(s), best first. Send one with \`sticker\`.`, ...candidates.map(describe), ...notes].join("\n"));
@@ -139,8 +150,9 @@ export const stickers = defineCapability<StickersConfig>({
       },
       async handler({ pack, use, tier, page }) {
         const sync = syncLibrary(db, home);
-        const r = listStickers(db, { inDm, ...(pack ? { pack } : {}), ...(use ? { use } : {}), ...(tier ? { tier } : {}), ...(page ? { page } : {}) });
-        const notes = [...(r.unfetched ? [`${r.unfetched} more are in packs not fetched from Telegram yet.`] : []), ...errorLines(sync)];
+        const sc = scope();
+        const r = listStickers(db, { inDm, ...(pack ? { pack } : {}), ...(use ? { use } : {}), ...(tier ? { tier } : {}), ...(page ? { page } : {}), scope: sc });
+        const notes = [...(r.unfetched ? [`${r.unfetched} more are in packs not fetched from Telegram yet.`] : []), ...errorLines(sync, sc)];
         if (!r.total) return ok(["No sticker in the library fits that.", ...notes].join("\n"));
         const first = (r.page - 1) * LIST_PAGE + 1;
         const head = `Stickers ${first}–${first + r.stickers.length - 1} of ${r.total} (page ${r.page}/${r.pages}).${r.page < r.pages ? ` For more, call list_stickers again with page ${r.page + 1}.` : ""} Send one with \`sticker\`.`;
@@ -154,9 +166,10 @@ export const stickers = defineCapability<StickersConfig>({
       inputSchema: { ids: z.array(z.string()).min(1).max(10).describe("Sticker ids, e.g. [\"ExamplePack/3\"]") },
       async handler({ ids }) {
         syncLibrary(db, home);
+        const sc = scope();
         const content: ToolContent[] = [];
         for (const id of ids) {
-          const st = getSticker(db, id);
+          const st = getSticker(db, id, sc);
           if (!st) {
             content.push({ type: "text", text: `${id}: no such sticker in the library.` });
             continue;
@@ -183,7 +196,7 @@ export const stickers = defineCapability<StickersConfig>({
       inputSchema: { id: z.string().describe("The sticker's id, e.g. \"ExamplePack/3\"") },
       async handler({ id }) {
         syncLibrary(db, home);
-        const st = getSticker(db, id);
+        const st = getSticker(db, id, scope());
         if (!st) return err(`${id} is not in the sticker library. Use an id that find_sticker gave you.`);
         const why = refusal(db, chat.id, s.toSeq, st, inDm);
         if (why) return err(why);
@@ -218,11 +231,12 @@ export const stickers = defineCapability<StickersConfig>({
 
         const metas = setStickers(db, name);
         const pages = await renderContactSheet(metas.map((m) => ({ n: m.position, path: m.path })), dataDir);
-        const file = join(stickersDir(home), packFileName(name));
-        const exists = existsSync(file);
+        const logical = `stickers/${packFileName(name)}`;
+        const current = layers.read(logical);
+        const exists = current !== null;
         let existing: PackFile | undefined;
         try {
-          existing = exists ? parsePack(readFileSync(file, "utf8")) : undefined;
+          existing = exists ? parsePack(current) : undefined;
         } catch {}
         const skeleton = packSkeleton(
           name,
@@ -234,12 +248,19 @@ export const stickers = defineCapability<StickersConfig>({
         let created: string | null = null;
         let removed: string | null = null;
         if (!exists) {
-          removed = lastRemoval(home, join("stickers", packFileName(name)));
+          const physical = layers.writePath(logical);
+          removed = lastRemoval(home, physical);
           try {
-            created = commitHomeEdit(home, join("stickers", packFileName(name)), skeleton, `stickers: skeleton for ${name}`);
+            // A pack the chat's profile hides comes back as the profile's own, no longer hidden (memory/layers.ts).
+            const p = layers.profile;
+            created =
+              p && layers.hidesPack(name)
+                ? commitHomeEdits(home, [{ rel: physical, content: skeleton }, { rel: profileFile(p.name), content: profileYaml({ ...p, hidePacks: (p.hidePacks ?? []).filter((x) => x !== name) }) }], `stickers: skeleton for ${name}`)
+                : commitHomeEdit(home, physical, skeleton, `stickers: skeleton for ${name}`);
           } catch (e) {
-            return err(`Could not create stickers/${packFileName(name)}: ${e instanceof Error ? e.message : String(e)}`);
+            return err(logicalOnly(`Could not create stickers/${packFileName(name)}: ${e instanceof Error ? e.message : String(e)}`));
           }
+          layers.refresh();
           syncLibrary(db, home);
         }
         const missing = metas.filter((m) => !m.path).map((m) => m.position);
@@ -277,19 +298,28 @@ export const stickers = defineCapability<StickersConfig>({
       },
       async handler({ name, why }) {
         syncLibrary(db, home);
-        const file = fileOfPack(db, name);
+        const sc = scope();
+        const file = fileOfPack(db, name, sc);
         if (!file) {
-          const packs = libraryPacks(db).sort();
+          const packs = libraryPacks(db, sc).sort();
           return err(`${name} is not in the sticker library. ${packs.length ? `The packs in it: ${packs.join(", ")}.` : "The library has no packs."}`);
         }
-        const rel = join("stickers", file);
+        // What she is told names the logical path; the file removed is the copy in effect (the key's).
+        const rel = logicalOfKey(file);
+        const physical = file.startsWith("profiles/") ? file : rel;
         const count = db.$client.query("select count(*) as n from sticker_library where file = ?").get(file) as { n: number };
         let commit: string;
         try {
-          commit = commitHomeEdit(home, rel, null, why);
+          // The profile's own copy: it goes, AND the profile hides the pack, as one commit, so Base's copy does not
+          // come back in its place for this chat (Base, and every chat on it, are untouched).
+          const p = layers.profile;
+          commit = p && file.startsWith(`${profileDir(p.name)}/`)
+            ? commitHomeEdits(home, [{ rel: physical, content: null }, { rel: profileFile(p.name), content: profileYaml({ ...p, hidePacks: [...(p.hidePacks ?? []), name] }) }], why)
+            : commitHomeEdit(home, physical, null, why);
         } catch (e) {
-          return err(`Could not remove ${rel}: ${e instanceof Error ? e.message : String(e)}`);
+          return err(logicalOnly(`Could not remove ${rel}: ${(e instanceof Error ? e.message : String(e)).split(physical).join(rel)}`));
         }
+        layers.refresh();
         syncLibrary(db, home);
         return ok(
           `Removed ${name} from the library (commit ${commit}): its ${count.n} sticker(s) are no longer offered or sent. What ${rel} said stays in home/'s git history (the file as it was before commit ${commit}); add_sticker_pack("${name}") would start again from a fresh skeleton.`,
@@ -301,10 +331,11 @@ export const stickers = defineCapability<StickersConfig>({
   },
 
   // Reads only (PromptContext): the index as the last sync left it, never a sync of its own.
-  section({ home, chat, db }, { ownerId }) {
-    const p = join(stickersDir(home), "preferences.md");
-    const body = existsSync(p) ? readFileSync(p, "utf8").trim() : "";
-    const words = db ? vocabulary(db, isOwnerDm(chat, ownerId)) : [];
+  section(ctx, { ownerId }) {
+    const { chat, db } = ctx;
+    const layers = layersIn(ctx);
+    const body = layers.read(STICKER_PREFERENCES)?.trim() ?? "";
+    const words = db ? vocabulary(db, isOwnerDm(chat, ownerId), undefined, scopeKeys(layers, db)) : [];
     const vocab = words.length
       ? `Words the sticker library uses for when to send a sticker, most common first; find_sticker matches text, so search with these: ${vocabularyLine(words)}`
       : "";

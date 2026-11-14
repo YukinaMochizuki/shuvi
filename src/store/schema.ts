@@ -52,6 +52,11 @@ export const chats = sqliteTable("chats", {
   enteredAt: text("entered_at"),
   /** Context occupancy the last turn ended at, handed back to the driver on the next turn. */
   contextTokens: integer("context_tokens"),
+  /**
+   * The profile the chat uses (home/profiles/<name>/, capabilities/memory/layers.ts), from its next turn; null =
+   * none, the base. One that no longer exists is run on the base (agent/turn.ts `chatLayers`).
+   */
+  profile: text("profile"),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
 
@@ -412,6 +417,8 @@ export const turns = sqliteTable(
      * turn that did not record it (one from before this column, or one run outside the runner child).
      */
     conversationStart: text("conversation_start", { mode: "json" }).$type<{ session: string | null; position: string | null }>(),
+    /** The profile the turn ran under (layers.ts), recorded at its start; null = the base. */
+    profile: text("profile"),
     startedAt: text("started_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },
@@ -439,8 +446,11 @@ export const turns = sqliteTable(
 export const promptTexts = sqliteTable("prompt_texts", {
   hash: text("hash").primaryKey(),
   text: text("text").notNull(),
-  /** `[{ label, start, end }]`: character offsets into `text`, in order. */
-  sections: text("sections", { mode: "json" }).notNull().$type<{ label: string; start: number; end: number }[]>(),
+  /**
+   * `[{ label, start, end, layer? }]`: character offsets into `text`, in order; `layer`, where the section came
+   * from: `base`, a profile's name, or `code` (agent/prompt.ts `PromptSection`; absent before profiles).
+   */
+  sections: text("sections", { mode: "json" }).notNull().$type<{ label: string; start: number; end: number; layer?: string }[]>(),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
 
@@ -602,9 +612,9 @@ export const approvals = sqliteTable("approvals", {
  */
 export const controlCards = sqliteTable("control_cards", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  kind: text("kind", { enum: ["switch", "models", "provider_add", "provider_remove"] }).notNull(),
+  kind: text("kind", { enum: ["switch", "models", "provider_add", "provider_remove", "profile"] }).notNull(),
   status: text("status", { enum: ["open", "waiting", "closed"] }).notNull().default("open"),
-  /** For `switch`: the chat whose model it switches. */
+  /** For `switch`: the chat whose model it switches; for `profile`: the chat whose profile it switches. */
   chatId: integer("chat_id").references(() => chats.id),
   /** What opened it (`command:<seq>`, `update:<id>`), so the same command never opens two. */
   idemKey: text("idem_key").unique(),
@@ -818,7 +828,7 @@ export const stickerMeta = sqliteTable(
 
 /** One home/stickers/*.yaml file, as last indexed. */
 export const stickerPacks = sqliteTable("sticker_packs", {
-  /** The file's name under home/stickers/. */
+  /** The file's key: its name under home/stickers/, or `profiles/<name>/stickers/<file>` (stickers/library.ts). */
   file: text("file").primaryKey(),
   /** A hash of the file's bytes: a different one means re-index it. */
   hash: text("hash").notNull(),
@@ -845,7 +855,8 @@ export const stickerLibrary = sqliteTable(
     tier: text("tier", { enum: ["go-to", "normal", "rare", "never"] }).notNull(),
     dmOnly: integer("dm_only", { mode: "boolean" }).notNull().default(false),
   },
-  (t) => [uniqueIndex("sticker_library_pack_n").on(t.pack, t.n), index("sticker_library_file").on(t.file)],
+  // A pack may be described once per layer (the base, or a profile: stickers/library.ts), so n is unique per file.
+  (t) => [uniqueIndex("sticker_library_file_n").on(t.file, t.n), index("sticker_library_pack_n").on(t.pack, t.n)],
 );
 
 /**

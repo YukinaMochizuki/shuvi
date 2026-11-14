@@ -154,7 +154,7 @@ describe("commands", () => {
     expect(await registerCommands(api, OWNER, MAIN_COMMANDS, "main bot")).toBe(true);
     expect(await registerCommands(api, OWNER, CONTROL_COMMANDS, "control bot")).toBe(true);
     const scope = { type: "chat", chat_id: OWNER };
-    const main = { scope, commands: [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }, { command: "model", description: expect.stringContaining("control bot") }] };
+    const main = { scope, commands: [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }, { command: "model", description: expect.stringContaining("control bot") }, { command: "profile", description: expect.stringContaining("control bot") }] };
     const control = {
       scope,
       commands: [
@@ -164,6 +164,7 @@ describe("commands", () => {
         { command: "turn", description: expect.stringContaining("<id>") },
         { command: "model", description: expect.stringContaining("<chat>") },
         { command: "models", description: expect.stringContaining("/models add") },
+        { command: "profile", description: expect.stringContaining("<chat>") },
         { command: "provider", description: expect.stringContaining("/provider add") },
       ],
     };
@@ -183,7 +184,7 @@ describe("commands", () => {
     const C = -1000000000003;
     const policyOf = (...groups: number[]): Policy => ({ chats: { dm: DM_DEFAULT, ...Object.fromEntries(groups.map((g) => [String(g), GROUP_DEFAULTS])) }, unknownChat: "ignore" });
     const memberScope = (g: number) => ({ type: "chat_member", chat_id: g, user_id: OWNER });
-    const commands = [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }, { command: "model", description: expect.any(String) }];
+    const commands = [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }, { command: "model", description: expect.any(String) }, { command: "profile", description: expect.any(String) }];
 
     test("each listed group gets the commands for the owner only; the DM is not a group", async () => {
       const api = fakeApi();

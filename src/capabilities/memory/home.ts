@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { currentCall } from "../../agent/call-context.ts";
-import { PLAYBOOK_NAME } from "../../agent/playbooks.ts";
+import { PLAYBOOK_NAME } from "./layers.ts";
 
 /**
  * `home/` as the assistant may touch it: a fixed allow-list of files, and every change a git commit in
@@ -31,7 +31,13 @@ import { PLAYBOOK_NAME } from "../../agent/playbooks.ts";
  *                  `Turn: <turn id>`, `Tool-Call: <call id>`, `Chat: <chat row id>`, `Tool: <tool name>`
  *   the owner's    made from the console (`by.console`): authored `owner (console)` with the signed-in login as
  *                  the email, and the trailer `Edited-In: console`
+ *   either         `Base-Commit: <sha>` on a commit that made a profile's copy of a base file from the base
+ *                  (`by.baseCommit`; capabilities/memory/layers.ts)
  * Anything else in home/'s history (a commit made by hand on the machine) is what its author says it is.
+ *
+ * A profile's files (layers.ts) are committed at their physical paths (`profiles/<name>/<path>`), so a file's
+ * history is its own; a change to several files at once (a profile renamed, duplicated or deleted) is ONE commit,
+ * `commitHomeEdits`.
  */
 
 /** Where the asking turn runs, as far as home/ is concerned. */
@@ -110,7 +116,7 @@ export const AUTHOR = { name: "shuvi", email: "shuvi@localhost" };
 export const CONSOLE_AUTHOR = "owner (console)";
 
 /** The trailers a commit's message may end with, by what they say. */
-export const TRAILERS = { turn: "Turn", call: "Tool-Call", chat: "Chat", tool: "Tool", editedIn: "Edited-In" } as const;
+export const TRAILERS = { turn: "Turn", call: "Tool-Call", chat: "Chat", tool: "Tool", editedIn: "Edited-In", baseCommit: "Base-Commit" } as const;
 
 /** Who a commit is by: hers by default; `console`: the owner, from the console, signed in as `login`. */
 export interface CommitBy {
@@ -120,6 +126,12 @@ export interface CommitBy {
    * committed meanwhile), nothing is written and `StaleEdit` is thrown, so the caller can look again.
    */
   expect?: string | null;
+  /**
+   * A profile's copy of a base file made or brought up to date from the base as of this commit (the console's Make
+   * a version, Copy from Base, Duplicate, a save that applied Base's changes): the trailer `Base-Commit: <sha>`,
+   * which the console reads to tell when the base changed since (console/home-data.ts `baseSince`).
+   */
+  baseCommit?: string;
 }
 
 /** The file changed between the caller's look and the write (`CommitBy.expect`): nothing was written. */
@@ -151,6 +163,7 @@ function authorship(why: string, by: CommitBy): { author: { name: string; email:
     const call = currentCall();
     if (call) lines.push(`${TRAILERS.turn}: ${call.turnId}`, `${TRAILERS.call}: ${call.callId}`, `${TRAILERS.chat}: ${call.chatId}`, `${TRAILERS.tool}: ${call.tool}`);
   }
+  if (by.baseCommit) lines.push(`${TRAILERS.baseCommit}: ${by.baseCommit}`);
   // `why` as given (a policy change's message has several lines); the trailers are its last paragraph.
   return { author, message: lines.length ? `${why.trimEnd()}\n\n${lines.join("\n")}` : why };
 }
@@ -160,6 +173,9 @@ function authorship(why: string, by: CommitBy): { author: { name: string; email:
  * owner's; what a chat may see is a turn's question, not his).
  */
 export function consoleEditable(path: string): boolean {
+  // A profile's copy of one of them (layers.ts): `profiles/<name>/<editable path>`, never wider.
+  const prof = /^profiles\/([a-z0-9][a-z0-9-]{0,31})\/(.+)$/.exec(path);
+  if (prof) return !prof[2]!.startsWith("profiles/") && consoleEditable(prof[2]!);
   if ((SELF_FILES as readonly string[]).includes(path) || path === STICKER_PREFERENCES || STICKER_PACK.test(path)) return true;
   if (/^chats\/-?\d{1,20}\.md$/.test(path)) return true;
   const playbook = /^playbooks\/(.+)\.md$/.exec(path);
@@ -219,4 +235,86 @@ export function commitHomeEdit(home: string, rel: string, content: string | null
     git(home, ["reset", "-q", "--", rel]);
     throw new Error(`the edit was not saved (${e instanceof Error ? e.message : String(e)})`);
   }
+}
+
+/**
+ * Several files changed as ONE commit (a profile renamed, duplicated or deleted): each `content` written, or the
+ * file removed when null (it must be in home/'s history). Returns the short commit id. On any failure every file
+ * is put back as it was and the error is thrown. Files that already say what is asked are left out; nothing to
+ * change at all is an error.
+ */
+export function commitHomeEdits(
+  home: string,
+  changes: readonly { rel: string; content: string | null }[],
+  why: string,
+  by: CommitBy = {},
+  /**
+   * Called once every new text is on disk and before anything is removed (a profile renamed: its chats are moved to
+   * the new name there, so a turn starting meanwhile finds its profile under either name: console/home-write.ts).
+   * If it throws, nothing is committed and every file is put back.
+   */
+  afterWrites?: () => void,
+): string {
+  const { author, message } = authorship(why, by);
+  ensureRepo(home);
+  const todo = changes
+    .map((c) => {
+      const abs = inside(home, c.rel);
+      return { ...c, abs, before: existsSync(abs) ? readFileSync(abs, "utf8") : null };
+    })
+    .filter((c) => c.before !== c.content);
+  if (!todo.length) throw new Error("nothing to change");
+  for (const c of todo) {
+    if (c.content === null && !git(home, ["ls-files", "--error-unmatch", "--", c.rel]).ok) {
+      throw new Error(`${c.rel} was never committed in home/, so removing it could not be undone; nothing was changed.`);
+    }
+  }
+  const rels = todo.map((c) => c.rel);
+  try {
+    // Writes first, removals after: a reader in between sees every new file, and the old ones still there.
+    for (const c of todo) {
+      if (c.content === null) continue;
+      mkdirSync(dirname(c.abs), { recursive: true });
+      writeFileSync(c.abs, c.content);
+    }
+    afterWrites?.();
+    for (const c of todo) if (c.content === null) rmSync(c.abs);
+    const add = git(home, ["add", "-A", "--", ...rels]);
+    if (!add.ok) throw new Error(add.out);
+    const commit = git(home, ["commit", "-q", "-m", message, "--", ...rels], author);
+    if (!commit.ok) throw new Error(commit.out);
+    // Folders a removal emptied go too (a deleted profile leaves no folder behind to be taken for one).
+    for (const c of todo) if (c.content === null) pruneEmpty(home, dirname(c.abs));
+    return git(home, ["rev-parse", "--short", "HEAD"]).out;
+  } catch (e) {
+    for (const c of todo) {
+      if (c.before === null) rmSync(c.abs, { force: true });
+      else {
+        mkdirSync(dirname(c.abs), { recursive: true });
+        writeFileSync(c.abs, c.before);
+      }
+    }
+    git(home, ["reset", "-q", "--", ...rels]);
+    throw new Error(`nothing was saved (${e instanceof Error ? e.message : String(e)})`);
+  }
+}
+
+/** Remove `dir` and its parents while they are empty, up to (not including) home/. */
+function pruneEmpty(home: string, dir: string): void {
+  const root = resolve(home);
+  for (let d = resolve(dir); d !== root && d.startsWith(root + sep); d = dirname(d)) {
+    try {
+      if (readdirSync(d).length) return;
+      rmdirSync(d);
+    } catch {
+      return;
+    }
+  }
+}
+
+/** The full id of home/'s latest commit, or null when it has none. */
+export function homeHead(home: string): string | null {
+  if (!existsSync(join(home, ".git"))) return null;
+  const r = git(home, ["rev-parse", "HEAD"]);
+  return r.ok ? r.out : null;
 }

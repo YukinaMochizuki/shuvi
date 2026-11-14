@@ -90,7 +90,7 @@ export interface MessageMedia {
 
 export interface CommandPayload {
   from: Speaker;
-  command: "new" | "stop" | "model";
+  command: "new" | "stop" | "model" | "profile";
 }
 
 export interface BotMessagePayload {

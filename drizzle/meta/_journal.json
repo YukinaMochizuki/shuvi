@@ -141,6 +141,13 @@
       "when": 1794675044943,
       "tag": "0019_message_deletions",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1794677036048,
+      "tag": "0020_profiles",
+      "breakpoints": true
     }
   ]
 }

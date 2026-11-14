@@ -149,12 +149,12 @@ export class TurnRecorder {
     return cap(JSON.stringify(redactDeep(args, this.redact)));
   }
 
-  private system: { hash: string; text: string; bounds: { label: string; start: number; end: number }[] } | null = null;
+  private system: { hash: string; text: string; bounds: { label: string; start: number; end: number; layer?: string }[] } | null = null;
 
   /** The system prompt, by section. Kept until `input`, which stores both in one transaction. */
   prompt(sections: readonly PromptSection[]): void {
     this.safe("the system prompt", () => {
-      const bounds: { label: string; start: number; end: number }[] = [];
+      const bounds: { label: string; start: number; end: number; layer?: string }[] = [];
       let at = 0;
       let text = "";
       sections.forEach((s, i) => {
@@ -163,11 +163,14 @@ export class TurnRecorder {
           at += SECTION_JOIN.length;
         }
         const t = this.redact(s.text);
-        bounds.push({ label: s.label, start: at, end: at + t.length });
+        bounds.push({ label: s.label, start: at, end: at + t.length, ...(s.layer ? { layer: s.layer } : {}) });
         text += t;
         at += t.length;
       });
-      this.system = { hash: hashText(text), text, bounds };
+      // The layers are part of the record (the console shows each section's source): a prompt built from a profile
+      // is kept apart from the same text built from the base. A base-only prompt hashes as it always did.
+      const profiled = bounds.some((b) => b.layer && b.layer !== "base" && b.layer !== "code");
+      this.system = { hash: profiled ? hashText(`${text}\0${bounds.map((b) => b.layer ?? "").join(",")}`) : hashText(text), text, bounds };
     });
   }
 
@@ -181,7 +184,7 @@ export class TurnRecorder {
       const sys = this.system;
       this.db.transaction((tx) => {
         const t = tx as unknown as Db;
-        if (sys) savePrompt(t, sys.text, sys.bounds);
+        if (sys) savePrompt(t, sys.text, sys.bounds, sys.hash);
         saveTranscript(t, this.turnId, { promptHash: sys?.hash ?? null, input, resumed });
         markRecordingStarted(t, this.turnId);
       });

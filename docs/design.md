@@ -134,7 +134,28 @@ home/                     a local-only git repo, no remote
   stickers/<pack>.yaml    the sticker library
   stickers/preferences.md principles that apply across stickers
   policy.yaml             each chat's permissions
+  profiles/<name>/        a profile: only the files it replaces, at their usual paths
+    profile.yaml          its label, and the base playbooks and sticker packs it hides
 ```
+
+**Profiles** (src/capabilities/memory/layers.ts). The owner can run one chat with different sets of her files
+for different situations ("work" and "personal" for his DM, say), and switch at any time. A profile is an
+OVERLAY: `home/profiles/<name>/` holds only the files it replaces; every other file comes from the BASE (home/
+as above). Any of her files can be overlaid: both personas, `directives.md`, `memory/private.md`, a chat's
+notes, a playbook (a profile may replace one, add its own, or hide a base one), the sticker preferences and
+packs. Not `policy.yaml` or `inbound.yaml`. Each chat uses one profile or none (`chats.profile`), from its
+next turn: a running turn finishes on what it began with, and each turn records the profile it ran under
+(`turns.profile`). A chat set to a profile that no longer exists runs on the base, and the owner is told once.
+
+SHE NEVER KNOWS profiles exist. One resolver answers, for a LOGICAL path (what she, her tools and the allow-list
+see), the file in effect: the profile's own copy if it has one, else the base's; a playbook the profile hides
+reads as absent. Every reader and writer of her files goes through it (the prompt, the playbooks, the memory
+tools, the sticker library). Her edit goes to the copy in effect; a NEW file goes to the base, except a playbook
+the profile hides, which becomes the profile's own. Sticker packs overlay by PACK (a profile's file for a pack
+replaces Base's, whatever its file name), and `remove_sticker_pack` on a profile's own copy removes it and hides
+the pack in that profile, so it is gone for chats on it while Base, and every chat on Base, keep it. Nothing in her
+prompt, a tool's description or its result (errors included) names a profile. Only the owner sees or switches them: on the console's Home and chat pages, and with `/profile`
+(§13). Privacy rules apply to the logical path: `profiles/<p>/memory/private.md` still reaches only the owner's DM.
 
 `home/` is highly private. It never enters this repository and is never pushed anywhere. Its history
 lives only in the local git repo, and it is backed up with the machine (and daily as a `git bundle`, §13).
@@ -207,6 +228,9 @@ prefix):
 5. playbook index: one line per playbook, its name and when it is needed; `read_playbook(name)` reads
    one in full
 6. private memory: the owner's DM only
+
+Each layer that comes from a file is read through the chat's profile, if it has one (§3): the profile's copy
+where it has one, the base's otherwise.
 
 Preferences used in almost every turn (such as how to pick stickers) go in the capability group's
 description; the details of "how to do X" go in a playbook.
@@ -292,7 +316,11 @@ directly when the owner asks, with a commit per edit and a one-line note in the 
 the turn, the chat and the tool call it was made in (as trailers), so every change to a file can be traced to the
 exact call. The owner edits them himself on the console's Home page (docs/console.md), which shows each file's
 history, and undoes or restores a version there; or he asks her, or uses git directly. Requests from anyone else
-in a group can at most be written into that chat's notes.
+in a group can at most be written into that chat's notes. A profile's files (§3) are committed at their own
+paths (`profiles/<name>/…`), so each has its own history; a commit that made a profile's copy from the base (or
+brought it up to date with it) says which base commit as the trailer `Base-Commit`, so the console can tell when
+the base changed since; every console save of a copy records the base commit its text is based on (a restored
+version or an undone change brings back the one in effect then). A profile renamed, duplicated or deleted is one commit.
 
 ## 9. Memory and retrieval
 
@@ -417,6 +445,8 @@ stickers:
   - `/turn <id>`: one paragraph on a turn, and its link in the console.
   - `/model <chat>`: a card to switch that chat's model (below); `/model <chat> <provider>/<model>
     lossless|lossy` switches with no card and replies with the result.
+  - `/profile <chat>`: a card to switch which profile (§3) that chat uses: Base and every profile, the
+    current one ✓; a press switches it, from the chat's next turn, and the card says so.
   - `/models`: the catalog as a card: each model's id, label, default ★, context window, vision and probe
     state, with Make default, Re-probe and Remove (which first names the chats whose own model it is; the
     default cannot be removed). `/models add <provider>/<model> [<context_window>]` adds one directly.
@@ -475,6 +505,8 @@ stickers:
   - `/new`: start a fresh conversation context, forgetting every model's conversation of the chat. `chat_events` and the cursor are kept;
     the new conversation opens with the last 10 messages.
   - `/stop`: stop the turn running in this chat.
+  - `/model`, `/profile`: the control bot sends the owner the card for this chat (above), so nobody else in a
+    group sees it.
 
   The framework acknowledges a command only by reacting to it; it sends no message.
 - **CLI**: deep debugging on the machine (reading `chat_events`, turns, jobs).
