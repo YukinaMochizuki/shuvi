@@ -35,6 +35,7 @@ import {
 import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
 import { chatLabel, DRAIN_STOP, extendTurn, finishTurn, getTurn, hadEarlierTurn, saveSession, setTurnConversation, type Turn } from "../store/turns.ts";
+import { withCall } from "./call-context.ts";
 import { buildPromptSections, joinSections } from "./prompt.ts";
 import { claimSwitches, switchNote } from "./switch.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, timeNote, type InputOptions, type Perceive } from "./render.ts";
@@ -376,8 +377,9 @@ export function callAuthority(db: Db, s: TurnState, authority: TurnAuthority, to
 
 /**
  * The boundary around every tool call of the turn: refuse after `pass`, refuse an owner-only call the
- * turn has no authority for (`callAuthority`: the owner's, or an operator's for a delegated tool), append
- * what arrived meanwhile.
+ * turn has no authority for (`callAuthority`: the owner's, or an operator's for a delegated tool), run the
+ * handler inside its call's context (agent/call-context.ts: a home/ commit made in it records the turn and the
+ * call), append what arrived meanwhile.
  */
 export function turnBoundary(
   db: Db,
@@ -404,6 +406,9 @@ export function turnBoundary(
         if ("refused" in r) return `Refused: ${r.refused}. Nothing was done. ${note}`;
       }
       return null;
+    },
+    around(call, fn) {
+      return call.callId ? withCall({ turnId: s.turnId, chatId: s.chat.id, callId: call.callId, tool: call.name }, fn) : fn();
     },
     append() {
       // After `pass` (the turn is over) or a stop (it is being abandoned), a message that arrives is not

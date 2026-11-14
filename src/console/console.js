@@ -11,6 +11,15 @@ function arrive(root) {
   for (const b of root.querySelectorAll("button.copy[data-copy][hidden]")) b.hidden = false;
   const on = root.querySelector(".rows a.row.on");
   if (on) on.scrollIntoView({ block: "nearest" });
+  // A link to one tool call (`#call-<id>`, from Home's history): open that call and bring it into view.
+  const hash = decodeURIComponent(location.hash.slice(1));
+  const anchor = hash.startsWith("call-") ? document.getElementById(hash) : null;
+  const call = anchor?.nextElementSibling;
+  if (call instanceof HTMLDetailsElement && root.contains(call)) {
+    call.open = true;
+    call.classList.add("targeted");
+    call.scrollIntoView({ block: "center" });
+  }
 }
 
 document.addEventListener("click", async (e) => {

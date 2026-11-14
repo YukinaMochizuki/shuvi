@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { currentCall } from "../../agent/call-context.ts";
 import { PLAYBOOK_NAME } from "../../agent/playbooks.ts";
 
 /**
@@ -24,6 +25,13 @@ import { PLAYBOOK_NAME } from "../../agent/playbooks.ts";
  * A commit that fails restores the file to what it was before the edit, so the working tree never holds
  * an edit the history does not. home/ is its own repository, created on the first edit; it never commits
  * into a repository it happens to sit inside (data/ inside a checkout, say).
+ *
+ * WHO CHANGED IT is in each commit, for the console's history (src/console/home-data.ts):
+ *   hers           authored `shuvi`; made inside a tool call (agent/call-context.ts), it carries the trailers
+ *                  `Turn: <turn id>`, `Tool-Call: <call id>`, `Chat: <chat row id>`, `Tool: <tool name>`
+ *   the owner's    made from the console (`by.console`): authored `owner (console)` with the signed-in login as
+ *                  the email, and the trailer `Edited-In: console`
+ * Anything else in home/'s history (a commit made by hand on the machine) is what its author says it is.
  */
 
 /** Where the asking turn runs, as far as home/ is concerned. */
@@ -99,20 +107,68 @@ function inside(home: string, rel: string): string {
 }
 
 export const AUTHOR = { name: "shuvi", email: "shuvi@localhost" };
+export const CONSOLE_AUTHOR = "owner (console)";
 
-function git(home: string, args: string[]): { ok: boolean; out: string } {
+/** The trailers a commit's message may end with, by what they say. */
+export const TRAILERS = { turn: "Turn", call: "Tool-Call", chat: "Chat", tool: "Tool", editedIn: "Edited-In" } as const;
+
+/** Who a commit is by: hers by default; `console`: the owner, from the console, signed in as `login`. */
+export interface CommitBy {
+  console?: { login?: string };
+  /**
+   * The text the caller decided on (null: absent). If the file says anything else by the time it is written (she
+   * committed meanwhile), nothing is written and `StaleEdit` is thrown, so the caller can look again.
+   */
+  expect?: string | null;
+}
+
+/** The file changed between the caller's look and the write (`CommitBy.expect`): nothing was written. */
+export class StaleEdit extends Error {}
+
+function git(home: string, args: string[], author: { name: string; email: string } = AUTHOR): { ok: boolean; out: string } {
   const r = Bun.spawnSync(["git", "-C", home, "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], {
     env: {
       ...process.env,
-      GIT_AUTHOR_NAME: AUTHOR.name,
-      GIT_AUTHOR_EMAIL: AUTHOR.email,
-      GIT_COMMITTER_NAME: AUTHOR.name,
-      GIT_COMMITTER_EMAIL: AUTHOR.email,
+      GIT_AUTHOR_NAME: author.name,
+      GIT_AUTHOR_EMAIL: author.email,
+      GIT_COMMITTER_NAME: author.name,
+      GIT_COMMITTER_EMAIL: author.email,
     },
     stdout: "pipe",
     stderr: "pipe",
   });
   return { ok: r.exitCode === 0, out: (r.stdout.toString() + r.stderr.toString()).trim() };
+}
+
+/** The commit's author, and its message: `why`, then a blank line and the trailers that say who (see the header). */
+function authorship(why: string, by: CommitBy): { author: { name: string; email: string }; message: string } {
+  const lines: string[] = [];
+  let author = AUTHOR;
+  if (by.console) {
+    author = { name: CONSOLE_AUTHOR, email: by.console.login?.trim() || "console@localhost" };
+    lines.push(`${TRAILERS.editedIn}: console`);
+  } else {
+    const call = currentCall();
+    if (call) lines.push(`${TRAILERS.turn}: ${call.turnId}`, `${TRAILERS.call}: ${call.callId}`, `${TRAILERS.chat}: ${call.chatId}`, `${TRAILERS.tool}: ${call.tool}`);
+  }
+  // `why` as given (a policy change's message has several lines); the trailers are its last paragraph.
+  return { author, message: lines.length ? `${why.trimEnd()}\n\n${lines.join("\n")}` : why };
+}
+
+/**
+ * The files the console may edit: every file on the allow-list, any chat's notes included (the console is the
+ * owner's; what a chat may see is a turn's question, not his).
+ */
+export function consoleEditable(path: string): boolean {
+  if ((SELF_FILES as readonly string[]).includes(path) || path === STICKER_PREFERENCES || STICKER_PACK.test(path)) return true;
+  if (/^chats\/-?\d{1,20}\.md$/.test(path)) return true;
+  const playbook = /^playbooks\/(.+)\.md$/.exec(path);
+  return !!playbook && PLAYBOOK_NAME.test(playbook[1]!);
+}
+
+/** Run git in home/ (reads only: the console's history). Exported for console/home-data.ts. */
+export function homeGit(home: string, args: string[]): { ok: boolean; out: string } {
+  return git(home, args);
 }
 
 /** The short id of the latest commit that removed `rel` from home/, or null when none did. */
@@ -133,11 +189,14 @@ function ensureRepo(home: string): void {
  * Write `content` to `rel` and commit it, with `why` as the message; `content` null removes the file
  * instead (it must be in home/'s history, so what it said stays recoverable). Returns the short commit id.
  * On any failure the file is put back as it was (or removed, if the edit created it) and the error is thrown.
+ * `by`: who it is by (see the header); hers by default.
  */
-export function commitHomeEdit(home: string, rel: string, content: string | null, why: string): string {
+export function commitHomeEdit(home: string, rel: string, content: string | null, why: string, by: CommitBy = {}): string {
+  const { author, message } = authorship(why, by);
   ensureRepo(home);
   const abs = inside(home, rel);
   const before = existsSync(abs) ? readFileSync(abs, "utf8") : null;
+  if (by.expect !== undefined && before !== by.expect) throw new StaleEdit(`${rel} changed meanwhile`);
   if (before === content) throw new Error(content === null ? `${rel} does not exist; nothing to remove.` : `${rel} already says exactly that; nothing to commit.`);
   if (content === null && !git(home, ["ls-files", "--error-unmatch", "--", rel]).ok) {
     throw new Error(`${rel} was never committed in home/, so removing it could not be undone; it was left in place.`);
@@ -151,7 +210,7 @@ export function commitHomeEdit(home: string, rel: string, content: string | null
     const add = git(home, ["add", "-A", "--", rel]);
     if (!add.ok) throw new Error(add.out);
     // Only this path: anything else that changed in home/ (the owner editing by hand) is not swept in.
-    const commit = git(home, ["commit", "-q", "-m", why, "--", rel]);
+    const commit = git(home, ["commit", "-q", "-m", message, "--", rel], author);
     if (!commit.ok) throw new Error(commit.out);
     return git(home, ["rev-parse", "--short", "HEAD"]).out;
   } catch (e) {

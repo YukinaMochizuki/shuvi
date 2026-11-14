@@ -85,10 +85,13 @@ page marks those turns. `j` / `k` move between segments.
   its transcript was pruned after the retention period, or it was never recorded (it ended before its prompt
   reached the model). The first recorded turn is a marker in `kv`, so the three are told apart.
 - **/chats/:id**: a chat's whole log, each turn's boundary a thin divider linking to it.
-- **/settings**: the model catalog, the console's one page of settings that change anything (below).
+- **/home**: her files, edited by hand, with their history (below).
+- **/settings**: the model catalog (below).
 - **Deleting messages**, on every page that shows bubbles (a chat's log, a segment, a conversation, a turn's
   Conversation tab): see "Deleting messages" below.
 - **/login**, **403**, **404**: the same shell, a small centred card.
+
+Settings, Home and deleting messages are the console's only ways to change anything.
 
 ## Settings
 
@@ -163,6 +166,39 @@ boundary is in server.ts's header.
 - Without script: every checkbox is shown, the bar is always there as a plain form, and the page comes back
   with a Notice at its top ("Deleted 3 messages. You can undo it for 9 seconds. [Undo]"), shown once.
 
+## Home
+
+Three panes, full height, each scrolling on its own (home.ts):
+
+```
+┌ top bar: shuvi console  Turns Home Settings ·························· owner@… ┐
+├──────────────────┬──────────────────────────────────────────┬───────────────────┤
+│ HERSELF          │ directives.md  Unsaved +2 −1             │ HISTORY 5 changes │
+│ directives.md 2m │ ● She just changed this file +1 −0 · …   │ ● her DM · #812   │
+│ ● her · rules    │  1 ## Always                             │   Owner doesn't…  │
+│ CHAT NOTES       │  2 - …        (CodeMirror)               │ ● you console     │
+│ PLAYBOOKS        │ [Note (optional)            ] [Save] ⌘S  │ All history →     │
+└──────────────────┴──────────────────────────────────────────┴───────────────────┘
+```
+
+- **Files** (300px): groups (Herself, Chat notes, Playbooks, Stickers); a row is the path (mono), when it last
+  changed, and who (a dot: hers in the accent, yours amber, anyone else grey) with a hint; a file not created yet is
+  faint.
+- **Editor**: the path, "Unsaved +n −m" in amber while it differs from the saved file, the watch's line when the
+  file changed meanwhile (blue tint), a loaded undo or restore (amber tint, "not saved yet"), CodeMirror, and a
+  footer with the note field and Save.
+- **A diff** (a history entry): who and the message, when, the call; `This change | This version vs now`,
+  `Unified | Split`, +/− with GitHub's five squares, then Undo this change (⚠ when it needs a merge) and Restore
+  this version. The diff is ghdiff.ts's, GitHub's dark colours, the whole file, scrolled to the first change.
+- **Conflict**: a notice saying what happened, then CodeMirror's merge view: the file now on the left, read-only;
+  yours on the right, editable, which is what Save sends; arrows copy a block across.
+- **History** (320px, folds to a 28px strip): entries as rows, the selected one marked like a list row.
+- Under 760px one pane at a time (`?pane=files|edit|history`), with ‹ back links and a History button.
+
+The editor (editor/editor.ts) is the page's only extra script, bundled by Bun in the server (editor/bundle.ts), and
+only an upgrade: the page is a textarea and a form without it. It never rewrites text; the colours of its changes
+are GitHub's, as in the diff.
+
 ## Components
 
 | component | what it is |
@@ -198,6 +234,11 @@ boundary is in server.ts's header.
 | Pickable | a deletable bubble: its checkbox (left), the bubble, its ⋯ menu (top right) |
 | SelBar | the delete form: what is selected, the reason of a refusal, Delete, Cancel; sticky at the bottom |
 | Toast | after a delete: "Deleted 3 · Undo (8)", fixed at the bottom centre, counting down |
+| FileRow | Home: path · when · who-dot, who and a hint; selected like a list row |
+| WhoDot | 7px: her (accent), you (amber), anyone else (grey) |
+| HistEntry | Home: who-dot · who · where (chat · #turn) · when, the message, the date and +/− |
+| GhDiff | a file diff in GitHub's style: two number columns, +/−, line and word grounds, `@@` hunks (ghdiff.ts) |
+| ChangeBar | +n −m and five squares, as GitHub draws a file's change size |
 
 ## Type and spacing
 

@@ -66,8 +66,12 @@ const HTMX_CONFIG = JSON.stringify({
  * BOOSTED (htmx `hx-boost`): with script, a link or a form fetches its page in the background and swaps the body,
  * keeping the stylesheet and scripts, with the URL and Back as for a load; the bar under the top bar
  * (`#progress`) shows while a request is out. Without script, they are plain links and forms.
+ *
+ * `scripts`: same-origin scripts only this page needs (the Home editor's `/editor.js`), loaded after the shared
+ * two. A boosted navigation keeps the head it started with, so such a page is reached with a full load: its
+ * links into it carry `hx-boost="false"` (home.ts), and it upgrades what a later swap brings itself.
  */
-export function page(title: string, body: Raw, who?: string, here?: "turns" | "settings"): string {
+export function page(title: string, body: Raw, who?: string, here?: "turns" | "home" | "settings", scripts: readonly string[] = []): string {
   return `<!doctype html>${html`<html lang="en">
 <head>
 <meta charset="utf-8">
@@ -78,11 +82,12 @@ export function page(title: string, body: Raw, who?: string, here?: "turns" | "s
 <link rel="stylesheet" href="/style.css">
 <script src="/htmx.min.js" defer></script>
 <script src="/console.js" defer></script>
-</head>
+${scripts.map((s) => html`<script src="${s}" defer></script>
+`)}</head>
 <body hx-boost="true" hx-indicator="#progress">
 <div id="progress" class="progress" aria-hidden="true"></div>
 <header class="topbar"><a class="brand" href="/turns">shuvi</a><span class="crumb">console</span>
-<nav><a href="/turns" class="${here === "turns" ? "here" : ""}">Turns</a><a href="/settings" class="${here === "settings" ? "here" : ""}">Settings</a></nav>
+<nav><a href="/turns" class="${here === "turns" ? "here" : ""}">Turns</a><a href="/home" hx-boost="false" class="${here === "home" ? "here" : ""}">Home</a><a href="/settings" class="${here === "settings" ? "here" : ""}">Settings</a></nav>
 ${who ? html`<span class="who">${who}</span>` : ""}</header>
 ${body}
 </body>

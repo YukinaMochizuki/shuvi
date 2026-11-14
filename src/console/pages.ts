@@ -517,7 +517,9 @@ function toolChip(s: Step, shownBelow = false): Raw {
               extra: s.images?.length ? html`<div class="imgs">${s.images.map((i) => img(i.ref))}</div>` : raw(""),
             });
   const reason = status === "refused" || status === "threw" || status === "error" ? html`<p class="why c-${status === "refused" ? "refused" : "failed"}">${excerpt(status === "error" ? (s.result ?? "") : (s.error ?? ""), 200)}</p>` : "";
-  return html`<details class="step tool" id="s${s.n}" ${openAttr()}><summary>${dot(status)}<span class="name">${s.name ?? "?"}</span><span class="args grow">${shownBelow ? "" : argsSummary(s.args)}</span>${
+  // `#call-<id>`: where Home's history links a change of hers to the call that made it (console.js opens it).
+  const anchor = s.callId ? html`<span class="call-anchor" id="call-${s.callId}"></span>` : "";
+  return html`${anchor}<details class="step tool" id="s${s.n}" ${openAttr()}><summary>${dot(status)}<span class="name">${s.name ?? "?"}</span><span class="args grow">${shownBelow ? "" : argsSummary(s.args)}</span>${
     word ? html`<span class="word c-${status === "refused" ? "refused" : status === "running" ? "running" : "failed"}">${word}</span>` : ""
   }<span class="dur">${d}</span></summary><div class="inner">${block("arguments", pretty(s.args) || "(none)")}${outcome}</div></details>${reason}`;
 }

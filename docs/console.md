@@ -1,8 +1,9 @@
 # The console
 
 A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
-timeline. It is for the owner, to debug and tune her. It is read-only, except for two things: **Settings**,
-which manages the model catalog, and **deleting chat messages** (both below). Nothing else in it can change
+timeline. It is for the owner, to debug and tune her. It is read-only, except for three things: **Settings**,
+which manages the model catalog, **Home**, where her files are edited, and **deleting chat messages** (all
+below). Nothing else in it can change
 anything.
 
 ## What it shows
@@ -30,6 +31,7 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
     index, memory), each with its size, and a diff against the previous turn's prompt in the chat.
   - *Raw input*: the exact text and images the model received.
 - **A chat** (`/chats/<id>`): the chat's whole log, each turn's boundary a divider linking to it.
+- **Home** (`/home`): her files in `home/`, edited by hand, with each file's history. See below.
 - **Settings** (`/settings`): the model catalog. See below.
 
 ## Deleting messages
@@ -73,13 +75,46 @@ panel) updates itself every second with how long it has waited and how long a re
 Cancel: cancelling stops the request itself, and a cancelled probe leaves the model's last result as it was.
 Without script, reload the page to see one finish.
 
+## Home: her files
+
+Every file of hers in `home/` (the allow-list `src/capabilities/memory/home.ts` keeps): her persona, your rules
+(`directives.md`), her memory, every chat's notes (created or not yet), the playbooks, and the sticker files. Three
+panes:
+
+- **Files**, grouped, each with who changed it last and when.
+- **The editor** (CodeMirror, served by the console itself at `/editor.js`; a plain textarea without script).
+  Unsaved changes show against the saved file, in the gutter and inline, and as "Unsaved +n −m"; Ctrl+S / ⌘S or
+  Save commits the file to `home/`, with the optional note as the message ("Edited in console" without one).
+  Leaving with unsaved changes asks first.
+- **History**: every commit that touched the file, newest first: who made it (her, with the chat, the turn and
+  the very tool call, linked to the turn; you, from the console; or someone who committed by hand), when, the
+  message, and +/−. `/home/history` lists every file's changes.
+
+A history entry opens as a diff in GitHub's style, of the whole file (unified or split; "this change", or "this
+version vs now"), with two buttons that LOAD a result into the editor without saving it: **Undo this change**
+(only what that change did is taken out; later changes stay) and **Restore this version** (the whole file as it was
+right after it). Look it over, then save.
+
+**Nothing is lost by a save.** While you edit, the page checks every 5 seconds whether the file changed (she may
+edit it from a chat meanwhile) and says so. A save carries the version it started from: if the file changed since,
+your change and the other are merged; a clean merge is saved and says the other was kept, and one that touches the
+same lines is not saved but shown side by side (the file now, and yours), to resolve and save. An undo whose lines
+were rewritten since is shown the same way.
+
+How a commit says who made it is in `src/capabilities/memory/home.ts`'s header: hers carry the turn, the chat and the
+tool call as trailers (`Turn:`, `Tool-Call:`, `Chat:`, `Tool:`); yours are authored `owner (console)` with your
+login. Her commits from before trailers are matched to their call through the `commit <id>` her tool's result names,
+while that turn's transcript is kept, and say "inferred".
+
+`policy.yaml` and `inbound.yaml` are not here: policy changes only by approval.
+
 ### The write boundary
 
-The console has two ways in for a write: Settings, and deleting messages. Every other page answers GET and
-HEAD only (and `/login` its POST); a POST to it is refused with 405. Settings' buttons POST to
-`/settings/<area>/<verb>`, a delete to `/messages/delete` and its undo to `/messages/undo`, and a GET to any
-of them is refused too. A POST there is carried out only if it passes, on top of the sign-in and the Host
-check:
+The console has three ways in for a write: Settings, Home, and deleting messages. Every other page answers GET
+and HEAD only (and `/login` its POST); a POST to it is refused with 405. Settings' buttons POST to
+`/settings/<area>/<verb>`, Home's Save to `/home/save`, a delete to `/messages/delete` and its undo to
+`/messages/undo`, and a GET to any of them is refused too. A POST there is carried out only if it passes, on
+top of the sign-in and the Host check:
 
 - **Origin**: its `Origin` header is the console's own origin: `SHUVI_CONSOLE_URL`'s, or
   `http://127.0.0.1:<port>` (`localhost`, `[::1]`) for the ssh tunnel. A request without one, or from any other
@@ -89,7 +124,7 @@ check:
   login. With the token sign-in it is derived from your session cookie. A wrong or missing token gets 403.
   After a server restart, a page loaded before it is refused: reload it.
 
-The page needs no script: each write answers with a redirect back to `/settings` (a delete: to the page it was
+The pages need no script: each write answers with a redirect back to its page (a delete: to the page it was
 made on), which shows its result once. With script, a delete is posted in the background and answered in JSON.
 With script (htmx, served by the console itself), a button is disabled and shows that it is working the
 moment it is pressed, and the answer replaces the page in place without a reload. The checks above are the

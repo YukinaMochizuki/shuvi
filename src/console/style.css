@@ -1890,8 +1890,617 @@ details.addp[open] > summary::before {
   height: 22px;
 }
 
+/* ---- home: her files, edited by hand, with history (home.ts) ------------------------------------------ */
+.home {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr) 320px;
+  height: calc(100vh - var(--topbar));
+}
+.home.hist-closed {
+  grid-template-columns: 300px minmax(0, 1fr) 28px;
+}
+.hfiles {
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  padding: var(--s3) 0 var(--s6);
+}
+.hgroup + .hgroup {
+  margin-top: var(--s4);
+}
+.hgroup h2,
+.hhist-head h2 {
+  font-size: var(--t-meta);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 0 var(--s4) var(--s1);
+}
+a.hfile {
+  display: block;
+  padding: var(--s2) var(--s4);
+  border-left: 2px solid transparent;
+  color: var(--ink);
+  line-height: 1.35;
+}
+a.hfile:hover {
+  background: var(--surface-2);
+  text-decoration: none;
+}
+a.hfile.on {
+  background: var(--surface-2);
+  border-left-color: var(--accent);
+}
+a.hfile.missing .hpath {
+  color: var(--ink-faint);
+}
+.hf1,
+.he1 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.hpath {
+  font-size: var(--t-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hwhen {
+  margin-left: auto;
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.hf2 {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-top: 2px;
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.wdot {
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  align-self: center;
+}
+.wdot.w-her {
+  background: var(--accent);
+}
+.wdot.w-owner {
+  background: var(--lost);
+}
+
+.hedit {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.hhead {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s5);
+  border-bottom: 1px solid var(--line-soft);
+  min-height: 48px;
+}
+.hhead h1 {
+  font-size: var(--t-ui);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hhead-r {
+  margin-left: auto;
+  display: flex;
+  gap: var(--s2);
+}
+.hist-toggle {
+  display: none;
+}
+.hhint {
+  align-self: center;
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+}
+.dirty {
+  font-size: var(--t-meta);
+  color: var(--lost);
+  background: rgb(234 208 132 / 0.12);
+  padding: 1px var(--s2);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.hflash {
+  margin: var(--s3) var(--s5) 0;
+}
+.hwatch:empty {
+  display: none;
+}
+.hchanged,
+.hloaded {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin: var(--s3) var(--s5) 0;
+  padding: var(--s2) var(--s3);
+  border-radius: 8px;
+  font-size: var(--t-small);
+  background: rgb(122 162 247 / 0.1);
+}
+.hloaded {
+  background: rgb(234 208 132 / 0.1);
+}
+.hcode {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  margin-top: var(--s2);
+}
+.hcode .cm-host {
+  height: 100%;
+}
+.hcode .cm-editor {
+  height: 100%;
+}
+.hcode textarea,
+.hresolve {
+  width: 100%;
+  height: 100%;
+  resize: none;
+  background: var(--surface);
+  color: var(--ink);
+  border: 0;
+  padding: var(--s3) var(--s5);
+  font: 14px / 1.6 var(--mono);
+}
+.hcode textarea:focus,
+.hresolve:focus {
+  outline: none;
+}
+.hsave {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s5);
+  border-top: 1px solid var(--line-soft);
+}
+.hsave input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 var(--s2);
+  font-size: var(--t-small);
+}
+.hsave input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.hsave .btn {
+  height: 28px;
+}
+.kbd {
+  font-size: var(--t-meta);
+}
+.hnone {
+  justify-content: center;
+  align-items: center;
+}
+.hnone .empty {
+  max-width: 40ch;
+  text-align: center;
+}
+
+.hcommit {
+  padding: var(--s3) var(--s5) 0;
+}
+.hc1 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.hmsg {
+  color: var(--ink);
+}
+.hc2 {
+  margin-top: 2px;
+  font-size: var(--t-meta);
+}
+.hdbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  padding: var(--s3) var(--s5);
+  font-size: var(--t-small);
+}
+.hdact {
+  display: flex;
+  gap: var(--s2);
+  margin-left: auto;
+}
+.hmerge {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid var(--line-soft);
+}
+.hmerge.tall {
+  flex: 1;
+}
+.hsides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+  border-bottom: 1px solid var(--line-soft);
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 3;
+}
+.hsides span {
+  padding: var(--s1) var(--s4);
+}
+.hsides span + span {
+  border-left: 1px solid var(--line-soft);
+}
+.hmerge .cm-mergeView {
+  min-height: 100%;
+}
+.hmerge .merge-fallback pre {
+  padding: var(--s3) var(--s5);
+}
+.hconflict .hresolve {
+  display: none;
+}
+.hconflict .notice {
+  margin: var(--s3) var(--s5);
+  max-width: none;
+}
+.hmerge:not([data-up]) + .hresolve {
+  display: block;
+  height: 40vh;
+  border-top: 1px solid var(--line-soft);
+}
+
+.hhist {
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.hhist-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4) var(--s2);
+  min-height: 48px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.hhist-head h2 {
+  padding: 0;
+}
+.hhist-head .faint {
+  font-size: var(--t-meta);
+}
+.hclose {
+  margin-left: auto;
+}
+.hhist .back {
+  display: none;
+}
+.hhist-open {
+  border-left: 1px solid var(--line);
+  writing-mode: vertical-rl;
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+  padding: var(--s3) 0;
+  text-align: left;
+}
+.hhist-open:hover {
+  color: var(--ink);
+  text-decoration: none;
+  background: var(--surface-2);
+}
+.hents {
+  list-style: none;
+  margin: 0;
+  padding: var(--s1) 0;
+}
+a.hent {
+  display: block;
+  padding: var(--s2) var(--s4);
+  border-left: 2px solid transparent;
+  color: var(--ink);
+  line-height: 1.35;
+  font-size: var(--t-small);
+}
+a.hent:hover {
+  background: var(--surface-2);
+  text-decoration: none;
+}
+a.hent.on {
+  background: var(--surface-2);
+  border-left-color: var(--accent);
+}
+.hewhere {
+  color: var(--ink-faint);
+  font-size: var(--t-meta);
+}
+.he2 {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-dim);
+  overflow-wrap: anywhere;
+}
+.he2 .tag {
+  margin-right: var(--s1);
+}
+.he3 {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-meta);
+}
+.pm {
+  font-family: var(--mono);
+  font-size: var(--t-meta);
+}
+.hall {
+  margin-top: auto;
+  padding: var(--s3) var(--s4);
+  font-size: var(--t-small);
+  border-top: 1px solid var(--line-soft);
+}
+.hdiffbody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 var(--s5) var(--s6);
+}
+details.step.tool.targeted {
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: rgb(122 162 247 / 0.06);
+  border-radius: 6px;
+}
+.hwarn {
+  margin-left: var(--s1);
+}
+.hdnote {
+  font-size: var(--t-meta);
+  margin-bottom: var(--s2);
+}
+
+/* ---- a GitHub-style diff (ghdiff.ts); GitHub's dark colours ------------------------------------------- */
+.gdiff {
+  --g-add-line: rgb(46 160 67 / 0.15);
+  --g-add-num: rgb(63 185 80 / 0.3);
+  --g-add-word: rgb(46 160 67 / 0.4);
+  --g-del-line: rgb(248 81 73 / 0.1);
+  --g-del-num: rgb(248 81 73 / 0.3);
+  --g-del-word: rgb(248 81 73 / 0.4);
+  --g-hunk: rgb(56 139 253 / 0.1);
+  --g-hunk-num: rgb(56 139 253 / 0.2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  font: 12.5px / 20px var(--mono);
+}
+.ghead2 {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t-small);
+}
+.gempty {
+  padding: var(--s3);
+  color: var(--ink-faint);
+  font-family: var(--sans);
+}
+.gr {
+  display: grid;
+  grid-template-columns: 48px 48px 20px minmax(0, 1fr);
+}
+.gr.gsplit {
+  grid-template-columns: 48px minmax(0, 1fr) 48px minmax(0, 1fr);
+}
+.gr.gsplit > .gn:nth-child(3) {
+  border-left: 1px solid var(--line-soft);
+}
+.gn {
+  padding: 0 var(--s2);
+  text-align: right;
+  color: var(--ink-faint);
+  user-select: none;
+}
+.gs {
+  text-align: center;
+  user-select: none;
+  color: var(--ink-dim);
+}
+.gt {
+  padding: 0 var(--s3) 0 var(--s1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.gsplit .gt {
+  padding-left: var(--s3);
+}
+.gr.gadd,
+.gt.gadd {
+  background: var(--g-add-line);
+}
+.gr.gadd > .gn,
+.gn.gadd {
+  background: var(--g-add-num);
+  color: var(--ink);
+}
+.gr.gdel,
+.gt.gdel {
+  background: var(--g-del-line);
+}
+.gr.gdel > .gn,
+.gn.gdel {
+  background: var(--g-del-num);
+  color: var(--ink);
+}
+.gadd .gw {
+  background: var(--g-add-word);
+  border-radius: 2px;
+}
+.gdel .gw {
+  background: var(--g-del-word);
+  border-radius: 2px;
+}
+.gnone {
+  background: rgb(255 255 255 / 0.02);
+}
+.ghunk {
+  background: var(--g-hunk);
+  color: var(--ink-faint);
+}
+.ghunk > .ghn {
+  background: var(--g-hunk-num);
+  text-align: center;
+}
+.ghunk.g-unified > .gt {
+  grid-column: 2 / -1;
+  padding-left: var(--s3);
+}
+.ghunk.g-split > .gt {
+  grid-column: 2 / -1;
+  padding-left: var(--s3);
+}
+.ghunk.g-unified > .ghn,
+.ghunk.g-split > .ghn {
+  grid-column: 1;
+}
+.gfold > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.gfold > summary::-webkit-details-marker {
+  display: none;
+}
+.gfold > summary:hover {
+  color: var(--ink);
+}
+.gfold[open] > summary > .ghn {
+  color: var(--accent);
+}
+.gcount {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font: var(--t-meta) var(--mono);
+}
+.gsq {
+  display: inline-flex;
+  gap: 1px;
+  margin-left: var(--s1);
+}
+.gsq i {
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  background: var(--surface-3);
+}
+.gsq i.a {
+  background: var(--done);
+}
+.gsq i.d {
+  background: var(--failed);
+}
+
+.hactivity {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: var(--s4) 0 var(--s7);
+}
+.hactivity .hhead {
+  padding: var(--s3) var(--s4);
+}
+.hents.wide a.hent {
+  padding: var(--s3) var(--s4);
+}
+
 /* ---- narrow screens: one pane at a time ------------------------------------------------------------- */
 @media (max-width: 760px) {
+  .home,
+  .home.hist-closed {
+    display: block;
+    height: auto;
+  }
+  .home > * {
+    display: none;
+  }
+  .home.pane-files > .hfiles,
+  .home.pane-edit > .hedit,
+  .home.pane-history > .hhist {
+    display: flex;
+    flex-direction: column;
+    border: 0;
+  }
+  .home.pane-edit > .hedit {
+    height: calc(100vh - var(--topbar));
+  }
+  .home .hhead {
+    padding: var(--s2) var(--s4);
+    flex-wrap: wrap;
+  }
+  .home .back,
+  .hhist .back {
+    display: inline-block;
+    margin: 0;
+  }
+  .hist-toggle {
+    display: inline-flex;
+  }
+  .hclose {
+    display: none;
+  }
+  .hsave,
+  .hdbar,
+  .hcommit {
+    padding-left: var(--s4);
+    padding-right: var(--s4);
+  }
+  .hdact {
+    margin-left: 0;
+  }
+  .hflash,
+  .hchanged,
+  .hloaded {
+    margin-left: var(--s4);
+    margin-right: var(--s4);
+  }
+  .kbd {
+    display: none;
+  }
+  .hsides {
+    grid-template-columns: 1fr;
+  }
   .topbar {
     gap: var(--s4);
   }

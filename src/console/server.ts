@@ -6,6 +6,10 @@ import { isLoopback, parseLoopbackListen } from "../listen.ts";
 import { sameSecret } from "../secrets/compare.ts";
 import type { Db } from "../store/db.ts";
 import { sniffImage } from "../store/media.ts";
+import { editorBundle } from "./editor/bundle.ts";
+import { activityPage, changedBanner, homePage } from "./home.ts";
+import { allHistory, loadHome, watch } from "./home-data.ts";
+import { HOME_WRITES, homeSave, takeResult } from "./home-write.ts";
 import { cardPage, html } from "./html.ts";
 import { chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
 import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
@@ -34,11 +38,12 @@ import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } 
  *     token ends every session, and a restart ends none); `Authorization: Bearer <token>` works too, for a
  *     script. Anything else gets 401 and the sign-in form.
  *
- * READ ONLY, but for TWO WRITE PATHS: GET and HEAD everywhere, plus POST /login, plus POST to the Settings
- * page's write routes (`/settings/<area>/<verb>`, settings-write.ts `SETTINGS_WRITES`) and to the delete of
- * chat messages (`/messages/delete`, `/messages/undo`: delete-write.ts, store/deletions.ts), and to nothing
- * else. A POST anywhere else, or any other method, gets 405; a GET to a write route gets 405 too. A write
- * must pass, after the Host check and the sign-in above, BOTH:
+ * READ ONLY, but for THREE WRITE PATHS: GET and HEAD everywhere, plus POST /login, plus POST to the Settings
+ * page's write routes (`/settings/<area>/<verb>`, settings-write.ts `SETTINGS_WRITES`), to the Home page's save
+ * (`/home/save`, home-write.ts `HOME_WRITES`: saving one of her files in home/), and to the delete of chat
+ * messages (`/messages/delete`, `/messages/undo`: delete-write.ts, store/deletions.ts), and to nothing else. A
+ * POST anywhere else, or any other method, gets 405; a GET to a write route gets 405 too. A write must pass,
+ * after the Host check and the sign-in above, BOTH:
  *   - ORIGIN: an `Origin` header naming one of `allowedOrigins` (index.ts: SHUVI_CONSOLE_URL's origin, and
  *     `http://` the loopback names of the bound port). Missing, `null` or any other: 403.
  *   - CSRF TOKEN: a form field `csrf` equal to this session's token, `csrfToken`: an HMAC, under a secret the
@@ -57,12 +62,15 @@ import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } 
  * A Settings write answers 303 to `/settings?r=<id>#<row>`: its result is a FLASH, kept in memory (at most
  * settings-write.ts FLASH_MAX, for FLASH_MS), read once by its random id and not bound to a session; it holds
  * only the note and the form's non-secret fields. The fragment is ASCII-encoded (settings.ts `anchor`), so
- * a `Location` header can carry any model id.
+ * a `Location` header can carry any model id. A Home save answers 303 to `/home?file=<path>&r=<id>` the same way
+ * (home-write.ts: its result, or a conflict's two texts to resolve).
+ * BODY SIZE: a request body may be up to `MAX_SMALL_BODY`, but for the routes in `LARGE_BODY_WRITES`, which may be
+ * up to `MAX_BODY`: a Home save carries a whole file, and a delete a page's worth of selected messages.
  * Every page is server-rendered with escaped text (html.ts); the CSP allows only this origin's stylesheet,
- * images and two scripts, and forms and background requests to this origin only. The scripts: htmx (the npm
+ * images and its scripts, and forms and background requests to this origin only. The scripts: htmx (the npm
  * package `htmx.org`, pinned, served from node_modules at `/htmx.min.js`; html.ts `page` sets its config: no
- * eval, no script from a response, no history kept in the browser's storage) and console.js (copy buttons,
- * j / k). Every page works without them; with them, links and forms swap the page in place (html.ts), and
+ * eval, no script from a response, no history kept in the browser's storage), console.js (copy buttons,
+ * j / k), and on the Home page only, `/editor.js` (CodeMirror, pinned, bundled in the process: editor/bundle.ts). Every page works without them; with them, links and forms swap the page in place (html.ts), and
  * Settings swaps only what changed and fetches a pending probe's row or listing (`/settings/model?id=`,
  * `/settings/listing`, read routes answering a part of the page) until it is done (settings.ts).
  */
@@ -71,6 +79,8 @@ export interface ConsoleDeps {
   db: Db;
   timeZone: string;
   dataDir: string;
+  /** Her files (env.ts `home`). Default: `<dataDir>/home`, where env.ts puts it. */
+  home?: string;
   /** The Host values a request may carry (`index.ts` `allowedHosts`). */
   allowedHosts: ReadonlySet<string>;
   /** The Origin values a write may carry (`index.ts` `allowedOrigins`). Unset: every write is refused. */
@@ -89,6 +99,15 @@ export interface ConsoleDeps {
 }
 
 export const LOGIN_HEADER = "tailscale-user-login";
+/** The largest request body, for `LARGE_BODY_WRITES` only: a Home save carries a whole file (a sticker pack's yaml is the largest). */
+export const MAX_BODY = 2 * 1024 * 1024;
+/** Every other request's: what the console allowed before Home (the sign-in posts before anyone is let in). */
+export const MAX_SMALL_BODY = 16 * 1024;
+/**
+ * The writes that may be larger than `MAX_SMALL_BODY`: a Home save, and a delete, whose script posts one
+ * multipart field per selected message (about 95 bytes each: a chat page's 200 messages are about 19 KB).
+ */
+export const LARGE_BODY_WRITES: ReadonlySet<string> = new Set([...HOME_WRITES, "/messages/delete"]);
 export const SESSION_COOKIE = "shuvi_console";
 export const SESSION_MS = 7 * 24 * 3600_000;
 
@@ -227,6 +246,8 @@ function media(deps: ConsoleDeps, ref: string | null): Response {
   return respond(bytes, 200, type, { "cache-control": "private, max-age=86400" });
 }
 
+const homeOf = (deps: ConsoleDeps) => deps.home ?? join(deps.dataDir, "home");
+
 /** The Host a request names (Bun.serve builds `req.url` from it; a test's Request carries it in the URL). */
 function hostOf(req: Request, url: URL): string {
   return (req.headers.get("host") ?? url.host).toLowerCase();
@@ -237,7 +258,9 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   const url = new URL(req.url);
   if (!deps.allowedHosts.has(hostOf(req, url))) return misdirected();
   const path = url.pathname.replace(/\/+$/, "") || "/";
-  const write = isSettingsWrite(path) || isDeleteWrite(path);
+  // Only a Home save and a delete may be large (`MAX_BODY`, Bun's own limit); anything else keeps the small one.
+  if (!LARGE_BODY_WRITES.has(path) && Number(req.headers.get("content-length") ?? 0) > MAX_SMALL_BODY) return respond("too large", 413, "text/plain");
+  const write = isSettingsWrite(path) || HOME_WRITES.has(path) || isDeleteWrite(path);
   if (write ? req.method !== "POST" : !["GET", "HEAD"].includes(req.method) && !(req.method === "POST" && path === "/login")) {
     return write ? respond("a write: POST only", 405, "text/plain", { allow: "POST" }) : respond("read only", 405, "text/plain", { allow: "GET, HEAD" });
   }
@@ -246,6 +269,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   if (path === "/style.css") return respond(CSS, 200, "text/css; charset=utf-8", { "cache-control": "public, max-age=3600" });
   if (path === "/console.js") return respond(JS, 200, "text/javascript; charset=utf-8", { "cache-control": "public, max-age=3600" });
   if (path === "/htmx.min.js") return respond(HTMX, 200, "text/javascript; charset=utf-8", { "cache-control": "public, max-age=3600" });
+  if (path === "/editor.js") return respond(await editorBundle(), 200, "text/javascript; charset=utf-8", { "cache-control": "public, max-age=3600" });
   try {
     const auth = await authenticate(deps, req, path);
     if (!auth.ok) return auth.response;
@@ -268,6 +292,18 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
         return "json" in r ? respond(r.json.body, r.json.status, "application/json; charset=utf-8") : respond(null, 303, "text/plain", { location: r.location });
       }
       if (isSettingsWrite(path)) return respond(null, 303, "text/plain", { location: settingsWrite(deps.db, path, form, ctx.now) });
+      return respond(null, 303, "text/plain", { location: homeSave(deps.db, homeOf(deps), form, auth.who, ctx.now!) });
+    }
+    if (path === "/home" || path === "/home/history" || path === "/home/watch") {
+      const hctx = { csrf, timeZone: ctx.timeZone, now: ctx.now!, ...(ctx.who ? { who: ctx.who } : {}) };
+      if (path === "/home/history") return htmlResponse(activityPage({ ...allHistory(deps.db, homeOf(deps), url.searchParams.get("before") ?? undefined), ...hctx }));
+      if (path === "/home/watch") {
+        // The editor's poll (home.ts): a banner when the file changed since the version it opened, else nothing.
+        const file = url.searchParams.get("file") ?? "";
+        const changed = watch(deps.db, homeOf(deps), file, url.searchParams.get("base") ?? "");
+        return htmlResponse(changed ? changedBanner(changed, file).s : "");
+      }
+      return htmlResponse(homePage(loadHome(deps.db, homeOf(deps), url.searchParams, hctx, takeResult(url.searchParams.get("r"), ctx.now!))));
     }
     if (path === "/" || path === "/login") return respond(null, 302, "text/plain", { location: "/turns" });
     if (path === "/media") return media(deps, url.searchParams.get("ref"));
@@ -321,8 +357,10 @@ export function serveConsole(
   signal: AbortSignal,
 ): ReturnType<typeof Bun.serve> {
   let allowed: { hosts: ReadonlySet<string>; origins: ReadonlySet<string> } = { hosts: new Set(), origins: new Set() };
-  const server = Bun.serve({ ...parseConsoleListen(listen), maxRequestBodySize: 16 * 1024, fetch: (req) => handleConsole({ ...deps, allowedHosts: allowed.hosts, allowedOrigins: allowed.origins }, req) });
+  const server = Bun.serve({ ...parseConsoleListen(listen), maxRequestBodySize: MAX_BODY, fetch: (req) => handleConsole({ ...deps, allowedHosts: allowed.hosts, allowedOrigins: allowed.origins }, req) });
   allowed = where(server.port!);
+  // Build the editor now, so the first Home page does not wait for it (a failure is retried on request).
+  void editorBundle().catch((e) => console.error("console: ", e instanceof Error ? e.message : e));
   signal.addEventListener("abort", () => void server.stop(true), { once: true });
   console.log(`console: listening on ${server.hostname}:${server.port} (${deps.users ? `tailnet users: ${[...deps.users].join(", ")}` : "token sign-in"})`);
   return server;

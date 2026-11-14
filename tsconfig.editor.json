@@ -1,0 +1,10 @@
+{
+  "//": "The console's browser-side editor (src/console/editor/editor.ts) runs in a page, not in Bun: it is checked on its own, with the DOM's types, so the DOM's globals never leak into the server's code.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": ["src/console/editor/editor.ts"],
+  "exclude": []
+}
