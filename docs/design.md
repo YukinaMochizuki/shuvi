@@ -560,7 +560,9 @@ the first (`reconcileClaudeLogin`, `src/store/models.ts`), so a store moved in f
 The working directory is fixed (`/app`), which matters because Claude Code files a session under the
 directory it runs in: a store moved in from a checkout elsewhere finds none of its Claude sessions once, and
 each chat starts over as after a lost session. CI builds the image on every push to `main` once the checks
-pass, and pushes it to a private registry; from there the platform's own flow pins the digest and deploys it.
+pass, and pushes it to the GitHub Container Registry (`ghcr.io/<owner>/shuvi`, public, as the code is) with
+the workflow's own token; the owner's platform pulls it from there when `:main`'s digest changes, so nothing on
+GitHub holds a credential of the platform.
 
 One server per data dir, always: a turn's liveness is its pid and that pid's start time (`spawn.ts`), which
 mean nothing across containers, so a second server started on the same `/data` while the first still runs

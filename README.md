@@ -213,8 +213,8 @@ file, or a file that turns unreadable, is still redacted; with neither usable, o
 ## Deploying
 
 shuvi runs as a container: the `Dockerfile` at the root builds it (Bun on Debian slim, a non-root user,
-`tini` as PID 1), and `.github/workflows/release.yml` pushes it to a private registry after CI passes on
-`main`. docs/design.md §16 has the reasoning.
+`tini` as PID 1), and `.github/workflows/release.yml` pushes it to `ghcr.io/<owner>/shuvi`, public, after CI
+passes on `main`. docs/design.md §16 has the reasoning.
 
 ### The container
 
@@ -254,7 +254,7 @@ A compose service looks like this (the host paths and the env file are yours):
 ```yaml
 services:
   shuvi:
-    image: registry.example.ts.net/shuvi:main
+    image: ghcr.io/<owner>/shuvi:main
     env_file: shuvi.env            # SHUVI_BOT_TOKEN, SHUVI_OWNER_ID, SHUVI_CONTROL_BOT_TOKEN, …
     volumes:
       - /srv/shuvi/data:/data
@@ -291,21 +291,22 @@ the copy came from. Older copies are pruned before a new one is taken; if the co
 `scripts/e2e-*.ts` (with ffmpeg, so nothing skips; against fakes only, so it needs no secret). Require the
 one check **`ci passed`** on `main`: it is green only when every other job is, new e2e scripts included.
 
-`.github/workflows/release.yml` runs when CI passes on a push to `main`: it joins the tailnet, checks the
-registry credentials can push, pushes `<REGISTRY>/shuvi:sha-<12>`, and points `<REGISTRY>/shuvi:main` at it
-only if that commit is still the tip of `main` (so a late release of an older commit never moves it back). It
-fails, naming what is missing, until the repository has (Settings → Secrets and variables → Actions):
+`.github/workflows/release.yml` runs when CI passes on a push to `main`: it pushes
+`ghcr.io/<owner>/shuvi:sha-<12>`, and points `ghcr.io/<owner>/shuvi:main` at it only if that commit is still the
+tip of `main` (so a late release of an older commit never moves it back). It authenticates with the workflow's
+own `GITHUB_TOKEN` (`packages: write`), so the repository needs no secret for it. The image carries the OCI
+`source` and `revision` labels, which link the package to this repository.
 
-| kind | name | value |
-|---|---|---|
-| variable | `REGISTRY` | the registry's host name, e.g. `registry.<tailnet>.ts.net` |
-| secret | `TS_OAUTH_CLIENT_ID` | a Tailscale OAuth client (admin console → Settings → OAuth clients) with the **Auth Keys: write** scope and the tag **`tag:ci`**. The tailnet policy must let `tag:ci` reach the registry on 443 |
-| secret | `TS_OAUTH_SECRET` | that client's secret |
-| secret | `REGISTRY_USER` | a registry user allowed to push (writes need a password there; reads are anonymous) |
-| secret | `REGISTRY_PASSWORD` | its password |
+The image is **public** on ghcr, as the code is. After the package's first push, make it public once: on
+GitHub, the package `shuvi` → Package settings → Change visibility → Public. (ghcr creates a new package
+private.)
 
-The CI node joins as an ephemeral `tag:ci` device and leaves when the job ends. The computer image has its
-own workflow (`computer-image.yml`, to ghcr.io), untouched by this one.
+**Deployment is a pull.** The owner's platform watches `ghcr.io/<owner>/shuvi:main`, and when its digest
+changes it pulls the image and redeploys it, stopping the old container before starting the new one (one
+server per data dir, above). Nothing on GitHub holds a credential of that platform, and nothing here pushes
+to it.
+
+The computer image has its own workflow (`computer-image.yml`, a private package), untouched by this one.
 
 ### The old way: systemd on a VM
 

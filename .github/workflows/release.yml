@@ -1,12 +1,11 @@
 # Release: once CI has passed on a push to main, build the server's image (Dockerfile) and push it to the
-# private registry as `<registry>/shuvi:main` and `<registry>/shuvi:sha-<first 12 of the commit>`. That push
-# is the whole deployment step: the registry tells the configuration repository the tag moved, which pins the
-# new digest, and the host deploys it. Nothing here knows about any of that.
+# GitHub Container Registry as `ghcr.io/<owner>/shuvi:sha-<first 12 of the commit>`, then `:main`.
 #
-# The registry is reachable only on the tailnet, so the job joins it first, as an ephemeral node tagged
-# `tag:ci`, with an OAuth client. Reads are anonymous there; a push (any write method) needs a password, and
-# `docker login` always succeeds (it only probes an anonymous GET), so the credentials are checked with a
-# write request before the build, and a wrong one fails there, by name.
+# That push is all this does. Nothing on GitHub holds any credential of the platform the image runs on: the
+# platform pulls the image itself, watching `:main` for a new digest. The package is public, like the code, so
+# pulling needs no credential either; it must be made public once, after its first push (the README,
+# "Deploying"). The only credential here is the workflow's own GITHUB_TOKEN, with `packages: write`, as
+# computer-image.yml uses it.
 #
 # `:main` only ever moves FORWARD. CI runs for two pushes can finish in either order, and this workflow's
 # concurrency group serialises releases without ordering them, so a release for an older commit can run after
@@ -15,13 +14,7 @@
 # newer commit's release, and this run says so: deploying older code onto a store a newer one may already have
 # migrated is what this prevents.
 #
-# What the repository needs (the README's "Deploying" says how to make each):
-#   variable  REGISTRY             the registry's host name, e.g. registry.<tailnet>.ts.net
-#   secret    TS_OAUTH_CLIENT_ID   a Tailscale OAuth client with the `auth_keys` write scope and tag:ci
-#   secret    TS_OAUTH_SECRET      its secret
-#   secret    REGISTRY_USER        a user allowed to push to the registry
-#   secret    REGISTRY_PASSWORD    its password
-#
+# The OCI labels (source, revision) link the package to this repository and name the commit it was built from.
 # The computer image has its own workflow (computer-image.yml); this one does not touch it.
 # Actions are pinned by commit; the comment names the release.
 name: release
@@ -34,6 +27,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: release
@@ -52,76 +46,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      REGISTRY: ${{ vars.REGISTRY }}
       SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
-      - name: Check the configuration
-        env:
-          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      # Image names must be lower case; an owner's name may not be.
+      - name: Name the image
         run: |
-          missing=()
-          [ -n "$REGISTRY" ] || missing+=("variable REGISTRY (the registry's host name)")
-          [ -n "$TS_OAUTH_CLIENT_ID" ] || missing+=("secret TS_OAUTH_CLIENT_ID (Tailscale OAuth client, auth_keys write, tag:ci)")
-          [ -n "$TS_OAUTH_SECRET" ] || missing+=("secret TS_OAUTH_SECRET")
-          [ -n "$REGISTRY_USER" ] || missing+=("secret REGISTRY_USER (a user that may push to the registry)")
-          [ -n "$REGISTRY_PASSWORD" ] || missing+=("secret REGISTRY_PASSWORD")
-          if [ ${#missing[@]} -gt 0 ]; then
-            for m in "${missing[@]}"; do echo "::error title=release not configured::missing $m"; done
-            echo "Add them under Settings → Secrets and variables → Actions; see the README, \"Deploying\"."
-            exit 1
-          fi
-          echo "tag=sha-${SHA:0:12}" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/shuvi" >> "$GITHUB_ENV"
+          echo "TAG=sha-${SHA:0:12}" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Join the tailnet
-        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-
-      # `docker login` cannot tell a wrong password (see the header), so ask for an upload, which is a write:
-      # 202 means the credentials may push; the upload is cancelled at once.
-      - name: Check the registry credentials can push
-        env:
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          hdrs=$(mktemp)
-          code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' --max-time 30 \
-            -u "$REGISTRY_USER:$REGISTRY_PASSWORD" -X POST "https://$REGISTRY/v2/shuvi/blobs/uploads/") || {
-            echo "::error title=registry unreachable::https://$REGISTRY/v2/ did not answer over the tailnet (is tag:ci allowed to reach the registry?)"
-            exit 1
-          }
-          case "$code" in
-            202) ;;
-            401|403) echo "::error title=registry refused the push credentials::REGISTRY_USER / REGISTRY_PASSWORD may not push to $REGISTRY (HTTP $code)"; exit 1 ;;
-            *) echo "::error title=registry check failed::POST /v2/shuvi/blobs/uploads/ answered HTTP $code"; exit 1 ;;
-          esac
-          location=$(grep -i '^location:' "$hdrs" | head -n1 | cut -d' ' -f2- | tr -d '\r')
-          if [ -n "$location" ]; then
-            case "$location" in http*) url="$location" ;; *) url="https://$REGISTRY$location" ;; esac
-            curl -sS -o /dev/null --max-time 30 -u "$REGISTRY_USER:$REGISTRY_PASSWORD" -X DELETE "$url" || true
-          fi
-
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
-          registry: ${{ vars.REGISTRY }}
-          username: ${{ secrets.REGISTRY_USER }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          # The builder runs in a container of its own; on the host network it resolves tailnet names as the
-          # job does.
-          driver-opts: network=host
 
       - name: Build and push
         id: build
@@ -129,11 +72,10 @@ jobs:
         with:
           context: .
           push: true
-          tags: |
-            ${{ vars.REGISTRY }}/shuvi:${{ env.tag }}
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
           labels: |
-            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
           build-args: |
             REVISION=${{ github.event.workflow_run.head_sha }}
           cache-from: type=gha
@@ -147,11 +89,11 @@ jobs:
           set -euo pipefail
           tip=$(git ls-remote origin refs/heads/main | cut -f1)
           if [ "$tip" != "$SHA" ]; then
-            echo "::notice title=main not moved::main is now at ${tip:0:12}, newer than ${SHA:0:12}; only shuvi:${tag} was pushed"
+            echo "::notice title=main not moved::main is now at ${tip:0:12}, newer than ${SHA:0:12}; only ${IMAGE}:${TAG} was pushed"
             echo "moved=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          docker buildx imagetools create -t "$REGISTRY/shuvi:main" "$REGISTRY/shuvi:${tag}"
+          docker buildx imagetools create -t "$IMAGE:main" "$IMAGE:$TAG"
           echo "moved=true" >> "$GITHUB_OUTPUT"
 
       - name: Summary
@@ -162,10 +104,10 @@ jobs:
           {
             echo "### shuvi image"
             echo
-            echo "Pushed \`shuvi:${tag}\` (commit \`${SHA:0:12}\`), digest \`${DIGEST}\`."
+            echo "Pushed \`${IMAGE}:${TAG}\` (commit \`${SHA:0:12}\`), digest \`${DIGEST}\`."
             if [ "$MOVED" = true ]; then
-              echo "\`shuvi:main\` now points at it."
+              echo "\`${IMAGE}:main\` now points at it."
             else
-              echo "\`shuvi:main\` was NOT moved: main has a newer commit, whose release moves it."
+              echo "\`${IMAGE}:main\` was NOT moved: main has a newer commit, whose release moves it."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
