@@ -13,6 +13,7 @@ import { awaitInbox } from "./files.ts";
 import type { Redaction } from "../../secrets/redaction.ts";
 import { secretsForChat } from "./secrets.ts";
 import { acquireLease, COMPUTER_JOB_KIND, getComputer, releaseLease, runningComputerJobs } from "./state.ts";
+import { authorisation, type Acting } from "../../agent/acting.ts";
 
 /**
  * Running commands on a chat's computer, shaped after workstream's box tools (its src/agent/box-tools.ts:
@@ -42,6 +43,9 @@ import { acquireLease, COMPUTER_JOB_KIND, getComputer, releaseLease, runningComp
  *   cancel_job  TERM then KILL to the job's process group (cancel_job), exit 130.
  *
  * Every byte of output is passed through the chat's secret redactor before anyone sees it (secrets.ts).
+ * A background job records who authorised it, the owner or a group's operator (agent/acting.ts
+ * `authorisation`), so its result counts for that person. An operator's command runs as the owner's does,
+ * granted secrets included: whoever can run commands in a chat's home can reach anything run there (design §8).
  * When the command's lease applied ~/.computer.yaml first (declared.ts), its result ends with a line saying
  * so, or why it failed.
  */
@@ -291,7 +295,8 @@ export const BOOST_TERMS =
   "A boost restarts the computer at the larger size and, when it ends, restarts it at its normal size (stopped until the next exec): everything on its disk carries over (home and the rest of its filesystem), running processes do not (so a boost is refused while a background job runs, and background jobs are refused while a job holds a boost); other execs meanwhile run on the boosted computer.";
 
 /** Start `spec` as a background job (boosted first if it asks). Returns the tool's text, or throws ComputerError. */
-export async function startJob(x: ExecContext, a: { spec: JobSpec; title: string; originSeq: number }): Promise<{ job: Job; text: string }> {
+export async function startJob(x: ExecContext, a: { spec: JobSpec; title: string; originSeq: number; acting?: Acting | null }): Promise<{ job: Job; text: string }> {
+  const acting = a.acting === undefined ? ({ by: "owner" } as const) : a.acting;
   const row = x.computers.row(x.chat);
   if (row.boost) {
     const holder = row.boost.jobId != null ? `job ${row.boost.jobId}, and is restarted at its normal size when that ends` : "a command, and is restarted at its normal size once it is done";
@@ -309,8 +314,8 @@ export async function startJob(x: ExecContext, a: { spec: JobSpec; title: string
     spec: { ...a.spec, ...(expect ? { expectSeconds: expect } : {}), startedAt: new Date(now).toISOString() } as unknown as Record<string, unknown>,
     deadline: new Date(now + deadline * 1000),
     firstPollAt: new Date(now + x.cfg.pollEveryMs),
-    // Only reachable through the boundary's owner check (`ownerOnly`).
-    ownerAuthorised: true,
+    // Only reachable through the boundary's check (`ownerOnly`, or `delegable` for an operator).
+    ...authorisation(acting),
   });
   let boosted = false;
   try {

@@ -205,7 +205,7 @@ if (cfg.controlBotToken) {
 } else console.log("control bot off (SHUVI_CONTROL_BOT_TOKEN unset): alerts are queued and logged only");
 
 const files = telegramFiles(api, cfg.botToken, cfg.telegramApiRoot);
-startLoops(capabilityLoops(capabilities, { db, home: cfg.home, timeZone: cfg.timeZone, ownerId: cfg.ownerId, files, signal: stop.signal }), stop.signal);
+startLoops(capabilityLoops(capabilities, { db, home: cfg.home, timeZone: cfg.timeZone, ownerId: cfg.ownerId, policy: () => policies.current(), files, signal: stop.signal }), stop.signal);
 
 /** At exit, how long the drain's alerts may take to reach the owner, and how long a send in flight may take. */
 const CONTROL_FLUSH_MS = 5_000;

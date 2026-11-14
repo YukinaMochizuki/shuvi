@@ -1,5 +1,5 @@
 import type { Message, MessageEntity, Sticker, Update } from "grammy/types";
-import { defaultPolicy, listsGroup, type Policy } from "../policy/policy.ts";
+import { defaultPolicy, filesCopiedFrom, listsGroup, type Policy } from "../policy/policy.ts";
 import { MAIN_COMMANDS } from "../server/commands.ts";
 import type { CommandPayload, MessageAttachment, MessageMedia, MessagePayload, Speaker } from "../store/events.ts";
 
@@ -175,8 +175,9 @@ export function classify(update: Update, ownerId: number, botUsername?: string, 
   if (stand) payload.placeholder = true;
   const media = mediaOf(m);
   if (media) payload.media = media;
-  // Only the owner's files are ever copied into a computer.
-  const attachment = m.from?.id === ownerId ? attachmentOf(m) : undefined;
+  // Only the owner's files are ever copied into a computer, and in a group that delegates its computer,
+  // its operators' (policy.ts `filesCopiedFrom`).
+  const attachment = m.from && filesCopiedFrom(policy, m.chat.id, { id: m.from.id, isBot: m.from.is_bot }, ownerId) ? attachmentOf(m) : undefined;
   if (attachment) payload.attachment = attachment;
   const fwd = forwardedFrom(m);
   if (fwd) payload.forwardedFrom = fwd;

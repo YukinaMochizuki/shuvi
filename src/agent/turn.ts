@@ -1,6 +1,8 @@
 import { dirname } from "node:path";
+import type { Acting } from "./acting.ts";
 import { LostSessionError, type BackendAdapter, type Prompt, type ToolBoundary } from "agent-runtime";
 import {
+  capabilityDelegated,
   capabilityHolds,
   capabilityOwnerOnly,
   capabilityOwnerOnlyNotes,
@@ -11,7 +13,7 @@ import {
   type EnabledCapability,
   type OwnerInfo,
 } from "../capabilities/types.ts";
-import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
+import { defaultPolicy, isOperator, resolveChat, type ChatPolicy, type Operators, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
 import {
@@ -193,6 +195,14 @@ export interface TurnState {
   spoke?: boolean;
   /** In a group: the owner's id, whose lines are marked. */
   markOwner?: number;
+  /** In a group whose policy lists its operators by id: theirs, whose lines are marked `⚙ operator`. */
+  markOperators?: readonly number[];
+  /**
+   * Who an owner-only call of `tool` acts for now, as the boundary decides it (`callAuthority`), or null when
+   * it may not run. Set by `turnBoundary`; a tool that hands out the owner's things (secrets) or records who
+   * authorised lasting work reads it. Absent (a tool called outside a turn, in a test): the owner.
+   */
+  acting?: (tool: string) => Acting | null;
 }
 
 /** Has anyone said something in the chat after event `seq`? */
@@ -235,15 +245,20 @@ export interface TurnAuthority {
   ownerOnlyWhen?: ReadonlyMap<string, (args: Record<string, unknown>) => boolean>;
   /** What a refusal of a tool adds: why, and what to offer instead (`ownerOnlyNote`). */
   notes?: ReadonlyMap<string, string>;
+  /** This chat's operators (policy.ts `operators`), and the owner-only tools delegated to them. */
+  operators?: Operators;
+  delegated?: ReadonlySet<string>;
 }
 
-/** The authority rules the enabled capabilities declare, for `ownerId`. */
-export function turnAuthority(capabilities: readonly EnabledCapability[], ownerId?: number): TurnAuthority {
+/** The authority rules the enabled capabilities declare, for `ownerId`, and what this chat's policy delegates. */
+export function turnAuthority(capabilities: readonly EnabledCapability[], ownerId?: number, chatPolicy?: ChatPolicy): TurnAuthority {
+  const delegated = capabilityDelegated(capabilities, chatPolicy);
   return {
     ...(ownerId !== undefined ? { ownerId } : {}),
     ownerOnly: capabilityOwnerOnly(capabilities),
     ownerOnlyWhen: capabilityOwnerOnlyWhen(capabilities),
     notes: capabilityOwnerOnlyNotes(capabilities),
+    ...(chatPolicy?.operators && delegated.size ? { operators: chatPolicy.operators, delegated } : {}),
   };
 }
 
@@ -267,8 +282,11 @@ export function turnAuthority(capabilities: readonly EnabledCapability[], ownerI
  *   - a `scheduled` / `job_done` counts as the owner's only when its schedule or job was created by a call
  *     the owner authorised (`owner_authorised` on its row); one that was not neither counts nor blocks;
  *   - an `external` event (inbound text) neither counts nor blocks;
- *   - an answered `approval` counts as the owner's: only the owner can press its button in the control bot.
- *     One that expired unanswered is nobody's: it neither blocks nor counts;
+ *   - an answered `approval` counts as the owner's: only the owner can press its button in the control bot,
+ *     but only for a card the owner's own call asked for. A card a group's operator asked for
+ *     (`approvals.requested_by`) is that operator's, whatever the owner answered (`operatorAuthority`), so
+ *     an operator can never borrow his authority by making him press a button. One that expired
+ *     unanswered is nobody's: it neither blocks nor counts;
  *   - and at least one event must be the owner's: a turn of strangers only, of inbound events only, or
  *     started only by schedules or jobs he never authorised, never acts for the owner.
  *
@@ -290,7 +308,9 @@ export function ownerAuthority(db: Db, chatId: number, fromSeq: number, toSeq: n
       if (authorised) owners++;
       else why ??= `#${e.seq} in this turn is a ${e.kind === "scheduled" ? "schedule" : "job"} the owner did not set up`;
     } else if (e.kind === "approval") {
-      if ((e.payload as unknown as ApprovalPayload).answer !== null) owners++;
+      // The owner pressed it; it is his only if his own call asked for it (an operator's card is theirs).
+      const p = e.payload as unknown as ApprovalPayload;
+      if (p.answer !== null && approvalRequestedBy(db, p.approvalId) === null) owners++;
     } else if (e.kind === "external") {
       why ??= `#${e.seq} in this turn came from outside (inbound: ${(e.payload as unknown as ExternalPayload).source}), not from the owner`;
     }
@@ -299,9 +319,65 @@ export function ownerAuthority(db: Db, chatId: number, fromSeq: number, toSeq: n
   return why ? `${why}, and nothing in it is from the owner` : "nothing in this turn is from the owner";
 }
 
+/** Which operator's delegated call asked for approval `id` (approvals.requested_by); null: the owner's. */
+function approvalRequestedBy(db: Db, id: number): number | null {
+  const row = db.$client.query("select requested_by as r from approvals where id = ?").get(id) as { r: number | null } | null;
+  return row?.r ?? null;
+}
+
+/**
+ * May this turn act for one of the group's OPERATORS now (a delegated tool, design §8)? Over the same
+ * events as `ownerAuthority`, by the same rule with the operator in the owner's place: a `message` from an
+ * operator (not a bot, not the owner: his are `ownerAuthority`'s), or a `scheduled` / `job_done` whose row
+ * an operator's call authorised (`authorised_by`) who is still one by this turn's policy, so a person taken
+ * off `operators` takes their schedules' and jobs' authority with them. Context lines before `fromSeq` count
+ * for nothing; nothing else counts or blocks. Returns the operator's user id (the first), or null.
+ */
+export function operatorAuthority(db: Db, chatId: number, fromSeq: number, toSeq: number, operators: Operators | undefined, ownerId: number | undefined): number | null {
+  if (!operators) return null;
+  const counts = (id: number | null | undefined): id is number => id != null && id !== ownerId && isOperator(operators, id);
+  for (const e of triggersAfter(db, chatId, fromSeq)) {
+    if (e.seq > toSeq) break;
+    if (e.kind === "message") {
+      const from = (e.payload as unknown as MessagePayload).from;
+      if (!from.isBot && counts(from.id)) return from.id;
+    } else if (e.kind === "scheduled") {
+      const by = getSchedule(db, (e.payload as unknown as ScheduledPayload).scheduleId)?.authorisedBy;
+      if (counts(by)) return by;
+    } else if (e.kind === "job_done") {
+      const by = getJob(db, (e.payload as unknown as JobDonePayload).jobId)?.authorisedBy;
+      if (counts(by)) return by;
+    } else if (e.kind === "approval") {
+      // The owner's answer to a card an operator's call asked for: it carries on that operator's request.
+      const p = e.payload as unknown as ApprovalPayload;
+      const by = p.answer !== null ? approvalRequestedBy(db, p.approvalId) : null;
+      if (counts(by)) return by;
+    }
+  }
+  return null;
+}
+
+/**
+ * Who an owner-only call of `tool` acts for now, or why it may not run: the owner when he is in the turn
+ * (`ownerAuthority`); else, for a tool this chat delegates (`TurnAuthority.delegated`), an operator in it
+ * (`operatorAuthority`); else refused, in words the model can pass on.
+ */
+export function callAuthority(db: Db, s: TurnState, authority: TurnAuthority, tool: string): Acting | { refused: string } {
+  const why = ownerAuthority(db, s.chat.id, s.fromSeq, s.toSeq, authority.ownerId);
+  if (!why) return { by: "owner" };
+  const delegated = !!authority.operators && !!authority.delegated?.has(tool);
+  if (delegated) {
+    const userId = operatorAuthority(db, s.chat.id, s.fromSeq, s.toSeq, authority.operators, authority.ownerId);
+    if (userId !== null) return { by: "operator", userId };
+    return { refused: `\`${tool}\` acts for the owner, and here only the owner or one of this group's operators may ask for it; ${why}, nor from an operator` };
+  }
+  return { refused: `\`${tool}\` acts for the owner, and only the owner may ask for it; ${why}` };
+}
+
 /**
  * The boundary around every tool call of the turn: refuse after `pass`, refuse an owner-only call the
- * turn has no authority for (`ownerAuthority`), append what arrived meanwhile.
+ * turn has no authority for (`callAuthority`: the owner's, or an operator's for a delegated tool), append
+ * what arrived meanwhile.
  */
 export function turnBoundary(
   db: Db,
@@ -311,14 +387,21 @@ export function turnBoundary(
   authority: TurnAuthority = turnAuthority(capabilities),
 ): ToolBoundary {
   const perceive: Perceive = (e) => capabilityPerception(capabilities, e, { db });
+  // Decided again whenever a tool asks, over the turn as it is then: what is in the turn only grows, so a
+  // tool's handler never sees less authority than its call was let through with.
+  s.acting = (tool) => {
+    const r = callAuthority(db, s, authority, tool);
+    return "refused" in r ? null : r;
+  };
   return {
     refuse(call) {
       if (s.passed && call.name !== "pass") return "This turn has already passed. End it now; call no more tools.";
       const args = (call.args ?? {}) as Record<string, unknown>;
       if (authority.ownerOnly.has(call.name) || authority.ownerOnlyWhen?.get(call.name)?.(args)) {
-        const why = ownerAuthority(db, s.chat.id, s.fromSeq, s.toSeq, authority.ownerId);
-        const note = authority.notes?.get(call.name) ?? "If someone asked for this, tell them only the owner can.";
-        if (why) return `Refused: \`${call.name}\` acts for the owner, and only the owner may ask for it; ${why}. Nothing was done. ${note}`;
+        const r = callAuthority(db, s, authority, call.name);
+        const delegated = !!authority.operators && !!authority.delegated?.has(call.name);
+        const note = authority.notes?.get(call.name) ?? (delegated ? "If someone asked for this, tell them only the owner or this group's operators can." : "If someone asked for this, tell them only the owner can.");
+        if ("refused" in r) return `Refused: ${r.refused}. Nothing was done. ${note}`;
       }
       return null;
     },
@@ -330,7 +413,7 @@ export function turnBoundary(
       if (!fresh.length) return null;
       s.toSeq = fresh.at(-1)!.seq;
       extendTurn(db, s.turnId, s.toSeq);
-      return renderMidTurn(fresh, timeZone, perceive, s.markOwner !== undefined ? { owner: s.markOwner } : {});
+      return renderMidTurn(fresh, timeZone, perceive, { ...(s.markOwner !== undefined ? { owner: s.markOwner } : {}), ...(s.markOperators ? { operators: s.markOperators } : {}) });
     },
   };
 }
@@ -391,11 +474,12 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   if (group) {
     s.wokenBy = turn.triggerSeq ?? turn.toSeq;
     if (deps.ownerId !== undefined) s.markOwner = deps.ownerId;
+    if (Array.isArray(chatPolicy.operators) && chatPolicy.delegate.length) s.markOperators = chatPolicy.operators;
   }
   // In a group the input names the messages that called her (the first that woke the turn, and any after it).
   const called = group ? input.slice(context).filter((e) => isTrigger(db, e, chatPolicy, deps.bot)).map((e) => e.seq) : [];
   if (group && !called.length) called.push(s.wokenBy!);
-  const renderOpts: InputOptions = { ...(s.markOwner !== undefined ? { owner: s.markOwner } : {}), ...(unread ? { unread } : {}), ...(context ? { context } : {}), ...(called.length ? { called } : {}) };
+  const renderOpts: InputOptions = { ...(s.markOwner !== undefined ? { owner: s.markOwner } : {}), ...(s.markOperators ? { operators: s.markOperators } : {}), ...(unread ? { unread } : {}), ...(context ? { context } : {}), ...(called.length ? { called } : {}) };
   // The input opens with the "It is now…" line after a gap, and always in a fresh conversation.
   const withNote = (fresh: boolean): InputOptions => {
     const t = openingTimeNote(db, chat.id, input[0]!, turn.startedAt, deps.timeZone, fresh);
@@ -413,7 +497,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     buf = "";
   };
 
-  const authority = turnAuthority(capabilities, deps.ownerId);
+  const authority = turnAuthority(capabilities, deps.ownerId, chatPolicy);
   let adapter: BackendAdapter;
   try {
     adapter = deps.makeAdapter(

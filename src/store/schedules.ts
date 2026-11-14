@@ -103,6 +103,8 @@ export interface NewSchedule {
   turnId?: number;
   /** Set by a call the owner authorised (the `schedule` tool is owner-only): schema.ts. */
   ownerAuthorised?: boolean;
+  /** Set by a delegated call an operator authorised: their user id (schema.ts `schedules.authorisedBy`). */
+  authorisedBy?: number;
 }
 
 /** Set a schedule. Exactly one of `at` (in the future) and `cron` (with a next run). Throws otherwise. */
@@ -127,6 +129,7 @@ export function createSchedule(db: Db, s: NewSchedule, now = new Date()): Schedu
       nextAt: nextAt.toISOString(),
       createdTurnId: s.turnId ?? null,
       ownerAuthorised: s.ownerAuthorised ?? false,
+      authorisedBy: s.ownerAuthorised ? null : (s.authorisedBy ?? null),
     })
     .returning()
     .get();

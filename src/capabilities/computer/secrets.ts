@@ -44,7 +44,7 @@ export const REVOKE_KIND = "secret-revoke";
 const CARD_TTL_MS = 24 * 3600_000;
 
 /** Ask the owner for `profile` in this chat. Returns the approval id, or why it cannot be asked. */
-export function requestSecret(db: Db, file: string, a: { chatId: number; profile: string; ttl: Ttl; reason: string }): { approvalId: number } | { error: string } {
+export function requestSecret(db: Db, file: string, a: { chatId: number; profile: string; ttl: Ttl; reason: string; requestedBy?: number }): { approvalId: number } | { error: string } {
   const r = loadProfiles(file);
   if ("error" in r) return { error: `the secrets file cannot be used: ${r.error}` };
   const vars = r.profiles[a.profile];
@@ -54,7 +54,12 @@ export function requestSecret(db: Db, file: string, a: { chatId: number; profile
   const approvalId = requestApproval(db, {
     kind: SECRET_KIND,
     title: `Secret "${a.profile}" for the computer of ${where}`,
-    body: [`Reason: ${a.reason}`, `Variables: ${Object.keys(vars).join(", ") || "(none)"} (values are never shown)`, `Asked for: ${a.ttl}`].join("\n"),
+    body: [
+      `Reason: ${a.reason}`,
+      `Variables: ${Object.keys(vars).join(", ") || "(none)"} (values are never shown)`,
+      `Asked for: ${a.ttl}`,
+      ...(a.requestedBy !== undefined ? [`Asked by: an operator of this group (user id ${a.requestedBy}), not you`] : []),
+    ].join("\n"),
     options: [
       { id: "4h", label: "Grant for 4 hours" },
       { id: "1d", label: "Grant for 1 day" },
@@ -64,6 +69,7 @@ export function requestSecret(db: Db, file: string, a: { chatId: number; profile
     ttlMs: CARD_TTL_MS,
     originChatId: a.chatId,
     data: { chatId: a.chatId, profile: a.profile, ttl: a.ttl },
+    ...(a.requestedBy !== undefined ? { requestedBy: a.requestedBy } : {}),
   });
   return { approvalId };
 }

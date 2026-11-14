@@ -506,6 +506,12 @@ export const approvals = sqliteTable("approvals", {
   originChatId: integer("origin_chat_id").references(() => chats.id),
   /** Kind-specific data the caller wants back with the answer. */
   data: text("data", { mode: "json" }).$type<Record<string, unknown>>(),
+  /**
+   * A group's OPERATOR whose delegated call asked for it (their user id); null: the owner or the framework.
+   * The answer's `approval` event counts as the owner's in a turn only when this is null (agent/turn.ts
+   * `ownerAuthority`); otherwise as the operator's, for delegated tools only.
+   */
+  requestedBy: integer("requested_by"),
   /** pending → answered | expired. */
   status: text("status", { enum: ["pending", "answered", "expired"] }).notNull(),
   /** The chosen option's id. */
@@ -584,6 +590,11 @@ export const jobs = sqliteTable(
      * its `job_done` count as the owner's when a later turn decides whether owner-only tools may run.
      */
     ownerAuthorised: integer("owner_authorised", { mode: "boolean" }).notNull().default(false),
+    /**
+     * The job was started by a delegated call an OPERATOR authorised (policy.ts `operators`): their user id.
+     * Its `job_done` then counts as theirs, for delegated tools only, while policy still names them.
+     */
+    authorisedBy: integer("authorised_by"),
     createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },
@@ -680,6 +691,8 @@ export const schedules = sqliteTable(
     createdTurnId: integer("created_turn_id"),
     /** Set by a call the owner authorised: only then does its `scheduled` event count as the owner's. */
     ownerAuthorised: integer("owner_authorised", { mode: "boolean" }).notNull().default(false),
+    /** Set by a delegated call an operator authorised: their user id (as `jobs.authorisedBy`). */
+    authorisedBy: integer("authorised_by"),
     createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
   (t) => [index("schedules_due").on(t.state, t.nextAt)],
