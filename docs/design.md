@@ -102,6 +102,24 @@ Everything is in one SQLite file (WAL mode).
   `model_switches` records each switch, and the turn after it says so in its transcript
   (`src/agent/switch.ts`). A parked conversation whose model left the catalog ages out like an abandoned one.
   `chat_events` is "what actually happened", for people and for retrieval tools.
+- **Deleting messages**: append-only has one exception, the owner deleting chat messages from the console
+  (`src/store/deletions.ts`). It is a HARD delete with no trace: the rows (a person's message, photo or
+  sticker, or hers, with her reactions to them) move out of `chat_events` into `deleted_events`, seq and all,
+  so nothing that reads the log sees them again: not a fresh conversation's last 10 messages, not a turn's
+  input, not `search_chats` / `read_chat` (their FTS rows go too), not the console. Their verbatim copies go
+  with them: a reply's quote of one; the message's line in turn transcripts (input and mid-turn appends, with
+  what counts or names it there: "the last N messages", the unread note, the "called by" heading) and in what
+  `read_chat` / `search_chats` gave a turn; and a message of hers as the turn that wrote it recorded it (its
+  text block, or the `say` call's `text`). Nothing marks where they were, and the model is not told. What is
+  NOT touched: the model's conversations (a Claude Code session or `conversation_messages` keeps what it was
+  shown, and her thinking or another tool's arguments or results may paraphrase it), Telegram, and the
+  backups (they age out). A message in a turn still running, or one of hers not sent yet, is refused. It can
+  be undone for 10 seconds, byte for byte (the stash is in `deleted_events` and `deletion_scrubs`); a delete
+  while the chat's last one can still be undone joins it, its window starting again, so one undo puts back all
+  of them. An undo is refused once the chat has moved on (a turn started since, or the cursor or a running
+  turn past a message): put back, it would sit as input never seen, or behind the cursor, never answered.
+  Then the server purges it, with any `media/` file nothing kept still names, and a purge due while the
+  server was down runs at its next start.
 
 `home/` is a second data directory, next to the SQLite file and outside the code repository:
 

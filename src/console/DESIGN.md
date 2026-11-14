@@ -85,7 +85,9 @@ page marks those turns. `j` / `k` move between segments.
   its transcript was pruned after the retention period, or it was never recorded (it ended before its prompt
   reached the model). The first recorded turn is a marker in `kv`, so the three are told apart.
 - **/chats/:id**: a chat's whole log, each turn's boundary a thin divider linking to it.
-- **/settings**: the model catalog, the console's one page that changes anything (below).
+- **/settings**: the model catalog, the console's one page of settings that change anything (below).
+- **Deleting messages**, on every page that shows bubbles (a chat's log, a segment, a conversation, a turn's
+  Conversation tab): see "Deleting messages" below.
 - **/login**, **403**, **404**: the same shell, a small centred card.
 
 ## Settings
@@ -133,6 +135,34 @@ place (no reload, no jump). A probe or a listing runs in the server; while one i
 listing panel fetches itself every second until it is done (without script, a reload shows it). The write
 boundary is in server.ts's header.
 
+## Deleting messages
+
+```
+  ◯ ┌ Owner 19:31 #1 ────────────────────┐ (⋯)   hover: the checkbox, the ⋯
+    │ good morning! anything on today?   │
+    └────────────────────────────────────┘
+               ◉ ┌ 19:31 #2 ✓ delivered ───────┐   selected: filled, accent ring
+                 │ Morning! Nothing until 5.   │
+                 └─────────────────────────────┘
+ ┌─────────────────────────────────────────────────────────────────┐
+ │ 3 selected (you 2, her 1) · why, if refused · [Delete] Cancel   │   the bar
+ └─────────────────────────────────────────────────────────────────┘
+```
+
+- A deletable bubble (`pickable`: a person's message, hers, her sticker or file) has a round checkbox on its
+  left, shown on hover and always while selecting, and a "⋯" menu on its top-right corner: Select, Delete.
+  Incoming bubbles are indented by the checkbox's width for it. Under 760px there is no hover: the ⋯ is always
+  shown and its Select starts selecting; checkboxes show only then, and the bar is fixed to the screen.
+- Selecting: click a checkbox (or, while selecting, a bubble); Shift-click selects the range; `Esc` or Cancel
+  stops. The bar counts by side: you (the owner), her, others (anyone else in a group).
+- Delete: no confirmation. The bubbles (and her reactions to them) leave at once and a toast at the bottom
+  centre of the detail pane counts down "Deleted 3 · Undo (10)"; Undo puts them back. A delete while it is up
+  joins it (the server's open deletion): the count grows, the countdown starts again, one Undo for all. A
+  refusal brings them back still selected, and the bar takes a pink edge with the reason; a refused undo says
+  why in the toast.
+- Without script: every checkbox is shown, the bar is always there as a plain form, and the page comes back
+  with a Notice at its top ("Deleted 3 messages. You can undo it for 9 seconds. [Undo]"), shown once.
+
 ## Components
 
 | component | what it is |
@@ -165,6 +195,9 @@ boundary is in server.ts's header.
 | Confirm | red-tinted panel across a row: the question, what it affects, the button, Cancel |
 | Notice | a write's result: on its row, or at the top; ok / refused / failed tones |
 | Listing | a provider's `/models`: state line, then rows (model, context window, Add or ✓) |
+| Pickable | a deletable bubble: its checkbox (left), the bubble, its ⋯ menu (top right) |
+| SelBar | the delete form: what is selected, the reason of a refusal, Delete, Cancel; sticky at the bottom |
+| Toast | after a delete: "Deleted 3 · Undo (8)", fixed at the bottom centre, counting down |
 
 ## Type and spacing
 
@@ -184,5 +217,6 @@ works without them, the Settings page's forms included.
   page is boosted: a link or a form fetches its page in the background and swaps the body, with the URL and
   Back as for a load. A 2px bar under the top bar shows while a request is out (after 150 ms, so a quick one
   does not flash it). Settings swaps only its `<main>`, and pending parts fetch themselves (above).
-- **`/console.js`**: copy buttons, j / k to move through the list's rows (segments), and a line in the top bar
-  when a request got no answer at all (the server restarting).
+- **`/console.js`**: copy buttons, j / k to move through the list's rows (segments), a line in the top bar
+  when a request got no answer at all (the server restarting), and selecting and deleting messages (the bar,
+  the ⋯ menu, the toast; a delete is posted with `fetch` and answered in JSON).

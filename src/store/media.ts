@@ -89,16 +89,38 @@ export function sniffImage(bytes: Uint8Array): string | null {
   return null;
 }
 
-/** Merge `patch` into event `seq`'s media. */
-export function updateMedia(db: Db, seq: number, patch: Partial<MessageMedia>): void {
-  db.transaction((tx) => {
+/**
+ * Merge `patch` into event `seq`'s media. False when the event is not in the log (it was deleted meanwhile:
+ * store/deletions.ts), so nothing was written.
+ */
+export function updateMedia(db: Db, seq: number, patch: Partial<MessageMedia>): boolean {
+  return db.transaction((tx) => {
     const e = tx.select().from(chatEvents).where(eq(chatEvents.seq, seq)).get();
     const p = e?.payload as unknown as MessagePayload | undefined;
-    if (!p?.media) return;
+    if (!p?.media) return false;
     const payload: MessagePayload = { ...p, media: { ...p.media, ...patch } };
     tx.update(chatEvents)
       .set({ payload: payload as unknown as Record<string, unknown> })
       .where(eq(chatEvents.seq, seq))
       .run();
+    return true;
   }, IMMEDIATE);
+}
+
+/**
+ * Whether a file under `media/` (`path`, from the data dir) is still named by anything kept: a message in the
+ * log, a deleted one that can still be put back, the sticker library, a turn transcript. A file nothing names
+ * may be removed (the purge of deletions; a download finished for a message deleted meanwhile).
+ */
+export function mediaInUse(db: Db, path: string): boolean {
+  return !!db.$client
+    .query(
+      `select 1 from chat_events where json_extract(payload, '$.media.path') = ?1
+       union all select 1 from deleted_events where json_extract(payload, '$.media.path') = ?1
+       union all select 1 from sticker_meta where path = ?1
+       union all select 1 from turn_transcripts where instr(input, ?2) > 0
+       union all select 1 from turn_steps where instr(images, ?2) > 0
+       limit 1`,
+    )
+    .get(path, JSON.stringify(path));
 }

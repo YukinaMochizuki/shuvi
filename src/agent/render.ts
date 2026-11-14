@@ -188,12 +188,18 @@ export function renderMessage(e: ChatEvent, timeZone: string, opts: RenderOption
   const bot = p.from.isBot ? ` · ${FRAMEWORK_MARK} bot` : "";
   const head = `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${plainName(p.from.name)}${owner}${operator}${bot}]`;
   const lines = [`${head} ${p.forwardedFrom ? `(forwarded from ${plainName(p.forwardedFrom)}) ` : ""}${inline(plain(p.text))}`];
-  if (p.replyTo) {
-    const who = p.replyTo.fromName ? `${plainName(p.replyTo.fromName)}: ` : "";
-    const quoted = p.replyTo.text ? `"${plain(p.replyTo.text).replace(/[\r\n]+/g, " ")}"` : "a message";
-    lines.push(`  ↳ replying to ${who}${quoted}`);
-  }
+  if (p.replyTo) lines.push(replyLine(p.replyTo));
   return lines.join("\n");
+}
+
+/**
+ * The line under a reply: who it replies to, and their words quoted, or "a message" without them (a message
+ * deleted from the console takes its words out of every reply's quote: store/deletions.ts).
+ */
+export function replyLine(r: { fromName?: string; text?: string }): string {
+  const who = r.fromName ? `${plainName(r.fromName)}: ` : "";
+  const quoted = r.text ? `"${plain(r.text).replace(/[\r\n]+/g, " ")}"` : "a message";
+  return `  ↳ replying to ${who}${quoted}`;
 }
 
 /** Each event's line, then what it shows. */
