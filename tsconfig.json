@@ -12,5 +12,6 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test", "scripts", "drizzle.config.ts"]
+  "include": ["src", "test", "scripts", "drizzle.config.ts"],
+  "exclude": ["src/console/editor/editor.ts"]
 }

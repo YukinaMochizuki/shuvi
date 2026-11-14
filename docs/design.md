@@ -288,9 +288,11 @@ unknown_chat: ignore      # a group not listed: no response, and the owner is to
   button).
 
 The other files in `home/` (persona, directives, memory, playbooks, stickers) are edited by the assistant
-directly when the owner asks, with a commit per edit and a one-line note in the chat. The owner can ask
-for a revert or use git directly. Requests from anyone else in a group can at most be written into that
-chat's notes.
+directly when the owner asks, with a commit per edit and a one-line note in the chat. Each of her commits records
+the turn, the chat and the tool call it was made in (as trailers), so every change to a file can be traced to the
+exact call. The owner edits them himself on the console's Home page (docs/console.md), which shows each file's
+history, and undoes or restores a version there; or he asks her, or uses git directly. Requests from anyone else
+in a group can at most be written into that chat's notes.
 
 ## 9. Memory and retrieval
 
@@ -476,9 +478,10 @@ stickers:
 
   The framework acknowledges a command only by reacting to it; it sends no message.
 - **CLI**: deep debugging on the machine (reading `chat_events`, turns, jobs).
-- **Console** (docs/console.md): a read-only web view of every turn as the model saw it, and of every chat,
-  on loopback only and published to the owner's tailnet with `tailscale serve`, which names the tailnet
-  user it lets in. Alerts about a turn link to its page (`SHUVI_CONSOLE_URL`).
+- **Console** (docs/console.md): a web view of every turn as the model saw it, and of every chat, where the
+  owner also edits her files (Home) and the model catalog (Settings); on loopback only and published to the
+  owner's tailnet with `tailscale serve`, which names the tailnet user it lets in. Alerts about a turn link to
+  its page (`SHUVI_CONSOLE_URL`).
 
 **Reliability** the control bot reports on:
 
