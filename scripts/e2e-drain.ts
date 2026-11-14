@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RETRY_NOTE } from "../src/agent/render.ts";
 import { openDb } from "../src/store/db.ts";
+import { isAlive } from "../src/server/spawn.ts";
 import { DRAIN_STOP } from "../src/store/turns.ts";
 import { dmUpdate, FakeTelegram, OWNER, tapLines } from "../test/helpers.ts";
 
@@ -265,18 +266,16 @@ await until("the health endpoint", () => healthPort > 0);
 const before4 = texts().length;
 tg.updates.push(dmUpdate(5, "a stubborn one"));
 await until("the stubborn model step", () => stubbornStarted);
-const stubborn = q<{ id: number; from_seq: number; pid: number }>("select id, from_seq, pid from turns where status = 'running'");
+const stubborn = q<{ id: number; from_seq: number; pid: number; pid_start: string | null }>("select id, from_seq, pid, pid_start from turns where status = 'running'");
 server!.kill("SIGTERM");
 const code4 = await server!.exited;
 server = null;
 check(code4 === 0, `the server exited 0 (${code4})`);
-let childGone = false;
-try {
-  process.kill(stubborn.pid, 0);
-} catch {
-  childGone = true;
-}
-check(childGone, "the runner child was killed");
+// Gone as the server judges it (spawn.ts `isAlive`: the pid no longer runs the process started for the turn).
+// Not `kill(pid, 0)`: that also succeeds on a zombie, and the killed child stays one until whoever inherited it
+// from the exited server reaps it, which on a loaded machine can take a while. So wait for it, bounded.
+await until("the runner child to be gone", () => !isAlive(stubborn.pid, stubborn.pid_start), 10_000);
+log("ok  the runner child was killed");
 const killedTurn = q<{ status: string; error: string | null; stop_seq: number | null; from_seq: number }>("select status, error, stop_seq, from_seq from turns where id = ?", stubborn.id);
 check(killedTurn.status === "stopped" && killedTurn.error === DRAIN_STOP && killedTurn.stop_seq === killedTurn.from_seq, `closed as stopped by the drain, not failed (${JSON.stringify(killedTurn)})`);
 check(!q<{ k: string } | null>("select idem_key as k from control_messages where idem_key = ?", `turn-failed:${stubborn.id}`), "no 'turn failed, will be retried' alert");
