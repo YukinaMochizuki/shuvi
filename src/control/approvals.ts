@@ -46,6 +46,8 @@ export interface ApprovalRequest {
   originChatId?: number;
   /** Anything the caller wants to find again with the answer. */
   data?: Record<string, unknown>;
+  /** A group's operator whose delegated call asks (schema.ts `approvals.requestedBy`); absent: the owner. */
+  requestedBy?: number;
 }
 
 export type Approval = typeof approvals.$inferSelect;
@@ -80,6 +82,7 @@ export function requestApproval(db: Db, req: ApprovalRequest, now = Date.now()):
         options: req.options,
         originChatId: req.originChatId ?? null,
         data: req.data ?? null,
+        requestedBy: req.requestedBy ?? null,
         status: "pending",
         expiresAt: req.ttlMs ? new Date(now + req.ttlMs).toISOString() : null,
         createdAt: new Date(now).toISOString(),

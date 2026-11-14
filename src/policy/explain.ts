@@ -10,7 +10,7 @@ import { DM_DEFAULT, ENTRY_KEYS, GROUP_DEFAULTS, TOOL_ALIASES, TOP_KEYS, TRIGGER
  *   - the file's own fields, below (TOP_FIELDS, ENTRY_FIELDS), whose names a test holds equal to the keys
  *     ./policy.ts accepts (TOP_KEYS, ENTRY_KEYS), and whose defaults are read from DM_DEFAULT and
  *     GROUP_DEFAULTS;
- *   - each capability's own metadata (capabilities/types.ts `label`, `gives`, `params`, `ownerOnly`),
+ *   - each capability's own metadata (capabilities/types.ts `label`, `gives`, `params`, `ownerOnly`, `delegable`),
  *     which is also what the owner's /policy shows (./view.ts).
  *
  * Paths: `chats.<entry>.trigger`, or just `trigger`; `tools.workstream`, or just `workstream`;
@@ -69,6 +69,20 @@ export const ENTRY_FIELDS: readonly FieldDoc[] = [
     meaning: `Which capabilities this chat has, by id, each with its parameters ({} for none); all: every one. Always-on capabilities are on whatever this says. Aliases: ${Object.entries(TOOL_ALIASES)
       .map(([a, ids]) => `${a} = ${ids.join(" + ")}`)
       .join(", ")}.`,
+  },
+  {
+    name: "operators",
+    type: '"members" | []integer',
+    default: "none: only the owner",
+    meaning:
+      "Groups only. Who besides the owner may ask you for the owner-only tools of the capabilities in delegate: members, everyone in the group but bots; or a list of Telegram user ids. Needs delegate. Operators are trusted as the owner is for what is delegated: a command they ask for gets the secrets granted to this chat, and their files are copied into its computer; a secret they ask for is still granted only by the owner.",
+  },
+  {
+    name: "delegate",
+    type: "[]string",
+    default: "[] (nothing)",
+    meaning:
+      "Groups only. The capabilities (ids, each also in tools) whose delegable owner-only tools operators may ask for; explain_policy(\"tools.<id>\") lists a capability's delegable tools. The rest of its owner-only tools stay the owner's. Needs operators.",
   },
 ];
 
@@ -136,7 +150,8 @@ function capabilityDoc(c: Capability<any>): string {
   out.push("", "PARAMETERS:");
   if (params.length) for (const [n, p] of params) out.push(`  ${n}\t<${typeName(p)}>`, `    ${p.meaning}`, `    default: ${p.default}`, "");
   else out.push("    none ({})", "");
-  out.push("OWNER-ONLY TOOLS:", `    ${c.ownerOnly?.length ? c.ownerOnly.join(", ") : "none"}`, "", "EXAMPLE:", example(c));
+  out.push("OWNER-ONLY TOOLS:", `    ${c.ownerOnly?.length ? c.ownerOnly.join(", ") : "none"}`, "");
+  out.push("DELEGABLE TO OPERATORS (delegate):", `    ${c.delegable?.length ? c.delegable.join(", ") : "none"}`, "", "EXAMPLE:", example(c));
   const aliases = Object.entries(TOOL_ALIASES).filter(([, ids]) => ids.includes(c.id));
   if (aliases.length) out.push("", "ALSO NAMED:", ...aliases.map(([a, ids]) => `    ${a} (= ${ids.join(" + ")})`));
   return out.join("\n");
@@ -234,6 +249,24 @@ const see = (path: string) => ` (see explain_policy("${path}"))`;
 function typeOk(p: PolicyParam, v: unknown): boolean {
   if (p.type === "string[]") return Array.isArray(v) && v.every((x) => typeof x === "string");
   return typeof v === p.type;
+}
+
+/**
+ * Check an entry's `delegate`, as proposed: each name a capability of this build with delegable tools.
+ * Null when it is fine (or not a list: the shape is checkEntry's).
+ */
+export function checkDelegate(registry: Registry, delegate: unknown): string | null {
+  if (!Array.isArray(delegate)) return null;
+  for (const name of delegate) {
+    if (typeof name !== "string") return null;
+    for (const id of TOOL_ALIASES[name] ?? [name]) {
+      const c = registry.find((x) => x.id === id);
+      const delegable = registry.filter((x) => x.delegable?.length).map((x) => x.id);
+      if (!c) return `delegate: "${name}" is not a capability. Capabilities with delegable tools: ${delegable.join(", ")}${see("delegate")}`;
+      if (!c.delegable?.length) return `delegate: ${id} has no tools that can be delegated (${c.ownerOnly?.length ? `its owner-only tools, ${c.ownerOnly.join(", ")}, stay the owner's` : "it has no owner-only tools"}). Capabilities with delegable tools: ${delegable.join(", ")}${see("delegate")}`;
+    }
+  }
+  return null;
 }
 
 /**

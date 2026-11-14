@@ -236,7 +236,7 @@ unknown_chat: ignore      # a group not listed: no response, and the owner is to
 - **Data scope follows the chat.** Everyone in a group reads the answer, so what may be said depends on
   the chat's audience, not on who asked.
 - **Authority follows the sender.** Running commands, assigning work and changing settings are the
-  owner's alone. The framework checks the sender's Telegram user id; the model's judgement is not relied
+  owner's, except what a group delegates to its operators (below). The framework checks the sender's Telegram user id; the model's judgement is not relied
   on. A turn may act for the owner when the owner himself is in it: one of the messages that called her,
   or that were appended to it while it ran, is from the owner's user id. Other people's messages, before
   or after the owner's, neither grant authority nor take it away: the owner is usually in the
@@ -250,6 +250,21 @@ unknown_chat: ignore      # a group not listed: no response, and the owner is to
   context, under their own heading, and count for nothing), and the group section tells her to act for the
   owner only on his own request and to weigh anyone else's instructions as requests, never commands
   (`ownerAuthority` in src/agent/turn.ts).
+- **A group may have operators.** The owner may name people he trusts in a group (`operators`: their
+  user ids, or `members`, everyone there but bots) and the capabilities whose owner-only tools they may
+  ask for too (`delegate: [computer, schedules, media]`). Only the tools a capability declares delegable
+  can be handed over (`delegable`, src/capabilities/types.ts); what is the owner's own (his files and
+  persona, policy, sending to other chats, workstream, the sticker library) never is. The same rule then
+  decides, with the operator in the owner's place: a message from an operator, or a schedule or job an
+  operator's call set up (recorded on its row, `authorised_by`) while policy still names them, lets a
+  delegated tool run (`callAuthority` / `operatorAuthority`); context lines count for nothing. Operators are
+  trusted as the owner is for what is delegated: their commands get the chat's granted secrets, and their
+  files are copied into the chat's computer. Withholding secrets from their commands alone would protect
+  nothing, since anyone who can run commands in a home can reach whatever later runs there. A secret is
+  still granted only by the owner's answer to its card, and that answer counts as the operator's, never
+  as the owner's (`approvals.requested_by`), so pressing it lends them nothing more. What the owner
+  started (a schedule, a job) only he can cancel. Lines from operators named by id carry
+  `⚙ operator`. Operators are for groups only: the owner's DM is his alone.
 - **Policy changes are proposed by the assistant and approved by the owner.** `propose_policy` produces
   a diff; the framework writes and commits it only when the owner's user id agrees (or presses the inline
   button).
@@ -296,7 +311,8 @@ jobs: id, origin(chat, event seq), kind, state(running/done/failed/expired),
   is written back to the origin, so nothing vanishes silently. Repeat reports are deduplicated by job id.
 - Whichever way, the result becomes a `job_done` event in the origin chat.
 
-A **schedule** is set by the owner, or proposed by the assistant and set once the owner agrees. When it
+A **schedule** is set by the owner (or, in a group that delegates schedules, by one of its operators,
+§8), or proposed by the assistant and set once the owner agrees. When it
 comes due, the framework writes a `scheduled` event into the target chat, and the turn runs in that
 chat's conversation with its context. The assistant may `pass()` each time. There is no background
 patrol (heartbeat) and no unprompted speaking: every wake-up has a stated purpose.
@@ -317,7 +333,8 @@ Where a forward came from and the text being replied to are recorded as event fi
   It is always anonymous: nothing behind a login is ever fetched, and the assistant says so rather than
   guessing. Its per-site request budgets protect the home IP and porchkit enforces them; told to wait, the
   assistant says it is busy and roughly how long. Anyone may have the assistant LOOK at a video in a chat
-  whose policy enables media; a download onto the computer (`video_fetch`) is the owner's alone.
+  whose policy enables media; a download onto the computer (`video_fetch`) is the owner's, or in a group
+  that delegates media, its operators' too (§8).
 - **The prewarm** is the one prefetch: a link to a known video site in an OWNER's message is probed as
   soon as the message is recorded, alongside spawning the turn. Probe only, never a download; best effort
   (a failure is logged and ignored; porchkit refuses it when the site's budget is half used); it never
@@ -493,7 +510,8 @@ belongs to the chat:
   and `video_fetch` downloads through porchkit and copies the file into `~/inbox/`. Transcription
   is not one: it is to come from a shared platform service (§11), which the computer does not install.
 - **Visibility follows §6**: the owner's DM may read other chats' homes; a group sees only its own. Only
-  a turn the owner triggered gets `exec`.
+  a turn the owner triggered gets `exec` (or, where a group delegates its computer, one its operators
+  triggered: §8).
 
 As built (v1, `src/capabilities/computer/`): the computer is a Hangar Container `shuvi-<chat>` (Hangar
 runs it as the Machine `ct-shuvi-<chat>`; computers made earlier keep their recorded name `ct-<chat>`)
@@ -507,7 +525,8 @@ timeout, or a background job (an M6 `poll` job) whose end comes back as `job_don
 `read_job` / `cancel_job`. A boost resizes the same computer (stop, apply, start, then back), so it is
 refused while background jobs run. The owner's files are copied into `~/inbox/` when the computer next
 runs (never starting it for that), photos only on `save_photo`; `send_file` and `send_photo` send from the
-computer. The tools are owner-only at call time. Reading another chat's home from the DM is not built yet.
+computer. The tools are owner-only at call time, unless a group's policy delegates the computer to its
+operators (§8), and then theirs too. Reading another chat's home from the DM is not built yet.
 A stopped container still holds a Hangar machine, so the plan's machine limit (10) is the most chats that
 can have a computer.
 
@@ -536,7 +555,8 @@ the owner.
 - A granted profile is injected as env into the one `exec` process that runs, never written to `$HOME`.
 - Known secret values are replaced with `[REDACTED:<profile>]` in any output before the model or the
   chat sees it.
-- Only a turn the owner triggered can use one.
+- Only a turn the owner triggered can use one, or, in a group that delegates its computer, a turn one of
+  its operators triggered (§8).
 - As built: profiles live in `/etc/shuvi.secrets.yaml` (mode 600); `request_secret` puts an approval card
   (§13) naming the variables to the owner; a grant puts a "Revoke now" card beside it. Every value in the
   file, and every value it ever held (kept beside it, mode 600), is redacted, also where output is cut at a

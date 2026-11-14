@@ -11,7 +11,8 @@ import { getChat, getEvent } from "../../store/events.ts";
 import { chatLabel } from "../../store/turns.ts";
 import { updateAttachment } from "../../store/media.ts";
 import { attachmentOfEvent } from "../../store/media.ts";
-import { defineCapability, policyEnables } from "../types.ts";
+import { actingFor } from "../../agent/acting.ts";
+import { defineCapability, policyDelegates, policyEnables } from "../types.ts";
 import { computerConfig, DISK_MAX, DISK_SIZE, sizeLabel, type ComputerConfig, type Size } from "./config.ts";
 import { ComputerError, Computers } from "./computer.ts";
 import { BOOST_TERMS, cancelJob, computerJobKind, parseSheets, readJob, runSync, sheetsDir, sheetsIndex, sheetsScript, startJob, syncCommand, type ExecContext } from "./exec.ts";
@@ -33,7 +34,12 @@ import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, relea
  *             every owner-only tool shares (`ownerAuthority` in src/agent/turn.ts): the turn's boundary
  *             refuses them unless the owner is in the turn; other people's messages beside his neither
  *             grant nor block. So changing ~/.computer.yaml, which only a computer tool can, is the
- *             owner's alone.
+ *             owner's, or a delegated group's operators' (below). A group's policy may DELEGATE the computer to its operators (policy.ts
+ *             `operators`, `delegate: [computer]`): then they may ask for every computer tool too
+ *             (`delegable`), and their commands run as the owner's do, granted secrets included; a secret
+ *             they ask for is still granted only by the owner's answer to its card, and that answer counts
+ *             as the operator's, never as the owner's (`approvals.requested_by`). A job the owner started
+ *             only he can cancel.
  *   declared  ~/.computer.yaml (apt packages, a setup script) is applied as root before the next command
  *             whenever it is not applied on the container's root disk: after a new image, after an edit
  *             (declared.ts).
@@ -177,7 +183,7 @@ export async function localSheet(x: ExecContext, s: TurnState, a: LocalSheetInpu
   const title = `video_sheet ${oneLine(a.path)}${plan.title ? ` (${plan.title})` : ""}`;
   try {
     if (a.background !== false) {
-      const { text } = await startJob(x, { spec: { tool: "video_sheet", command: sheetCommand(a.path, plan.options, '"$SHUVI_JOB.sheets"', false) }, title, originSeq: s.toSeq });
+      const { text } = await startJob(x, { spec: { tool: "video_sheet", command: sheetCommand(a.path, plan.options, '"$SHUVI_JOB.sheets"', false) }, title, originSeq: s.toSeq, acting: actingFor(s, "video_sheet") });
       return ok(text);
     }
     const dir = '"$HOME/.cache/shuvi-sheets"';
@@ -205,6 +211,7 @@ export const computer = defineCapability<ComputerConfig>({
   // A sheet of a file on the computer is the owner's; one of a link (media's video_sheet) is anyone's.
   ownerOnlyWhen: { video_sheet: sheetActsForOwner },
   ownerOnlyNote: { video_sheet: SHEET_FILE_NOTE },
+  delegable: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "apply_computer_config", "video_sheet"],
   tools({ db, chat, state: s, chatPolicy }, cfg) {
     const computers = computersFor(db, cfg);
     const x: ExecContext = { db, chat, computers, cfg };
@@ -232,6 +239,7 @@ export const computer = defineCapability<ComputerConfig>({
               spec: { tool: "exec", command: a.command, ...(a.expect_seconds ? { expectSeconds: a.expect_seconds } : {}), ...(a.boost ? { boost: a.boost } : {}) },
               title: `$ ${oneLine(a.command)}`,
               originSeq: s.toSeq,
+              acting: actingFor(s, "exec"),
             });
             return ok(text);
           }
@@ -285,6 +293,8 @@ export const computer = defineCapability<ComputerConfig>({
         const job = getJob(db, a.id);
         if (!job || job.chatId !== chat.id || job.kind !== COMPUTER_JOB_KIND) return err(`There is no job ${a.id} on this chat's computer.`);
         if (job.state !== "running") return err(`Job ${a.id} is not running (it is ${job.state}).`);
+        // As with schedules: an operator may stop what operators started, never what the owner started.
+        if (job.ownerAuthorised && actingFor(s, "cancel_job")?.by !== "owner") return err(`Job ${a.id} was started for the owner; only the owner can cancel it.`);
         try {
           return ok(await cancelJob(x, job));
         } catch (e) {
@@ -305,7 +315,9 @@ export const computer = defineCapability<ComputerConfig>({
       async handler(a) {
         const live = liveGrants(db, chat.id).find((g) => g.profile === a.profile);
         if (live) return ok(`"${a.profile}" is already granted here until ${live.expiresAt.slice(0, 16).replace("T", " ")} UTC; its variables are in your commands' environment.`);
-        const r = requestSecret(db, cfg.secretsFile, { chatId: chat.id, profile: a.profile, ttl: a.ttl, reason: a.reason });
+        const acting = actingFor(s, "request_secret");
+        // An operator's card says so, and its answer counts as theirs, never as the owner's (agent/turn.ts).
+        const r = requestSecret(db, cfg.secretsFile, { chatId: chat.id, profile: a.profile, ttl: a.ttl, reason: a.reason, ...(acting?.by === "operator" ? { requestedBy: acting.userId } : {}) });
         if ("error" in r) return err(r.error);
         return ok(`Asked the owner for "${a.profile}" (${a.ttl}), approval #${r.approvalId}. Their answer comes back to this chat as an approval event. End your turn now; do not wait for it.`);
       },
@@ -388,9 +400,12 @@ export const computer = defineCapability<ComputerConfig>({
 
     return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, sendFile, sendPhoto, savePhoto, ...(sheetHere ? [videoSheet] : []), applyConfig] as ToolDef[] }];
   },
-  section: () => COMPUTER,
+  section: (ctx) =>
+    policyDelegates(ctx.chatPolicy, "computer")
+      ? `${COMPUTER}\n- Here the owner has let this group's operators use this computer too: run what they ask for as you would for him; files they send are copied into ~/inbox/ like his. A secret they need is asked for with \`request_secret\` all the same; only the owner can grant it.`
+      : COMPUTER,
   jobKinds: (cfg) => [computerJobKind(cfg, (db) => computersFor(db, cfg))],
-  loops: ({ db, files, ownerId }, cfg) => {
+  loops: ({ db, files, ownerId, policy }, cfg) => {
     const computers = computersFor(db, cfg);
     return [
       {
@@ -401,7 +416,7 @@ export const computer = defineCapability<ComputerConfig>({
           if (stopped.length || restored.length) console.log(`computer: stopped ${stopped.join(", ") || "-"}; restored ${restored.join(", ") || "-"}`);
         },
       },
-      { name: "computer-inbox", everyMs: 1_000, run: async () => void (await inboxPass(db, files, computers, ownerId)) },
+      { name: "computer-inbox", everyMs: 1_000, run: async () => void (await inboxPass(db, files, computers, ownerId, policy)) },
     ];
   },
   perceive(event, cfg): ToolContent[] {

@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { err, ok, type ToolDef } from "agent-runtime";
 import { raiseAlert } from "../../store/control.ts";
-import { activeSchedules, cancelSchedule, createSchedule, fireDue, parseAt, type Schedule } from "../../store/schedules.ts";
-import { defineCapability } from "../types.ts";
+import { actingFor, authorisation } from "../../agent/acting.ts";
+import { activeSchedules, cancelSchedule, createSchedule, fireDue, getSchedule, parseAt, type Schedule } from "../../store/schedules.ts";
+import { defineCapability, policyDelegates } from "../types.ts";
 
 /**
  * Schedules: `schedule`, `list_schedules`, `cancel_schedule`, and the loop that fires them
@@ -13,6 +14,10 @@ import { defineCapability } from "../types.ts";
  * All three tools are `ownerOnly`: always offered, and refused at call time unless the owner himself is in
  * the turn (agent/turn.ts `ownerAuthority`). A schedule set that way is recorded as
  * owner-authorised, so the turn it starts may set the next one (a check scheduling its own follow-up).
+ * All three are also `delegable`: a group's policy may let its operators ask for them (policy.ts
+ * `operators`). A schedule an operator's call set records them (`authorisedBy`), so the turn it starts acts
+ * for them, for delegated tools only, while policy still names them. An operator cannot cancel a schedule
+ * the owner set.
  *
  *   SHUVI_SCHEDULES   "off" disables schedules (default on). Cron and wall-clock times are read in SHUVI_TZ.
  */
@@ -43,7 +48,8 @@ export const schedules = defineCapability<true>({
   gives: "schedule, list_schedules, cancel_schedule: wake this chat later with a note.",
   enable: (env) => (env.SHUVI_SCHEDULES === "off" ? null : true),
   ownerOnly: ["schedule", "list_schedules", "cancel_schedule"],
-  tools({ db, chat, turnId, timeZone }) {
+  delegable: ["schedule", "list_schedules", "cancel_schedule"],
+  tools({ db, chat, turnId, timeZone, state: st }) {
     const schedule: ToolDef<{ at?: string; cron?: string; note: string }> = {
       name: "schedule",
       description:
@@ -60,7 +66,8 @@ export const schedules = defineCapability<true>({
         if (!!at === !!cron) return err("Give exactly one of `at` and `cron`.");
         const now = new Date();
         try {
-          const s = createSchedule(db, { chatId: chat.id, note, ...(at ? { at: parseAt(at, timeZone, now) } : { cron: cron!.trim() }), timeZone, turnId, ownerAuthorised: true }, now);
+          const by = authorisation(actingFor(st, "schedule"));
+          const s = createSchedule(db, { chatId: chat.id, note, ...(at ? { at: parseAt(at, timeZone, now) } : { cron: cron!.trim() }), timeZone, turnId, ...by }, now);
           return ok(`Scheduled ${describe(s, timeZone)}. It is now ${fullTime(now.toISOString(), timeZone)} (${timeZone}).`);
         } catch (e) {
           return err(e instanceof Error ? e.message : String(e));
@@ -81,12 +88,19 @@ export const schedules = defineCapability<true>({
       description: "Cancel one of this chat's schedules, by the #id list_schedules shows.",
       inputSchema: { id: z.number().int().describe("The schedule's #id") },
       async handler({ id }) {
+        // An operator may cancel what operators set, never what the owner set.
+        const acting = actingFor(st, "cancel_schedule");
+        if (acting?.by !== "owner" && getSchedule(db, id)?.ownerAuthorised && getSchedule(db, id)?.chatId === chat.id)
+          return err(`Schedule #${id} was set by the owner; only the owner can cancel it.`);
         return cancelSchedule(db, id, chat.id) ? ok(`Cancelled schedule #${id}.`) : err(`There is no active schedule #${id} in this chat.`);
       },
     };
     return [{ serverName: "shuvi", tools: [schedule, list, cancel] as ToolDef[] }];
   },
-  section: () => SCHEDULES,
+  section: (ctx) =>
+    policyDelegates(ctx.chatPolicy, "schedules")
+      ? `${SCHEDULES} Here this group's operators may ask for schedules too; a schedule the owner set only he can cancel.`
+      : SCHEDULES,
   loops: ({ db }) => [
     {
       name: "schedules",

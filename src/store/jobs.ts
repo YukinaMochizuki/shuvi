@@ -61,6 +61,8 @@ export interface NewJob {
   firstPollAt?: Date;
   /** Started by a call the owner authorised (an owner-only tool): see schema.ts `jobs.ownerAuthorised`. */
   ownerAuthorised?: boolean;
+  /** Started by a delegated call an operator authorised: their user id (schema.ts `jobs.authorisedBy`). */
+  authorisedBy?: number;
 }
 
 export const hashToken = (token: string): string => createHash("sha256").update(token).digest("hex");
@@ -81,6 +83,7 @@ export function createJob(db: Db, j: NewJob): { job: Job; token?: string } {
       deadline: j.deadline.toISOString(),
       nextPollAt: j.report === "poll" ? (j.firstPollAt ?? new Date()).toISOString() : null,
       ownerAuthorised: j.ownerAuthorised ?? false,
+      authorisedBy: j.ownerAuthorised ? null : (j.authorisedBy ?? null),
     })
     .returning()
     .get();

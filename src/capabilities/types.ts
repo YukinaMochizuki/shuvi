@@ -30,6 +30,11 @@ import type { TelegramFiles } from "../telegram/files.ts";
  *   - A tool that acts for the owner only in SOME calls (video_sheet on a file of the computer, but not on a
  *     link) names the calls in `ownerOnlyWhen`; the boundary decides those the same way. A refusal can say
  *     why and what to offer instead (`ownerOnlyNote`), in words the model can pass on.
+ *   - Of its owner-only tools, those a group's policy may hand to that group's OPERATORS (policy.ts
+ *     `operators`, `delegate`) are named in `delegable`; the boundary then lets an operator's turn call
+ *     them too, and tells the tool who it acts for (TurnState `acting`). A tool that would hand out what is
+ *     the owner's (his files, secrets, settings, other chats) is never delegable. A delegable tool that
+ *     starts lasting work (a job, a schedule) records who authorised it (`authorisedBy` on the row).
  *   - Its `inbound` hook (the server's, for each new message in a chat whose policy enables it) only starts
  *     work and returns: it never delays recording or the turn.
  *   - A credential it holds (`secrets`) is redacted from turn transcripts like the secret profiles' values.
@@ -87,6 +92,8 @@ export interface ServerContext {
   home: string;
   timeZone: string;
   ownerId: number;
+  /** The policy in effect now (it is reloaded when home/policy.yaml changes). Absent: the default policy. */
+  policy?: () => Policy;
   /** Download a file someone sent. Read-only: it cannot send anything. */
   files: TelegramFiles;
   /** Aborted when the server is shutting down. */
@@ -205,6 +212,11 @@ export interface Capability<C = unknown> {
    * instead, in a sentence the model can relay. Absent: the boundary's general advice.
    */
   ownerOnlyNote?: Readonly<Record<string, string>>;
+  /**
+   * Of `ownerOnly` and `ownerOnlyWhen`, the tools a group's policy may delegate to its operators
+   * (`delegate: [<this id>]`). Absent: none.
+   */
+  delegable?: readonly string[];
 }
 
 /** A capability that is on in this process, with the configuration it read. */
@@ -231,6 +243,9 @@ export function chatCapabilities(enabled: readonly EnabledCapability[], tools: C
 export function enableCapabilities(registry: readonly Capability<any>[], env: Env): EnabledCapability[] {
   const out: EnabledCapability[] = [];
   for (const capability of registry) {
+    // A programming error, found by the first start or test: `delegable` hands over owner-only tools only.
+    const ownerOnly = new Set([...(capability.ownerOnly ?? []), ...Object.keys(capability.ownerOnlyWhen ?? {})]);
+    for (const t of capability.delegable ?? []) if (!ownerOnly.has(t)) throw new Error(`capability ${capability.id}: delegable "${t}" is not one of its owner-only tools`);
     const config = capability.enable(env);
     if (config !== null) out.push({ capability, config });
   }
@@ -274,6 +289,20 @@ export function capabilityOwnerOnly(enabled: readonly EnabledCapability[]): Set<
 /** The tools owner-only in some calls (`ownerOnlyWhen`), with the test saying which. */
 export function capabilityOwnerOnlyWhen(enabled: readonly EnabledCapability[]): Map<string, (args: Record<string, unknown>) => boolean> {
   return new Map(enabled.flatMap(({ capability }) => Object.entries(capability.ownerOnlyWhen ?? {})));
+}
+
+/**
+ * The owner-only tools this chat's policy delegates to its operators: the `delegable` tools of the enabled
+ * capabilities its `delegate` names. Empty without operators.
+ */
+export function capabilityDelegated(enabled: readonly EnabledCapability[], chatPolicy: ChatPolicy | undefined): Set<string> {
+  if (!chatPolicy?.operators) return new Set();
+  return new Set(enabled.filter(({ capability }) => chatPolicy.delegate.includes(capability.id)).flatMap(({ capability }) => capability.delegable ?? []));
+}
+
+/** Does this chat's policy delegate capability `id`'s delegable tools to operators? */
+export function policyDelegates(chatPolicy: ChatPolicy | undefined, id: string): boolean {
+  return !!chatPolicy?.operators && chatPolicy.delegate.includes(id);
 }
 
 /** What a refusal of each owner-only tool adds (`ownerOnlyNote`). */

@@ -19,7 +19,10 @@
  *       tools:
  *         web: {}
  *         retrieval: {}
+ *         computer: {}
  *         workstream: { products: [widgetry] }
+ *       operators: [2002, 2003]    # or `members`: who besides the owner may ask for delegated tools
+ *       delegate: [computer]       # whose delegable owner-only tools operators may ask for
  *   unknown_chat: ignore           # a group not listed: nothing recorded; the owner is asked once
  *
  * The rules this module keeps:
@@ -34,6 +37,12 @@
  *     and the other capabilities marked `always` are on in every chat whatever `tools` says.
  *   - A group listed with no `tools` gets none beyond the always-on ones; with no `trigger`, a mention, a
  *     reply or a follow-up.
+ *   - OPERATORS (design §8): a group may name people besides the owner (`operators`: user ids, or
+ *     `members`, everyone in it but bots) who may ask for the owner-only tools of the capabilities in
+ *     `delegate`, and only those each capability declares delegable (capabilities/types.ts `delegable`).
+ *     Who acts is still decided per call by the turn's boundary (agent/turn.ts `callAuthority`). Both are
+ *     for groups only, go together (one without the other is a broken file), and `delegate` names only
+ *     capabilities the entry's `tools` enables (or any, with `tools: all`).
  */
 
 export const TRIGGERS = ["mention", "reply", "followup"] as const;
@@ -53,6 +62,36 @@ export interface ChatEntry {
   memory: MemoryLayer[];
   /** `all`, or capability id → parameters. */
   tools: "all" | Record<string, ToolParams>;
+  /** Who besides the owner may ask for delegated tools: everyone but bots, or these user ids. Absent: nobody. */
+  operators?: Operators;
+  /** The capabilities (ids) whose delegable owner-only tools operators may ask for. */
+  delegate: string[];
+}
+
+export type Operators = "members" | number[];
+
+/**
+ * The user id Telegram gives a post auto-forwarded from a linked channel into its discussion group ("Telegram",
+ * not a bot). It is nobody in the group, so never an operator, `members` or not.
+ */
+export const TELEGRAM_SERVICE_ID = 777000;
+
+/** Is `userId` (a message's sender, not a bot) one of `operators`? */
+export function isOperator(operators: Operators | undefined, userId: number): boolean {
+  if (!operators || userId === TELEGRAM_SERVICE_ID) return false;
+  return operators === "members" || operators.includes(userId);
+}
+
+/**
+ * May files `userId` sends in Telegram chat `tgChatId` be copied into that chat's computer? The owner's, as
+ * always; in a group that delegates its computer to its operators (`delegate: [computer]`), theirs too.
+ * Bots never (the caller passes `isBot`).
+ */
+export function filesCopiedFrom(policy: Policy, tgChatId: number, from: { id: number; isBot?: boolean }, ownerId: number): boolean {
+  if (from.id === ownerId) return true;
+  if (from.isBot) return false;
+  const entry = policy.chats[String(tgChatId)];
+  return !!entry && tgChatId < 0 && entry.delegate.includes("computer") && isOperator(entry.operators, from.id);
 }
 
 export interface Policy {
@@ -71,9 +110,9 @@ export interface ChatPolicy extends ChatEntry {
 
 export const DEFAULT_FOLLOWUP_MINUTES = 3;
 
-export const DM_DEFAULT: ChatEntry = { trigger: "all", followupMinutes: DEFAULT_FOLLOWUP_MINUTES, persona: ["public", "private"], memory: ["private", "chat"], tools: "all" };
+export const DM_DEFAULT: ChatEntry = { trigger: "all", followupMinutes: DEFAULT_FOLLOWUP_MINUTES, persona: ["public", "private"], memory: ["private", "chat"], tools: "all", delegate: [] };
 
-export const GROUP_DEFAULTS: ChatEntry = { trigger: [...TRIGGERS] as Trigger[], followupMinutes: DEFAULT_FOLLOWUP_MINUTES, persona: ["public"] as PersonaLayer[], memory: ["chat"] as MemoryLayer[], tools: {} };
+export const GROUP_DEFAULTS: ChatEntry = { trigger: [...TRIGGERS] as Trigger[], followupMinutes: DEFAULT_FOLLOWUP_MINUTES, persona: ["public"] as PersonaLayer[], memory: ["chat"] as MemoryLayer[], tools: {}, delegate: [] };
 
 /** Policy names for capabilities, as the design writes them → capability ids. */
 export const TOOL_ALIASES: Record<string, string[]> = { chat: ["memory", "retrieval"], "workstream-read": ["workstream"] };
@@ -139,7 +178,7 @@ function object(v: unknown, where: string, field?: string): Record<string, unkno
 }
 
 /** The fields of a chat's entry, as the file writes them (src/policy/explain.ts documents each). */
-export const ENTRY_KEYS: ReadonlySet<string> = new Set(["title", "trigger", "followup_minutes", "persona", "memory", "tools"]);
+export const ENTRY_KEYS: ReadonlySet<string> = new Set(["title", "trigger", "followup_minutes", "persona", "memory", "tools", "operators", "delegate"]);
 
 /** One chat's entry, as written in the file, checked. Throws `Invalid`. */
 function parseEntry(key: string, raw: unknown): ChatEntry {
@@ -174,8 +213,29 @@ function parseEntry(key: string, raw: unknown): ChatEntry {
     }
   }
 
+  let operators: Operators | undefined;
+  if (r.operators !== undefined) {
+    if (key === "dm") fail(`${where}.operators: the owner's DM is the owner's alone; operators are for groups`, "operators");
+    if (r.operators === "members") operators = "members";
+    else {
+      if (!Array.isArray(r.operators)) fail(`${where}.operators must be members or a list of Telegram user ids`, "operators");
+      const ids = (r.operators as unknown[]).map((x) => (typeof x === "string" && /^\d+$/.test(x) ? Number(x) : x));
+      for (const id of ids) if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) fail(`${where}.operators: "${String(id)}" is not a Telegram user id`, "operators");
+      operators = [...new Set(ids as number[])];
+    }
+  }
+  let delegate: string[] = [];
+  if (r.delegate !== undefined) {
+    if (key === "dm") fail(`${where}.delegate: the owner's DM is the owner's alone; delegate is for groups`, "delegate");
+    if (!Array.isArray(r.delegate) || (r.delegate as unknown[]).some((x) => typeof x !== "string")) fail(`${where}.delegate must be a list of capability names`, "delegate");
+    for (const name of r.delegate as string[]) for (const id of TOOL_ALIASES[name] ?? [name]) if (!delegate.includes(id)) delegate.push(id);
+    if (tools !== "all") for (const id of delegate) if (tools[id] === undefined) fail(`${where}.delegate: ${id} is not in this entry's tools, so there is nothing of it to delegate`, "delegate");
+  }
+  if (delegate.length && !operators) fail(`${where}.delegate: nobody to delegate to; name the operators (members, or user ids)`, "delegate");
+  if (operators && !delegate.length) fail(`${where}.operators: nothing is delegated to them; list the capabilities in delegate`, "operators");
+
   if (r.title !== undefined && typeof r.title !== "string") fail(`${where}.title must be text`, "title");
-  return { ...(typeof r.title === "string" ? { title: r.title } : {}), trigger, followupMinutes, persona, memory, tools };
+  return { ...(typeof r.title === "string" ? { title: r.title } : {}), trigger, followupMinutes, persona, memory, tools, ...(operators ? { operators } : {}), delegate };
 }
 
 /** The top-level keys of the file. */
@@ -243,6 +303,7 @@ export function entryToDoc(e: ChatEntry): Record<string, unknown> {
     persona: e.persona,
     memory: e.memory,
     tools: e.tools,
+    ...(e.operators ? { operators: e.operators, delegate: e.delegate } : {}),
   };
 }
 

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { max } from "drizzle-orm";
 import type { TurnState } from "../../agent/turn.ts";
 import type { Db } from "../../store/db.ts";
+import { filesCopiedFrom, type Policy } from "../../policy/policy.ts";
 import { enqueueOutbound, getChat, kvGet, kvSet, type ChatEvent, type MessageAttachment, type MessagePayload } from "../../store/events.ts";
 import { attachmentOfEvent, pendingAttachments, updateAttachment } from "../../store/media.ts";
 import { chatEvents } from "../../store/schema.ts";
@@ -74,7 +75,7 @@ export async function awaitInbox(db: Db, chatId: number, ms: number): Promise<vo
 }
 
 /** One pass: copy the files that wait into computers that run. Returns how many landed. */
-export async function inboxPass(db: Db, files: TelegramFiles, computers: Computers, ownerId: number): Promise<number> {
+export async function inboxPass(db: Db, files: TelegramFiles, computers: Computers, ownerId: number, policy?: () => Policy): Promise<number> {
   if (kvGet(db, INBOX_FROM_KEY) === undefined) {
     // The first pass ever: what was sent before the capability ran is left alone.
     const last = db.select({ m: max(chatEvents.seq) }).from(chatEvents).get()?.m ?? 0;
@@ -84,8 +85,12 @@ export async function inboxPass(db: Db, files: TelegramFiles, computers: Compute
   let done = 0;
   for (const e of pendingAttachments(db)) {
     const a = attachmentOfEvent(e)!;
-    if ((e.payload as unknown as MessagePayload).from.id !== ownerId) {
-      updateAttachment(db, e.seq, { state: "skipped", error: "not the owner's" });
+    const from = (e.payload as unknown as MessagePayload).from;
+    const chatOf = getChat(db, e.chatId);
+    // Checked again against the policy in effect now: someone taken off operators since gets nothing copied.
+    const allowed = from.id === ownerId || (!!policy && !!chatOf && filesCopiedFrom(policy(), chatOf.tgChatId, from, ownerId));
+    if (!allowed) {
+      updateAttachment(db, e.seq, { state: "skipped", error: "not the owner's (or an operator's)" });
       continue;
     }
     if (!wanted(a)) {

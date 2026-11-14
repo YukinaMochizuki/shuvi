@@ -44,7 +44,11 @@ interface FetchSpec {
 }
 
 /** Start porchkit's download and the job that brings it onto the computer. Returns the tool's text. */
-export async function startFetch(db: Db, porch: Porchkit, a: { chatId: number; originSeq: number; url: string; quality?: "low" | "best"; title: string }): Promise<{ ok: true; text: string; job: Job } | { ok: false; text: string }> {
+export async function startFetch(
+  db: Db,
+  porch: Porchkit,
+  a: { chatId: number; originSeq: number; url: string; quality?: "low" | "best"; title: string; authorised?: { ownerAuthorised: boolean; authorisedBy?: number } },
+): Promise<{ ok: true; text: string; job: Job } | { ok: false; text: string }> {
   let st: FetchStatus;
   try {
     st = await porch.fetch(a.url, a.quality);
@@ -71,8 +75,9 @@ export async function startFetch(db: Db, porch: Porchkit, a: { chatId: number; o
     report: "poll",
     spec: spec as unknown as Record<string, unknown>,
     deadline: new Date(Date.now() + FETCH_DEADLINE_MS),
-    // video_fetch is owner-only: the boundary let this call run only with the owner in the turn.
-    ownerAuthorised: true,
+    // video_fetch is owner-only (or delegated): the boundary let this call run only for the owner or an
+    // operator, and the tool says which (agent/turn.ts `authorisation`).
+    ...(a.authorised ?? { ownerAuthorised: true }),
   });
   const where = st.state === "done" ? "it is already downloaded there" : `it is ${st.state === "queued" ? "queued" : "downloading"} there`;
   return {

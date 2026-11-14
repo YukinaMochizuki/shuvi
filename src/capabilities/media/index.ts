@@ -4,7 +4,8 @@ import { describe, Porchkit, PorchkitError, porchkitConfig, type FetchStatus, ty
 import { computerConfig, type ComputerConfig } from "../computer/config.ts";
 import { computersFor, localSheet, SHEET_DESCRIPTION, SHEET_FILE_NOTE, sheetSchema } from "../computer/index.ts";
 import { sheetActsForOwner, sheetOptions, type SheetArgs } from "../computer/media.ts";
-import { defineCapability, policyEnables } from "../types.ts";
+import { actingFor, authorisation } from "../../agent/acting.ts";
+import { defineCapability, policyDelegates, policyEnables } from "../types.ts";
 import { FETCH_JOB_KIND, fetchJobKind, startFetch } from "./fetch.ts";
 import { JOIN_WAIT_MS, joinedProbe, preparedLines, pruneResults, startPrewarms } from "./prewarm.ts";
 import { probeText, subsText } from "./text.ts";
@@ -56,7 +57,8 @@ export const FETCH_NOTE =
   "Tell them plainly that you can't download a video for them without the owner's say-so: it puts the whole file on the owner's computer and uses the home connection's download budget. Offer what you can do instead: look at it (video_probe, video_subs, video_sheet with the link) and tell them what is in it.";
 
 /** The capability's prompt section; `computer`: the chat has a computer (video_fetch, sheets of files). */
-export function mediaSection(computer: boolean): string {
+export function mediaSection(computer: boolean, delegated = false): string {
+  if (computer && delegated) return mediaSectionDelegated();
   return `## Videos
 
 Anyone here may ask you to look at a video, and you can, from its link. \`video_probe\` says what it is (title, length, chapters, which subtitles exist); \`video_subs\` gives what is said, with times; \`video_sheet\` with the \`url\` shows you frames from it, tiled in order with each one's time under it. Start with video_probe. When a message is followed by "(Prepared: …)", its link was looked up already and video_probe answers at once.
@@ -68,6 +70,16 @@ Looking never needs a download: what a sheet needs is fetched by itself. ${
   }When someone else asks you to download a video, tell them plainly you can't do that for them without the owner's say-so, and offer to look at it and tell them what's in it instead.
 
 Videos come through the owner's home connection, which has a request budget for each site. When you're told to wait, tell them it's busy and roughly for how long, rather than trying again and again. Nothing behind a login (members-only, age-restricted, private) is ever fetched: say so, rather than guessing at what it shows.`;
+}
+
+/** The section in a group whose operators may ask for video_fetch too (policy `delegate: [media]`). */
+function mediaSectionDelegated(): string {
+  return mediaSection(true)
+    .replace("and only the owner can ask for it. ", "and here the owner or this group's operators can ask for it. ")
+    .replace(
+      "When someone else asks you to download a video, tell them plainly you can't do that for them without the owner's say-so, and offer to look at it and tell them what's in it instead.",
+      "Download only what is needed for work on the file itself: it uses the home connection's download budget. When someone who is not an operator asks for a download, tell them plainly you can't do that for them, and offer to look at it instead.",
+    );
 }
 
 /** One client per configuration. */
@@ -165,6 +177,7 @@ export const media = defineCapability<MediaConfig>({
   enable: mediaConfig,
   ownerOnly: ["video_fetch"],
   ownerOnlyWhen: { video_sheet: sheetActsForOwner },
+  delegable: ["video_fetch", "video_sheet"],
   ownerOnlyNote: { video_fetch: FETCH_NOTE, video_sheet: SHEET_FILE_NOTE },
   tools({ db, chat, turnId, state: s, chatPolicy }, cfg) {
     const porch = porchkitOf(cfg);
@@ -246,14 +259,21 @@ export const media = defineCapability<MediaConfig>({
         quality: z.enum(["low", "best"]).optional().describe('"low" (default) or "best"'),
       },
       async handler(a) {
-        const r = await startFetch(db, porch, { chatId: chat.id, originSeq: s.toSeq, url: a.url, ...(a.quality ? { quality: a.quality } : {}), title: `video_fetch ${oneLine(a.url)}${a.quality ? ` (${a.quality})` : ""}` });
+        const r = await startFetch(db, porch, {
+          chatId: chat.id,
+          originSeq: s.toSeq,
+          url: a.url,
+          ...(a.quality ? { quality: a.quality } : {}),
+          title: `video_fetch ${oneLine(a.url)}${a.quality ? ` (${a.quality})` : ""}`,
+          authorised: authorisation(actingFor(s, "video_fetch")),
+        });
         return r.ok ? ok(r.text) : err(r.text);
       },
     };
 
     return [{ serverName: "shuvi", tools: [probe, subs, sheet, ...(computer ? [fetchTool] : [])] as ToolDef[] }];
   },
-  section: (ctx, cfg) => mediaSection(!!cfg.computer && policyEnables(ctx.chatPolicy, "computer")),
+  section: (ctx, cfg) => mediaSection(!!cfg.computer && policyEnables(ctx.chatPolicy, "computer"), policyDelegates(ctx.chatPolicy, "media")),
   jobKinds: (cfg) => [fetchJobKind(porchkitOf(cfg), cfg.computer)],
   inbound(event, { db, ownerId }, cfg) {
     void startPrewarms(db, porchkitOf(cfg), event, ownerId);

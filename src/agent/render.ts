@@ -32,7 +32,9 @@ import type { ApprovalPayload, ChatEvent, ExternalPayload, JobDonePayload, Messa
  * In a GROUP, where many people speak, the owner's lines say so (`RenderOptions.owner`), with the same
  * unforgeable mark: `[#14 · Wed 11/11 21:05 · Ownerly · ⚙ owner] …`. Someone who names themselves
  * "Ownerly · owner" reads as exactly that, a name. In the owner's DM nothing is marked: everyone there is.
- * Another bot's lines are marked the same way: `[#15 · Wed 11/11 21:06 · Helper · ⚙ bot] …`.
+ * Another bot's lines are marked the same way: `[#15 · Wed 11/11 21:06 · Helper · ⚙ bot] …`. In a group whose
+ * policy names its operators by user id (policy.ts `operators`), theirs are too (`RenderOptions.operators`):
+ * `[#16 · Wed 11/11 21:07 · Friendly · ⚙ operator] …`. With `operators: members` nobody is marked: everyone is.
  *
  * No label may be FORGEABLE by what people write, since authority and trust hang on telling them apart:
  *   - the framework's labels and the assistant's (`⚙ you`) carry `FRAMEWORK_MARK` (⚙), which this module
@@ -50,6 +52,8 @@ const blind: Perceive = () => [];
 export interface RenderOptions {
   /** Mark this user's lines as the owner's (in a group). */
   owner?: number;
+  /** Mark these users' lines as operators' (in a group whose policy lists them). */
+  operators?: readonly number[];
 }
 /** Marks a framework event's label. Never appears in anything people wrote, as rendered here. */
 export const FRAMEWORK_MARK = "⚙";
@@ -178,9 +182,11 @@ export function renderMessage(e: ChatEvent, timeZone: string, opts: RenderOption
     return `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${FRAMEWORK_MARK} you] ${inline(plain((e.payload as { text: string }).text))}`;
   }
   const p = e.payload as unknown as MessagePayload;
-  const owner = opts.owner !== undefined && p.from.id === opts.owner ? ` · ${FRAMEWORK_MARK} owner` : "";
+  const isOwner = opts.owner !== undefined && p.from.id === opts.owner;
+  const owner = isOwner ? ` · ${FRAMEWORK_MARK} owner` : "";
+  const operator = !isOwner && !p.from.isBot && opts.operators?.includes(p.from.id) ? ` · ${FRAMEWORK_MARK} operator` : "";
   const bot = p.from.isBot ? ` · ${FRAMEWORK_MARK} bot` : "";
-  const head = `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${plainName(p.from.name)}${owner}${bot}]`;
+  const head = `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${plainName(p.from.name)}${owner}${operator}${bot}]`;
   const lines = [`${head} ${p.forwardedFrom ? `(forwarded from ${plainName(p.forwardedFrom)}) ` : ""}${inline(plain(p.text))}`];
   if (p.replyTo) {
     const who = p.replyTo.fromName ? `${plainName(p.replyTo.fromName)}: ` : "";

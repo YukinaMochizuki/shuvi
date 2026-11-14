@@ -38,7 +38,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |
 | what a capability is, what it may touch | `src/capabilities/types.ts`, `src/capabilities/index.ts` |
-| who may call an owner-only tool, decided per call | `src/agent/turn.ts` (`ownerAuthority`, `turnBoundary`) |
+| who may call an owner-only tool, decided per call; a group's operators | `src/agent/turn.ts` (`ownerAuthority`, `operatorAuthority`, `callAuthority`, `turnBoundary`), `src/agent/acting.ts` |
 | which home/ files she may read and edit; which chats a chat may search and read | `src/capabilities/memory/home.ts`, `src/capabilities/access.ts` |
 | how events read to the model; framework events that cannot be forged | `src/agent/render.ts` |
 | jobs: one result per job, back to its origin; deadlines | `src/store/jobs.ts`, `src/capabilities/jobs/watch.ts` |
@@ -94,6 +94,9 @@ A capability (speech, web, …) is one folder plus one line:
    the call unless the owner himself is in the turn (`ownerAuthority` in `src/agent/turn.ts`).
    A tool that acts for the owner only in some calls (video_sheet of a file, not of a link) goes in
    `ownerOnlyWhen`; `ownerOnlyNote` gives its refusal a reason and an alternative the model can relay.
+   Of those, the ones a group's policy may hand to its operators (`operators`, `delegate`) go in
+   `delegable`; a tool that starts lasting work records who authorised it (`authorisation` in
+   `src/agent/acting.ts`). Never make delegable what is the owner's own (his files, policy, other chats).
 
 Do not edit `src/agent/turn.ts`, `src/agent/prompt.ts`, `src/server/main.ts` or `src/env.ts` for it. A
 capability never talks to Telegram: its tools and loops queue rows, and the sender sends them.

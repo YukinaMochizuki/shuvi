@@ -18,6 +18,9 @@
  *   7. video_sheet in the background, with the real ffmpeg on a generated 40 s testsrc video: the job's
  *      result carries the index (two 4x4 sheets, every 2 s), and the job_done turn gets both sheets as
  *      images (skipped, saying so, where ffmpeg is not installed)
+ *   8. a group whose policy delegates its computer to an operator (policy.yaml `operators`, `delegate`):
+ *      the operator's exec runs on the group's own computer without the owner; someone who is not an
+ *      operator is refused, and nothing runs for them
  *
  *   bun scripts/e2e-computer.ts
  */
@@ -27,7 +30,7 @@ import { join } from "node:path";
 import type { Update } from "grammy/types";
 import { openDb } from "../src/store/db.ts";
 import { FakeHangar } from "../test/fake-hangar.ts";
-import { dmUpdate, FakeTelegram, OWNER } from "../test/helpers.ts";
+import { dmUpdate, FakeTelegram, groupUpdate, OWNER, type Person } from "../test/helpers.ts";
 
 const t0 = Date.now();
 const log = (m: string) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`);
@@ -95,6 +98,9 @@ const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
   [/exit 0 · [^"]*declared-ok/, () => use("apply_computer_config", {})],
   [/Applied ~\/\.computer\.yaml in \d+s: apt: example-tool; the setup script/, () => say("The computer config is applied.")],
   [/run something after the restart/, () => use("exec", { command: "echo after-restart" })],
+  [/please sort the data/, () => use("exec", { command: "echo sorted-for-$((40+2))" })],
+  [/exit 0 · [^"]*sorted-for-42/, () => say("Sorted it for the group.")],
+  [/Refused: `exec` acts for the owner, and here only the owner or one of this group's operators may ask for it/, () => say("Only the owner or an operator can have me run that.")],
   [/exit 0 · [^"]*after-restart/, (t) => say(t.includes(".computer.yaml") ? "It applied the config again." : "Back after the restart.")],
 ];
 
@@ -124,6 +130,14 @@ const control = new FakeTelegram();
 const hangar = new FakeHangar({ realMedia: HAS_FFMPEG });
 const dataDir = mkdtempSync(join(tmpdir(), "shuvi-e2e-computer-"));
 mkdirSync(join(dataDir, "home"), { recursive: true });
+const GROUP = { id: -100555, title: "Data friends" };
+const alice: Person = { id: 2001, first: "Alice", username: "alice" };
+const bob: Person = { id: 2002, first: "Bob" };
+// The owner's DM keeps its default (everything); the group delegates its computer to Alice.
+writeFileSync(
+  join(dataDir, "home", "policy.yaml"),
+  `owner: ${OWNER}\nchats:\n  "${GROUP.id}":\n    title: ${GROUP.title}\n    tools:\n      computer: {}\n    operators: [${alice.id}]\n    delegate: [computer]\n`,
+);
 const secretsFile = join(mkdtempSync(join(tmpdir(), "shuvi-e2e-secrets-")), "shuvi.secrets.yaml");
 writeFileSync(secretsFile, `modal:\n  MODAL_TOKEN: ${SECRET}\n`);
 chmodSync(secretsFile, 0o600);
@@ -261,6 +275,20 @@ if (!HAS_FFMPEG) {
   );
   await until("the turn to close", turnsIdle);
 }
+
+// ---- 8. a group's operator ---------------------------------------------------------------------------
+const execsBefore = hangar.execs.length;
+tg.updates.push(groupUpdate(20, GROUP, alice, "@shuvi_test_bot please sort the data"));
+await replied("Sorted it for the group.", "8. an operator's exec ran without the owner");
+const groupContainers = [...hangar.containers.keys()].filter((k) => k !== "shuvi-1001");
+check(groupContainers.length === 1, `8. on the group's own computer (${[...hangar.containers.keys()].join(", ")})`);
+check(hangar.execs.slice(execsBefore).some((e) => e.command.join(" ").includes("sorted-for-")), "8. the command reached Hangar");
+await until("the turn to close", turnsIdle);
+const execsAfterAlice = hangar.execs.filter((e) => e.command.join(" ").includes("sorted-for-")).length;
+tg.updates.push(groupUpdate(21, GROUP, bob, "@shuvi_test_bot please sort the data"));
+await replied("Only the owner or an operator can have me run that.", "8. someone who is not an operator is refused");
+check(hangar.execs.filter((e) => e.command.join(" ").includes("sorted-for-")).length === execsAfterAlice, "8. and nothing ran for them");
+await until("the turn to close", turnsIdle);
 
 log("PASS");
 cleanup();

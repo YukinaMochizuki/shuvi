@@ -126,6 +126,17 @@ function toolsOf(input: PolicyViewInput, e: ChatEntry): ToolsInWords {
   return out;
 }
 
+/** Who the operators are and what they may ask for, in words; null when the chat has none. */
+function operatorsLine(input: PolicyViewInput, e: ChatEntry): string | null {
+  if (!e.operators || !e.delegate.length) return null;
+  const who = e.operators === "members" ? "everyone in the group" : e.operators.join(", ");
+  const what = e.delegate.map((id) => {
+    const c = input.registry.find((x) => x.id === id);
+    return c?.delegable?.length ? `${c.label} (${c.delegable.join(", ")})` : id;
+  });
+  return `<b>Operators:</b> ${escapeHtml(who)}, who may also ask for ${escapeHtml(what.join("; "))}`;
+}
+
 function title(l: Listed): string {
   return `<b>${l.n}. ${escapeHtml(l.title)}</b>${l.tgId !== undefined ? `  <i>${l.tgId}</i>` : ""}`;
 }
@@ -137,6 +148,8 @@ function block(input: PolicyViewInput, l: Listed): string {
   if (!t.on.length) lines.push(`<b>Can use:</b> nothing beyond talking`);
   else lines.push(`<b>Can use${e.tools === "all" ? " (everything)" : ""}:</b>`, ...t.on.map(({ c, params }) => `• ${capabilityLine(c, params)}`));
   if (t.notHere.length) lines.push(`<i>Listed but not set up on this server: ${escapeHtml(t.notHere.map((c) => c.label).join(", "))}</i>`);
+  const ops = operatorsLine(input, e);
+  if (ops) lines.push(ops);
   return lines.join("\n");
 }
 
@@ -183,6 +196,8 @@ export function policyDetail(input: PolicyViewInput, l: Listed): string[] {
   if (t.on.length) lines.push(...t.on.map(({ c, params }) => `• ${capabilityLine(c, params)}`));
   else lines.push("• nothing beyond talking");
   if (t.notHere.length) lines.push("", "<b>Listed, but not set up on this server:</b>", ...t.notHere.map((c) => `• ${escapeHtml(c.label)}`));
+  const ops = operatorsLine(input, e);
+  if (l.key !== "dm") lines.push("", ops ?? "<b>Operators:</b> none; only you may ask for what is yours alone");
   if (t.off.length) lines.push("", "<b>Off:</b>", ...t.off.map((c) => `• ${escapeHtml(c.label)}`));
   if (t.always.length) lines.push("", `<b>Always on:</b> ${escapeHtml(t.always.map((c) => c.label).join(", "))}`);
   if (t.unknown.length) lines.push("", `<b>Not known to this build</b> (does nothing): ${escapeHtml(t.unknown.join(", "))}`);
