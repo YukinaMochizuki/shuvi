@@ -134,6 +134,13 @@
       "when": 1794671511769,
       "tag": "0018_authorised_by",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1794675044943,
+      "tag": "0019_message_deletions",
+      "breakpoints": true
     }
   ]
 }

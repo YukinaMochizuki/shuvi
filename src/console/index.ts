@@ -4,12 +4,13 @@ import { parseConsoleListen, serveConsole, type ConsoleDeps } from "./server.ts"
 /**
  * The console: a private web view of every turn as the model saw it (the turn transcripts that
  * agent/transcript.ts records), of the chats, and of each chat's timeline; read-only but for its Settings
- * page, which manages the model catalog. A framework surface for the
+ * page, which manages the model catalog, and deleting chat messages. A framework surface for the
  * owner, like the control bot, started by the server (server/main.ts); a runner child never loads it.
  *
  *   server.ts   who may look (loopback, Host, the tailnet login, the token fallback), and the routes
  *   pages.ts    the pages; queries.ts what they read; html.ts the components; style.css, console.js
- *   settings.ts the Settings page; settings-write.ts its writes, the console's only ones
+ *   settings.ts the Settings page; settings-write.ts its writes
+ *   delete-write.ts deleting chat messages (store/deletions.ts): the console's other write
  *
  * Its configuration is the framework's (src/env.ts `ConsoleConfig`): SHUVI_CONSOLE_LISTEN, _USERS, _TOKEN,
  * _URL. It is served only when SHUVI_CONSOLE_USERS or SHUVI_CONSOLE_TOKEN is set. See docs/console.md.

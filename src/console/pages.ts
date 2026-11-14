@@ -16,6 +16,7 @@ import type {
 import { OUTBOUND_KINDS, TRIGGER_KINDS, type TranscriptPart } from "../store/schema.ts";
 import { getPromptText, getTranscript, previousPrompt, stepsOf, transcriptAbsence, type PromptText, type Step, type Transcript } from "../store/transcripts.ts";
 import type { Turn } from "../store/turns.ts";
+import { DELETABLE_KINDS } from "../store/deletions.ts";
 import { diffLines, hunks } from "./diff.ts";
 import { ago, badge, block, clock, dot, empty, excerpt, href, html, markdown, page, raw, resetBlocks, secs, short, size, tokens, usd, wall, when, type Raw } from "./html.ts";
 import { conversationOf, matchingTurns, segmentList, segmentOf, type Conversation, type SegmentRow, type Span } from "./sessions.ts";
@@ -51,6 +52,12 @@ export interface PageContext {
   now?: number;
   /** How long transcripts are kept (SHUVI_TRANSCRIPT_DAYS), to say why one is gone. */
   transcriptDays?: number;
+  /** This session's CSRF token (server.ts), for the delete form. Unset: no form (a test rendering a page). */
+  csrf?: string;
+  /** The page's own path and query, where a delete without script comes back to. */
+  here?: string;
+  /** A delete's result, shown once at the top of the page it came back to (delete-write.ts). */
+  notice?: Raw;
 }
 
 export const TURNS_PER_PAGE = 50;
@@ -177,6 +184,30 @@ interface BubbleOpts {
   context?: boolean;
   trig?: boolean;
   ownerId?: number;
+  /** The owner's id, to count a selection's lines as theirs ("you"), hers, or someone else's. */
+  me?: number;
+}
+
+/**
+ * A bubble the owner may delete: a round checkbox on its left (shown on hover, and always while selecting), and a
+ * "⋯" menu at its top right. Both belong to the page's delete form (`deleteBar`) by its id, so the trace needs no
+ * form of its own. `side` counts it in the bar: you (the owner), her, or someone else.
+ */
+function pickable(e: ChatEvent, side: "you" | "her" | "other", inner: Raw): Raw {
+  if (!DELETABLE_KINDS.includes(e.kind)) return inner;
+  return html`<div class="pickable ${side}" data-seq="${e.seq}" data-side="${side}"><label class="pick" title="Select"><input type="checkbox" name="seq" value="${e.seq}" form="del" aria-label="Select #${e.seq}"><span class="ring" aria-hidden="true"></span></label><div class="pbody">${inner}<details class="bmenu"><summary title="More" aria-label="More">⋯</summary><div class="menu"><button type="button" class="pick-one">Select</button><button type="submit" form="del" name="only" value="${e.seq}" class="danger">Delete</button></div></details></div></div>`;
+}
+
+/**
+ * The page's delete form: the bar at the bottom of the detail pane. With script (console.js) it shows once a
+ * bubble is selected ("3 selected (you 2, her 1) · Delete · Cancel") and the delete runs in the background, with a toast
+ * to undo it; without script it is always there, a plain form posting the checked boxes (`delete-write.ts`).
+ */
+function deleteBar(ctx: PageContext): Raw {
+  if (!ctx.csrf) return raw("");
+  return html`<noscript><style>.detail .pick{opacity:1;display:grid!important}.selbar{display:flex}.bmenu .pick-one,.selbar .cancel{display:none}</style></noscript>
+<form id="del" class="selbar" method="post" action="/messages/delete" hx-boost="false"><input type="hidden" name="csrf" value="${ctx.csrf}"><input type="hidden" name="back" value="${ctx.here ?? "/turns"}"><span class="selcount">Tick the messages to delete</span><span class="selwhy" role="alert"></span><span class="acts"><button type="submit" class="btn danger solid">Delete</button><button type="button" class="btn cancel">Cancel</button></span></form>
+<div class="toast" role="status" hidden><span class="what"></span><button type="button" class="btn undo">Undo</button></div>`;
 }
 
 /** An event someone (or something) sent into the chat: a left bubble. */
@@ -227,24 +258,30 @@ function incoming(e: ChatEvent, tz: string, o: BubbleOpts = {}): Raw {
     default:
       return html`<p class="note">${e.kind} #${e.seq}</p>`;
   }
-  return html`<div class="${cls}" id="e${e.seq}"><div class="who">${who}${meta}</div>${body}</div>`;
+  const side = e.kind === "message" && o.me !== undefined && (e.payload as unknown as MessagePayload).from.id === o.me ? "you" : "other";
+  return pickable(e, side, html`<div class="${cls}" id="e${e.seq}"><div class="who">${who}${meta}</div>${body}</div>`);
 }
 
 /** Something she sent: a right bubble (a message) or a pill (a reaction, a sticker, a file). */
 function outgoing(e: ChatEvent, tz: string, opts: { via?: string; lookup?: (seq: number) => ChatEvent | undefined } = {}): Raw {
+  return pickable(e, "her", outgoingBody(e, tz, opts));
+}
+
+function outgoingBody(e: ChatEvent, tz: string, opts: { via?: string; lookup?: (seq: number) => ChatEvent | undefined }): Raw {
   const meta = html`${opts.via ? html`<span>via ${opts.via}</span>` : ""}<span>${clock(e.at, tz)}</span><span class="mono">#${e.seq}</span>${deliveryStatus(e)}`;
   switch (e.kind) {
     case "bot_message": {
       const p = e.payload as unknown as BotMessagePayload;
       const to = p.replyToSeq ? opts.lookup?.(p.replyToSeq) : undefined;
       const quoted = to ? eventPreview(to.kind, to.payload) : "";
+      // A reply to a message deleted since shows as no reply at all (store/deletions.ts: no trace).
       return html`<div class="bubble out" id="e${e.seq}"><div class="who">${meta}</div>${
-        p.replyToSeq ? html`<div class="reply">↳ <a href="#e${p.replyToSeq}">#${p.replyToSeq}</a> ${quoted}</div>` : ""
+        p.replyToSeq && to ? html`<div class="reply">↳ <a href="#e${p.replyToSeq}">#${p.replyToSeq}</a> ${quoted}</div>` : ""
       }<div class="text">${markdown(p.text)}</div></div>`;
     }
     case "bot_reaction": {
       const p = e.payload as unknown as BotReactionPayload;
-      return html`<div class="pill" id="e${e.seq}">reacted ${p.emoji} to <a href="#e${p.targetSeq}">#${p.targetSeq}</a> <span class="meta">${deliveryStatus(e)}</span></div>`;
+      return html`<div class="pill" id="e${e.seq}" data-target="${p.targetSeq}">reacted ${p.emoji} to <a href="#e${p.targetSeq}">#${p.targetSeq}</a> <span class="meta">${deliveryStatus(e)}</span></div>`;
     }
     case "bot_sticker": {
       const p = e.payload as unknown as BotStickerPayload;
@@ -536,7 +573,7 @@ interface InSession {
  */
 function turnTrace(ctx: PageContext, turn: Turn, transcript: Transcript | undefined, steps: Step[], group: boolean, inSession?: InSession): Raw[] {
   const t0 = Date.parse(turn.startedAt);
-  const owner = group && ctx.ownerId !== undefined ? { ownerId: ctx.ownerId } : {};
+  const owner = { ...(group && ctx.ownerId !== undefined ? { ownerId: ctx.ownerId } : {}), ...(ctx.ownerId !== undefined ? { me: ctx.ownerId } : {}) };
   const lookup = (seq: number) => eventBySeq(ctx.db, seq);
   const at = (iso: string) => offset(Date.parse(iso) - t0);
   const shape = inputShape(transcript);
@@ -591,6 +628,8 @@ function turnTrace(ctx: PageContext, turn: Turn, transcript: Transcript | undefi
         break;
       case "text": {
         const e = s.outboundSeq !== null ? bySeq.get(s.outboundSeq) : undefined;
+        // A message she sent that was deleted since (store/deletions.ts): gone from the trace, without a trace.
+        if (s.sent && s.outboundSeq !== null && !e) break;
         rows.push(
           tr(
             at(s.at),
@@ -732,7 +771,8 @@ ${turn.error ? html`<div class="banner">${turn.status === "stopped" ? "Stopped" 
   const tabs = html`<nav class="tabs">${TABS.map((t) => html`<a class="${t.id === tab ? "on" : ""}" href="${link(t.id === "conversation" ? {} : { tab: t.id })}">${t.label}${t.id === "prompt" && prompt ? html` <span class="meta">${size(prompt.text)}</span>` : ""}</a>`)}<span class="aside"><a href="${link(expandAll ? (tab === "conversation" ? {} : { tab }) : { ...(tab === "conversation" ? {} : { tab }), expand: "1" })}">${expandAll ? "collapse all" : "expand all"}</a> · j / k: next / previous turn</span></nav>`;
   const body =
     tab === "prompt" ? promptTab(ctx, turn, prompt, q.get("diff") === "1", link) : tab === "raw" ? rawTab(ctx, turn, transcript, steps) : conversation(ctx, turn, transcript, steps, chat.kind === "group");
-  return html`<div class="detail">${head}${tabs}<div class="panel">${body}</div></div>`;
+  const del = tab === "conversation";
+  return html`<div class="detail">${head}${tabs}${del ? (ctx.notice ?? "") : ""}<div class="panel">${body}</div>${del ? deleteBar(ctx) : ""}</div>`;
 }
 
 // ---- a segment, or a whole conversation ------------------------------------------------------------------------
@@ -820,7 +860,7 @@ ${missing.length ? html`<p class="note left">${absenceOf(ctx, missing, turns.len
     rows.push(...turnTrace(ctx, t, transcript, steps, group, { seen }));
     prevTurn = t;
   }
-  return html`<div class="detail">${head}${aside}<div class="panel"><div class="trace">${rows}</div></div></div>`;
+  return html`<div class="detail">${head}${aside}${ctx.notice ?? ""}<div class="panel"><div class="trace">${rows}</div></div>${deleteBar(ctx)}</div>`;
 }
 
 /** A segment (`level` segment) or a conversation, by id or by any turn in it. Null: no such thing. */
@@ -897,6 +937,7 @@ export function chatPage(ctx: PageContext, chatId: number, q: URLSearchParams = 
         ? outgoing(e, ctx.timeZone, { lookup: (seq) => events.find((x) => x.seq === seq) ?? eventBySeq(ctx.db, seq) })
         : incoming(e, ctx.timeZone, {
             ...(chat.kind === "group" && ctx.ownerId !== undefined ? { ownerId: ctx.ownerId } : {}),
+            ...(ctx.ownerId !== undefined ? { me: ctx.ownerId } : {}),
             ...(t === null && e.seq > chat.cursorSeq ? { tags: [html`<span class="tag">unseen</span>`] } : {}),
           }),
     );
@@ -909,10 +950,11 @@ export function chatPage(ctx: PageContext, chatId: number, q: URLSearchParams = 
 <p class="facts">telegram <span class="mono">${chat.tgChatId}</span><span class="sep"></span>cursor <span class="mono">#${chat.cursorSeq}</span><span class="sep"></span>${
     chat.backendSessionId ? html`conversation with <b>${short(chat.contextTokens)}</b> tokens of context` : "a fresh conversation next"
   }<span class="sep"></span><a href="${href("/turns", { chat: chat.id })}">${spans.length} turn${spans.length === 1 ? "" : "s"}</a>${failed ? html`, <span class="c-failed">${failed} failed</span>` : ""}</p></div>
+${ctx.notice ?? ""}
 <div class="panel">
 ${more && first ? html`<p class="note"><a href="${href(`/chats/${chat.id}`, { ...currentFilters(q), before: first })}">Earlier events</a></p>` : ""}
 ${events.length ? html`<div class="convo">${items}</div>` : empty("Nothing recorded in this chat.")}
-</div></div>`;
+</div>${deleteBar(ctx)}</div>`;
   const { pane } = listPane(ctx, q, { chat: chat.id, inChat: chat.id });
   return page(chatName(chat), split(pane, detail, true), ctx.who, "turns");
 }

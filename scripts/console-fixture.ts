@@ -10,6 +10,7 @@
 import { allowedHosts, allowedOrigins } from "../src/console/index.ts";
 import { handleConsole, LOGIN_HEADER } from "../src/console/server.ts";
 import { chatGrouping } from "../src/console/sessions.ts";
+import { purgeDeletions } from "../src/store/deletions.ts";
 import { buildConsoleFixture } from "../test/console-fixture.ts";
 import { OWNER } from "../test/helpers.ts";
 
@@ -27,6 +28,8 @@ Bun.serve({
     return handleConsole({ db: f.db, timeZone: "Asia/Taipei", dataDir: f.dataDir, ownerId: OWNER, users, allowedHosts: hosts, allowedOrigins: origins }, new Request(req, { headers }));
   },
 });
+// A message deleted here is purged after its undo window, as the server's `deletions` loop does.
+setInterval(() => purgeDeletions(f.db, f.dataDir), 1000);
 const base = `http://127.0.0.1:${port}`;
 const ids = (f.db.$client.query("select id from turns order by id").all() as { id: number }[]).map((r) => r.id);
 console.log(`console fixture on ${base} (data in ${f.dataDir})`);

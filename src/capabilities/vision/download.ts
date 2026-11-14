@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Db } from "../../store/db.ts";
-import { mediaOfEvent, pendingMedia, sniffImage, updateMedia } from "../../store/media.ts";
+import { mediaInUse, mediaOfEvent, pendingMedia, sniffImage, updateMedia } from "../../store/media.ts";
 import type { TelegramFiles } from "../../telegram/files.ts";
 
 /**
@@ -45,7 +45,12 @@ export async function downloadPass(db: Db, files: TelegramFiles, dataDir: string
         renameSync(tmp, abs);
       }
       const mimeType = sniffImage(readFileSync(abs)) ?? "image/jpeg";
-      updateMedia(db, e.seq, { state: "ready", path: rel, mimeType });
+      if (!updateMedia(db, e.seq, { state: "ready", path: rel, mimeType })) {
+        // The message was deleted while it downloaded (store/deletions.ts): the file stays only if something
+        // else names it. A deletion undone puts the message back pending, and it is fetched again.
+        if (!mediaInUse(db, rel)) rmSync(abs, { force: true });
+        continue;
+      }
       done++;
     } catch (err) {
       const attempts = (media.attempts ?? 0) + 1;

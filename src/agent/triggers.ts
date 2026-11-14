@@ -1,6 +1,7 @@
 import { and, desc, eq, lt } from "drizzle-orm";
 import type { ChatPolicy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
+import { deletionsMark } from "../store/deletions.ts";
 import { getEvent, kvGet, kvSet, triggersAfter, type BotMessagePayload, type Chat, type ChatEvent, type ExternalPayload, type MessagePayload } from "../store/events.ts";
 import { chatEvents, turns } from "../store/schema.ts";
 
@@ -113,16 +114,22 @@ export function isTrigger(db: Db, e: ChatEvent, cp: Pick<ChatPolicy, "trigger" |
 /**
  * The waker's memory of how far it has judged each chat's events, so a busy group's untriggered backlog
  * is read once, not on every pass. Only an optimisation: a new server starts with an empty one and judges
- * the backlog again, to the same answers. Reset for a chat when its cursor moves or the policy changes.
+ * the backlog again, to the same answers. Reset for a chat when its cursor moves, the policy changes, or one of
+ * its messages is deleted, put back or purged.
  */
 export class TriggerScan {
-  private readonly chats = new Map<number, { cursor: number; policy: unknown; checkedTo: number; newest: number | null }>();
+  private readonly chats = new Map<number, { cursor: number; policy: unknown; deletions: string; checkedTo: number; newest: number | null }>();
 
-  /** The newest event past the chat's cursor that starts a turn, or null. */
+  /**
+   * The newest event past the chat's cursor that starts a turn, or null. The memo starts over when the cursor or
+   * the policy moves, and when a message of the chat was deleted, put back or purged (store/deletions.ts): a
+   * deleted trigger must not start a turn, and one put back behind what was checked must.
+   */
   newestTrigger(db: Db, chat: Chat, cp: ChatPolicy, bot: BotIdentity | undefined, policyRef: unknown): number | null {
     let s = this.chats.get(chat.id);
-    if (!s || s.cursor !== chat.cursorSeq || s.policy !== policyRef) {
-      s = { cursor: chat.cursorSeq, policy: policyRef, checkedTo: chat.cursorSeq, newest: null };
+    const deletions = deletionsMark(db, chat.id);
+    if (!s || s.cursor !== chat.cursorSeq || s.policy !== policyRef || s.deletions !== deletions) {
+      s = { cursor: chat.cursorSeq, policy: policyRef, deletions, checkedTo: chat.cursorSeq, newest: null };
       this.chats.set(chat.id, s);
     }
     for (const e of triggersAfter(db, chat.id, s.checkedTo)) {

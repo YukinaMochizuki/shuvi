@@ -10,6 +10,7 @@ import { cardPage, html } from "./html.ts";
 import { chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
 import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
 import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
+import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } from "./delete-write.ts";
 
 /**
  * The console's HTTP side: who may look, and which page answers which URL.
@@ -33,10 +34,11 @@ import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
  *     token ends every session, and a restart ends none); `Authorization: Bearer <token>` works too, for a
  *     script. Anything else gets 401 and the sign-in form.
  *
- * READ ONLY, but for the Settings page: GET and HEAD everywhere, plus POST /login, plus POST to the Settings
- * page's write routes (`/settings/<area>/<verb>`, settings-write.ts `SETTINGS_WRITES`) and to nothing else. A
- * POST anywhere else, or any other method, gets 405; a GET to a write route gets 405 too. A write must pass,
- * after the Host check and the sign-in above, BOTH:
+ * READ ONLY, but for TWO WRITE PATHS: GET and HEAD everywhere, plus POST /login, plus POST to the Settings
+ * page's write routes (`/settings/<area>/<verb>`, settings-write.ts `SETTINGS_WRITES`) and to the delete of
+ * chat messages (`/messages/delete`, `/messages/undo`: delete-write.ts, store/deletions.ts), and to nothing
+ * else. A POST anywhere else, or any other method, gets 405; a GET to a write route gets 405 too. A write
+ * must pass, after the Host check and the sign-in above, BOTH:
  *   - ORIGIN: an `Origin` header naming one of `allowedOrigins` (index.ts: SHUVI_CONSOLE_URL's origin, and
  *     `http://` the loopback names of the bound port). Missing, `null` or any other: 403.
  *   - CSRF TOKEN: a form field `csrf` equal to this session's token, `csrfToken`: an HMAC, under a secret the
@@ -50,7 +52,9 @@ import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
  *     missing: 403.
  *   Two checks, so that one failing alone (a browser that sends no Origin, a token copied off a page) still
  *   refuses; and the session cookie is SameSite=Strict besides.
- * A write answers 303 to `/settings?r=<id>#<row>`: its result is a FLASH, kept in memory (at most
+ * A delete answers JSON to console.js (`Accept: application/json`), and otherwise 303 back to the page it came
+ * from (a path on this console) with its result as a flash of its own (delete-write.ts, `?n=<id>`).
+ * A Settings write answers 303 to `/settings?r=<id>#<row>`: its result is a FLASH, kept in memory (at most
  * settings-write.ts FLASH_MAX, for FLASH_MS), read once by its random id and not bound to a session; it holds
  * only the note and the form's non-secret fields. The fragment is ASCII-encoded (settings.ts `anchor`), so
  * a `Location` header can carry any model id.
@@ -150,7 +154,18 @@ export function csrfToken(secret: string, session: string): string {
   return createHmac("sha256", secret).update(`shuvi-console-csrf:${session}`).digest("base64url");
 }
 
-const refusedWrite = (why: string) => htmlResponse(cardPage("Refused", html`<p>${why}</p><p><a href="/settings">Back to Settings</a>, reloaded.</p>`), 403);
+/**
+ * A write refused at the boundary: why, and a link back to the page it came from (its Referer, when that is a
+ * page of this console; else the turns), to reload there.
+ */
+function refusedWrite(deps: ConsoleDeps, req: Request, why: string): Response {
+  let back = "/turns";
+  try {
+    const ref = new URL(req.headers.get("referer") ?? "");
+    if (deps.allowedOrigins?.has(ref.origin.toLowerCase()) && deps.allowedHosts.has(ref.host.toLowerCase())) back = backPath(`${ref.pathname}${ref.search}`);
+  } catch {}
+  return htmlResponse(cardPage("Refused", html`<p>${why}</p><p><a href="${back}">Back to the page</a>, reloaded.</p>`), 403);
+}
 
 const forbidden = () => htmlResponse(cardPage("Not for you", html`<p>This console is open to the tailnet users it lists, and this request did not come from one of them.</p>`), 403);
 const notFound = (who?: string) => htmlResponse(cardPage("Not found", html`<p>There is nothing here. <a href="/turns">Back to the turns</a>.</p>`, who), 404);
@@ -222,7 +237,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   const url = new URL(req.url);
   if (!deps.allowedHosts.has(hostOf(req, url))) return misdirected();
   const path = url.pathname.replace(/\/+$/, "") || "/";
-  const write = isSettingsWrite(path);
+  const write = isSettingsWrite(path) || isDeleteWrite(path);
   if (write ? req.method !== "POST" : !["GET", "HEAD"].includes(req.method) && !(req.method === "POST" && path === "/login")) {
     return write ? respond("a write: POST only", 405, "text/plain", { allow: "POST" }) : respond("read only", 405, "text/plain", { allow: "GET, HEAD" });
   }
@@ -236,13 +251,23 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     if (!auth.ok) return auth.response;
     const ctx: PageContext = { db: deps.db, timeZone: deps.timeZone, ...(auth.who ? { who: auth.who } : {}), ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}), ...(deps.transcriptDays ? { transcriptDays: deps.transcriptDays } : {}), now: (deps.now ?? Date.now)() };
     const csrf = csrfToken(deps.csrfSecret ?? PROCESS_CSRF_SECRET, auth.session);
+    ctx.csrf = csrf;
+    ctx.here = backPath(`${path}${url.search}`);
+    if (!write) {
+      const notice = takeDeleteNotice(deps.db, url.searchParams.get(NOTICE_PARAM), csrf, ctx.here, ctx.now);
+      if (notice) ctx.notice = notice;
+    }
     if (write) {
       const origin = req.headers.get("origin");
-      if (!origin || !deps.allowedOrigins?.has(origin.toLowerCase())) return refusedWrite("This change did not come from the console's own page (its Origin is missing or another site's).");
+      if (!origin || !deps.allowedOrigins?.has(origin.toLowerCase())) return refusedWrite(deps, req, "This change did not come from the console's own page (its Origin is missing or another site's).");
       const form = await req.formData().catch(() => null);
       const given = form?.get("csrf");
-      if (!form || typeof given !== "string" || !sameSecret(given, csrf)) return refusedWrite("This change carried no valid token for your session: the page may be from before a restart.");
-      return respond(null, 303, "text/plain", { location: settingsWrite(deps.db, path, form, ctx.now) });
+      if (!form || typeof given !== "string" || !sameSecret(given, csrf)) return refusedWrite(deps, req, "This change carried no valid token for your session: the page may be from before a restart.");
+      if (isDeleteWrite(path)) {
+        const r = deleteWrite(deps.db, path, form, (req.headers.get("accept") ?? "").includes("application/json"), ctx.now);
+        return "json" in r ? respond(r.json.body, r.json.status, "application/json; charset=utf-8") : respond(null, 303, "text/plain", { location: r.location });
+      }
+      if (isSettingsWrite(path)) return respond(null, 303, "text/plain", { location: settingsWrite(deps.db, path, form, ctx.now) });
     }
     if (path === "/" || path === "/login") return respond(null, 302, "text/plain", { location: "/turns" });
     if (path === "/media") return media(deps, url.searchParams.get("ref"));

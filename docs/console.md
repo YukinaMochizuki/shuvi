@@ -1,8 +1,9 @@
 # The console
 
 A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
-timeline. It is for the owner, to debug and tune her. It is read-only, except for one page, **Settings**, which
-manages the model catalog (below). Nothing else in it can change anything.
+timeline. It is for the owner, to debug and tune her. It is read-only, except for two things: **Settings**,
+which manages the model catalog, and **deleting chat messages** (both below). Nothing else in it can change
+anything.
 
 ## What it shows
 
@@ -31,6 +32,26 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
 - **A chat** (`/chats/<id>`): the chat's whole log, each turn's boundary a divider linking to it.
 - **Settings** (`/settings`): the model catalog. See below.
 
+## Deleting messages
+
+On a chat's page, a segment, a conversation, and a turn's Conversation tab, any message can be deleted: a
+person's (a photo or a sticker too) or hers (a message, a sticker, a file). Hover a bubble for the round
+checkbox on its left; clicking it starts selecting, Shift-click selects the range from the last one clicked, and
+a bar at the bottom says what is selected ("3 selected (you 2, her 1) · Delete · Cancel"); `Esc` cancels. The
+"⋯" at a bubble's top right offers Select (how selecting starts on a phone, where there is no hover) and Delete,
+for that message alone. No confirmation: the bubbles go at once and a toast counts down "Deleted 3 · Undo (10)";
+Undo puts them back in place. Another delete while the toast is up joins the first: the toast counts them all
+and starts its 10 seconds again, and its Undo puts all of them back. A message in a turn still running, or one
+of hers not sent yet, is refused, and the bar says why; so is an undo once she has started a turn in the chat
+since (the toast says why). Without script, every bubble has a checkbox and the bar a Delete button; the page
+comes back with a notice holding the Undo.
+
+A delete is final for everything shuvi reads: the message is gone from the chat's log, from what a fresh
+conversation is shown, from `search_chats` and `read_chat`, from the console, and its words from the quotes of
+replies to it, from turn transcripts and from what `read_chat` and `search_chats` gave her, without a trace
+(docs/design.md §3, `src/store/deletions.ts`). It is not taken out of the model's conversation, Telegram, or the
+backups. After the 10 seconds it cannot be undone.
+
 ## Settings: the model catalog
 
 The same operations as the control bot's `/models` and `/provider`, through the same code
@@ -54,9 +75,10 @@ Without script, reload the page to see one finish.
 
 ### The write boundary
 
-Settings is the console's only way in for a write. Every other page answers GET and HEAD only (and
-`/login` its POST); a POST to it is refused with 405. Settings' buttons POST to `/settings/<area>/<verb>`, and a
-GET there is refused too. A POST there is carried out only if it passes, on top of the sign-in and the Host
+The console has two ways in for a write: Settings, and deleting messages. Every other page answers GET and
+HEAD only (and `/login` its POST); a POST to it is refused with 405. Settings' buttons POST to
+`/settings/<area>/<verb>`, a delete to `/messages/delete` and its undo to `/messages/undo`, and a GET to any
+of them is refused too. A POST there is carried out only if it passes, on top of the sign-in and the Host
 check:
 
 - **Origin**: its `Origin` header is the console's own origin: `SHUVI_CONSOLE_URL`'s, or
@@ -67,7 +89,8 @@ check:
   login. With the token sign-in it is derived from your session cookie. A wrong or missing token gets 403.
   After a server restart, a page loaded before it is refused: reload it.
 
-The page needs no script: each write answers with a redirect back to `/settings`, which shows its result once.
+The page needs no script: each write answers with a redirect back to `/settings` (a delete: to the page it was
+made on), which shows its result once. With script, a delete is posted in the background and answered in JSON.
 With script (htmx, served by the console itself), a button is disabled and shows that it is working the
 moment it is pressed, and the answer replaces the page in place without a reload. The checks above are the
 same either way.

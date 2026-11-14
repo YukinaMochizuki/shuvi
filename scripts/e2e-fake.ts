@@ -16,7 +16,9 @@
  * Then stickers: a pack file in home/ is indexed and its set fetched by the server, a turn calls
  * `find_sticker` then `sticker`, and the fake Bot API receives `sendSticker`. Last, the console: that
  * turn's page, fetched as a tailnet user would (the `Tailscale-User-Login` header `tailscale serve` sets),
- * shows its system prompt, its tool calls and its usage; a login not on the list gets 403.
+ * shows its system prompt, its tool calls and its usage; a login not on the list gets 403. Then a message
+ * and her answer are deleted through the console (its write boundary: Origin and CSRF token), `/new`, and
+ * the fresh conversation's opening request carries the chat's recent messages but not those two.
  *
  *   bun scripts/e2e-fake.ts
  */
@@ -71,6 +73,8 @@ let stickerResult = "";
 let slowStepStarted = false;
 let longStepStarted = false;
 let modelRequests = 0;
+/** The messages of the request that opened a fresh conversation after the delete (section 8). */
+let afterDelete = "";
 /** The system prompt of each request of the memory section (4), by step. */
 const memorySystems: Record<string, string> = {};
 const anthropic = Bun.serve({
@@ -83,9 +87,17 @@ const anthropic = Bun.serve({
     if (!url.pathname.endsWith("/v1/messages")) return Response.json({});
     if (!body.tools?.some((t) => t.name === "mcp__shuvi__say")) return stream("msg_side", [{ type: "text", text: "ok" }], "end_turn");
     modelRequests++;
-    // Section 4 (memory). Matched on the LAST message, since the conversation's history holds section 3's.
+    // Sections 4 (memory) and 8 (deleting). Matched on the LAST message, since the conversation's history holds
+    // the earlier sections'.
     const latest = JSON.stringify(body.messages?.at(-1) ?? "");
     const system = JSON.stringify(body.system ?? "");
+    // Section 8: a word to delete, then what a fresh conversation is given after `/new`. First, since that fresh
+    // conversation's opening carries the earlier sections' words as history, in its last message.
+    if (latest.includes("what was the word")) {
+      afterDelete = JSON.stringify(body.messages);
+      return stream(`msg_${modelRequests}`, [{ type: "text", text: "Which word?" }], "end_turn");
+    }
+    if (latest.includes("the secret word is mangosteen")) return stream(`msg_${modelRequests}`, [{ type: "text", text: "Kept it: mangosteen." }], "end_turn");
     if (latest.includes("what do I drink")) {
       memorySystems.ask = system;
       return stream(`msg_${modelRequests}`, [{ type: "text", text: system.includes("Likes green tea") ? "Green tea." : "No idea." }], "end_turn");
@@ -299,6 +311,33 @@ const segmentId = /href="\/segments\/(\d+)\?tool=sticker"/.exec(listHtml)?.[1];
 check(segmentId !== undefined && listHtml.includes("1 segment, 1 turn in 1 chat"), "the grouped list finds its segment by the tool it used");
 const segmentHtml = await (await consoleGet(`/segments/${segmentId}?tool=sticker`, "owner@example.com")).text();
 check(segmentHtml.includes(`<div class="tdiv match"><a href="/turns/${last.id}?tool=sticker">`), "the segment marks the turn that used it");
+
+// ---- 8. a message deleted from the console never reaches a fresh conversation --------------------------------
+const lastTurnClosed = () => (db.$client.query("select status from turns order by id desc limit 1").get() as { status: string }).status !== "running";
+tg.updates.push(dmUpdate(9, "the secret word is mangosteen"));
+await until("her answer", () => texts().includes("Kept it: mangosteen."));
+await until("that turn to close", lastTurnClosed, 15_000);
+const said = db.$client.query("select seq from chat_events where (kind = 'message' and payload like '%mangosteen%') or (kind = 'bot_message' and payload like '%mangosteen%') order by seq").all() as { seq: number }[];
+check(said.length === 2, `the message and her answer are in the log (#${said.map((s) => s.seq).join(", #")})`);
+const origin = `http://127.0.0.1:${consolePort}`;
+const chatHtml = await (await consoleGet("/chats/1", "owner@example.com")).text();
+const csrf = /name="csrf" value="([^"]+)"/.exec(chatHtml)?.[1] ?? "";
+check(chatHtml.includes("mangosteen") && chatHtml.includes(`data-seq="${said[0]!.seq}"`) && !!csrf, "the chat's page offers them for deleting, with its CSRF token");
+const del = (fields: [string, string][], o: { origin?: string } = {}) =>
+  fetch(`${origin}/messages/delete`, { method: "POST", headers: { "Tailscale-User-Login": "owner@example.com", origin: o.origin ?? origin, accept: "application/json" }, body: new URLSearchParams(fields) });
+check((await del([["csrf", csrf], ...said.map((s) => ["seq", String(s.seq)] as [string, string])], { origin: "https://evil.example" })).status === 403, "a delete from another origin is refused");
+const deleted = await del([["csrf", csrf], ...said.map((s) => ["seq", String(s.seq)] as [string, string])]);
+const answer = (await deleted.json()) as { count?: number; seconds?: number };
+check(deleted.status === 200 && answer.count === 2 && answer.seconds === 10, `the console deletes both (${JSON.stringify(answer)})`);
+check(!(await (await consoleGet("/chats/1", "owner@example.com")).text()).includes("mangosteen"), "and its page no longer shows them");
+tg.updates.push(dmUpdate(10, "/new"));
+await until("the /new acknowledgement", () => tg.sent("setMessageReaction").length >= 3);
+tg.updates.push(dmUpdate(11, "what was the word?"));
+await until("the fresh conversation's answer", () => texts().includes("Which word?"));
+check(afterDelete.includes("(A new conversation. The last") && afterDelete.includes("what do I drink?"), "the fresh conversation opened with the chat's recent messages");
+check(!afterDelete.includes("mangosteen"), "and neither the deleted message nor her deleted answer is among them");
+await until("the purge", () => (db.$client.query("select count(*) as n from deletions").get() as { n: number }).n === 0, 20_000);
+check((db.$client.query("select count(*) as n from deleted_events").get() as { n: number }).n === 0, "after its 10 seconds the server purged the deletion");
 
 log("PASS");
 cleanup();

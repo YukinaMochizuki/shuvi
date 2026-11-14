@@ -282,6 +282,76 @@ export const chatEvents = sqliteTable(
   ],
 );
 
+// ---- deleting messages (store/deletions.ts): the owner deletes chat messages from the console ----------
+//
+// A delete MOVES the rows out of `chat_events` into `deleted_events` (every column, seq included), so no reader
+// of `chat_events` sees them, and stashes the verbatim copies it scrubbed elsewhere (`deletion_scrubs`). For
+// DELETE_UNDO_MS the batch can be undone, byte for byte; after it the server's purge drops the stash and the
+// media files only those rows referred to. Nothing marks where they were.
+
+/**
+ * One delete: the batch an undo puts back and the purge drops. A chat has at most one OPEN (its window not
+ * closed): a delete while one is open joins it, and the window starts again.
+ */
+export const deletions = sqliteTable("deletions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  chatId: integer("chat_id")
+    .notNull()
+    .references(() => chats.id),
+  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  /** When the undo window closes and the purge may run (ISO). */
+  purgeAt: text("purge_at").notNull(),
+  /** The chat's cursor at the first delete: an undo is refused once it has moved past a row to put back. */
+  cursorSeq: integer("cursor_seq").notNull(),
+  /** The chat's newest turn at the first delete (0: none): an undo is refused once another has started. */
+  lastTurnId: integer("last_turn_id").notNull(),
+});
+
+/** The rows a deletion moved out of `chat_events`, as they were (same columns, same seq). */
+export const deletedEvents = sqliteTable(
+  "deleted_events",
+  {
+    seq: integer("seq").primaryKey(),
+    deletionId: integer("deletion_id")
+      .notNull()
+      .references(() => deletions.id),
+    chatId: integer("chat_id").notNull(),
+    kind: text("kind").notNull(),
+    payload: text("payload").notNull(),
+    tgUpdateId: integer("tg_update_id"),
+    tgMessageId: integer("tg_message_id"),
+    idemKey: text("idem_key"),
+    status: text("status"),
+    note: text("note"),
+    turnId: integer("turn_id"),
+    at: text("at").notNull(),
+  },
+  (t) => [index("deleted_events_deletion").on(t.deletionId)],
+);
+
+/**
+ * What a deletion scrubbed besides the rows themselves, with the original value for its undo: a reply's
+ * quote of a deleted message (`event`: a `chat_events.payload`), a deleted message's line in a turn's input
+ * (`transcript`: `turn_transcripts.input`), in what a turn was appended, or her own deleted message in the turn
+ * that wrote it (`step`: the `turn_steps` columns written, as JSON `{text?, images?, args?}`). `scrubbed` is the
+ * value written, so an undo knows whether it changed since.
+ */
+export const deletionScrubs = sqliteTable(
+  "deletion_scrubs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    deletionId: integer("deletion_id")
+      .notNull()
+      .references(() => deletions.id),
+    target: text("target", { enum: ["event", "transcript", "step"] }).notNull(),
+    /** event: the seq; transcript: the turn id; step: the step's id. */
+    ref: integer("ref").notNull(),
+    original: text("original").notNull(),
+    scrubbed: text("scrubbed").notNull(),
+  },
+  (t) => [index("deletion_scrubs_deletion").on(t.deletionId)],
+);
+
 /** The events past the cursor that start a turn: TRIGGER_KINDS, minus quiet `external` ones. */
 export const asksForTurn = () =>
   and(inArray(chatEvents.kind, TRIGGER_KINDS), sql`(${chatEvents.kind} <> 'external' OR coalesce(json_extract(${chatEvents.payload}, '$.trigger'), 1) = 1)`)!;

@@ -17,6 +17,9 @@
  *   backup    a daily copy of shuvi.db and home/ (control/backup.ts)
  *   control   when `SHUVI_CONTROL_BOT_TOKEN` is set, the control bot's poller and sender (control/bot.ts)
  *   prune     drop turn transcripts and abandoned conversations older than SHUVI_TRANSCRIPT_DAYS
+ *   deletions make final the messages deleted from the console once their undo window has closed, and remove
+ *             the media files only they used (store/deletions.ts); its first pass, at start, does those
+ *             that came due while the server was down
  *   console   when SHUVI_CONSOLE_USERS or SHUVI_CONSOLE_TOKEN is set, the read-only web console (src/console/)
  *   health    /healthz and /metrics on SHUVI_METRICS_LISTEN, loopback (health.ts)
  *
@@ -38,6 +41,7 @@ import { saveBotIdentity, TriggerScan } from "../agent/triggers.ts";
 import { expireApprovals } from "../control/approvals.ts";
 import { pruneTranscriptMedia } from "../agent/transcript.ts";
 import { backupPass } from "../control/backup.ts";
+import { purgeDeletions } from "../store/deletions.ts";
 import { checkConsole, consoleOn, startConsole } from "../console/index.ts";
 import { CONTROL_COMMANDS, controlPollOnce, controlSendPass, deployedCommit, outboundAlertPass } from "../control/bot.ts";
 import { switchCardPass } from "../control/model-cards.ts";
@@ -165,6 +169,14 @@ void loop(
     if (r.transcripts || r.prompts || images || conversations) console.log(`prune: ${r.transcripts} transcript(s), ${r.steps} step(s), ${r.prompts} prompt text(s), ${conversations} conversation(s), ${images} image(s) older than ${cfg.transcriptDays} days`);
   },
   3600_000,
+);
+void loop(
+  "deletions",
+  async () => {
+    const r = purgeDeletions(db, cfg.dataDir);
+    if (r.deletions) console.log(`deletions: purged ${r.deletions} deletion(s), ${r.files} media file(s)`);
+  },
+  1000,
 );
 if (consoleOn(cfg.console)) {
   let served = false;
