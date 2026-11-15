@@ -5,10 +5,12 @@
  *   fake Telegram ⇄ shuvi server ⇄ runner child ⇄ real Claude Code CLI ⇄ fake Anthropic;  the media
  *   capability ⇄ a fake porchkit (test/fake-porchkit.ts);  the computer ⇄ a fake Hangar
  *
- *   1. the owner sends a YouTube link: the server probes it at once (speculative), while the turn starts;
- *      the turn's input says it is prepared; the turn calls video_probe (which joins the prewarm: porchkit
- *      sees ONE probe) and video_sheet with the url (the sheets come back as images, never as URLs); the
- *      prewarm is recorded as used, and the porchkit token is nowhere in the store
+ *   1. the owner sends a YouTube link: the server reads it at once through porchkit's `/read` (speculative;
+ *      porchkit probes a video site's video itself), while the turn starts; the turn's input says it is
+ *      prepared, for read_link; the turn calls video_probe, which asks porchkit itself (a read prewarm is not
+ *      a probe to join; porchkit answers from the cache the read filled), and video_sheet with the url (the
+ *      sheets come back as images, never as URLs); the prewarm is recorded as a read, unused (the turn never
+ *      called read_link), and the porchkit token is nowhere in the store
  *   2. the owner asks for the file: video_fetch starts porchkit's download and a job; the job copies the file
  *      into ~/inbox on the computer, and its job_done turn answers with the path
  *
@@ -66,13 +68,13 @@ const use = (name: string, input: unknown) => stream([{ type: "tool_use", name: 
 const seen: string[] = [];
 const bodies: string[] = [];
 let toolsOffered: string[] = [];
-let probesWhenFirstTool = -1;
+let readsWhenFirstTool = -1;
 
 /** [what the newest user message contains, what the model does]: the first match wins (matched as JSON). */
 const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
   [/Title: Example talk/, () => use("video_sheet", { url: LINK, count: 8 })],
   [/2 sheet\(s\), in order:/, (t) => say(`It is a talk with two chapters; I looked at ${t.split('"type":"image"').length - 1} sheet(s).`)],
-  [/what is in this video/, () => ((probesWhenFirstTool = porch.of("/media/probe").length), use("video_probe", { url: LINK }))],
+  [/what is in this video/, () => ((readsWhenFirstTool = porch.of("/read").length), use("video_probe", { url: LINK }))],
   [/Started job \d+ in the background: the media service fetches the video/, () => say("Downloading it now.")],
   [/video_fetch · done\].*Saved on your computer as ~\/inbox\/video-[0-9a-f]{12}\.mp4/, () => say("It is in your inbox now.")],
   [/download that video for me/, () => use("video_fetch", { url: LINK })],
@@ -101,7 +103,7 @@ const anthropic = Bun.serve({
 // ---- the world ---------------------------------------------------------------------------------------
 const tg = new FakeTelegram();
 const porch = new FakePorchkit();
-porch.probeDelayMs = 300; // long enough that the turn's video_probe may find it still in flight
+porch.readDelayMs = 300; // long enough that the turn may start while the prewarm is still in flight
 const hangar = new FakeHangar();
 const dataDir = mkdtempSync(join(tmpdir(), "shuvi-e2e-media-"));
 mkdirSync(join(dataDir, "home"), { recursive: true });
@@ -159,20 +161,22 @@ await until("the server to start", () => serverOut.includes("shuvi server:"), 20
 // ---- 1. a link from the owner: prewarm, probe, sheet --------------------------------------------------
 tg.updates.push(dmUpdate(1, `what is in this video? ${LINK}`));
 await replied("It is a talk with two chapters; I looked at 2 sheet(s).", "the turn probed the link and looked at its sheets");
+const reads = porch.of("/read");
+check(reads.length === 1 && reads[0]!.body.speculative === true && reads[0]!.body.url === LINK, `the server's prewarm was a speculative /read of the link (${JSON.stringify(reads.map((c) => c.body))})`);
+check(readsWhenFirstTool === 1, "the prewarm had gone out before the turn's first tool call");
 const probes = porch.of("/media/probe");
-check(probes.length === 1, `porchkit saw one probe (${probes.length})`);
-check(probes[0]!.body.speculative === true && probes[0]!.body.url === LINK, "it was the server's prewarm, speculative");
-check(probesWhenFirstTool === 1, "the prewarm had gone out before the turn's first tool call");
+check(probes.length === 1 && probes[0]!.body.url === LINK && probes[0]!.body.speculative === undefined, `video_probe asked porchkit itself, normally (${JSON.stringify(probes.map((c) => c.body))})`);
 const first = seen.find((s) => s.includes("what is in this video"))!;
-const line = first.match(/\((?:Prepared|Preparing): #\d+'s link — video_probe (?:returns at once|joins it)\.\)/)?.[0];
+const line = first.match(/\((?:Prepared|Preparing): #\d+'s link — read_link (?:returns at once|joins it)\.\)/)?.[0];
 check(line, `the turn's input says the link is prepared: ${line}`);
 check(toolsOffered.includes("mcp__shuvi__video_probe") && toolsOffered.includes("mcp__shuvi__video_sheet") && toolsOffered.includes("mcp__shuvi__video_fetch"), "the media tools are offered");
 const sheetCall = porch.calls.find((c) => c.path === "/media/sheet");
 check(sheetCall?.body.url === LINK && sheetCall.body.count === 8, "video_sheet asked porchkit for sheets of the link");
 check(porch.of("/media/sheets/").length === 2 && porch.of("/media/sheets/").every((c) => c.authed), "both sheets were fetched with the token");
 check(!bodies.some((b) => b.includes("/media/sheets/")), "no sheet URL reached the model");
-const pre = db.$client.query("select outcome, used_turn_id as used from media_prewarms").all() as { outcome: string; used: number | null }[];
-check(pre.length === 1 && pre[0]!.outcome === "ok" && pre[0]!.used !== null, `the prewarm is recorded as used (${JSON.stringify(pre)})`);
+const pre = db.$client.query("select endpoint, outcome, result, used_turn_id as used from media_prewarms").all() as { endpoint: string; outcome: string; result: string; used: number | null }[];
+check(pre.length === 1 && pre[0]!.endpoint === "read" && pre[0]!.outcome === "ok" && pre[0]!.used === null, `the prewarm is recorded as a read, unused (${JSON.stringify(pre)})`);
+check(!/https?:|youtu|abc123def45/.test(pre[0]!.result), `what the prewarm keeps holds no URL: ${pre[0]!.result}`);
 const dump = (db.$client.query("select group_concat(coalesce(payload, ''), '') as t from chat_events").get() as { t: string }).t + JSON.stringify(db.$client.query("select * from turn_steps").all());
 check(!dump.includes(porch.token) && !bodies.some((b) => b.includes(porch.token)), "the porchkit token is nowhere in the store or what the model was sent");
 await until("the turn to close", turnsIdle);

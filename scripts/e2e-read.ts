@@ -10,7 +10,8 @@
  *      reads it again normally; what the model receives is text and FOUR images (2 pictures, the video's
  *      poster and its contact sheet), never a file key, a porchkit path or the token; web_fetch is not
  *      offered (porchkit is configured), read_link and save_link are
- *   2. the owner asks about a long article: read_link gives the first part and how to read on; the model
+ *   2. the owner asks about a long article: the server prewarms it too (every link is read, not only posts);
+ *      read_link gives the first part and how to read on; the model
  *      reads on with offset, then saves the whole text and the page as received with save_link: both land
  *      in ~/inbox on the computer, byte for byte
  *
@@ -185,7 +186,7 @@ await until("the turn to close", turnsIdle);
 tg.updates.push(dmUpdate(2, `read me this article ${LONG_PAGE}`));
 await replied("Saved it on your computer.", "the turn read the article, read on, and saved it");
 const pageReads = porch.of("/read").slice(2).map((c) => c.body);
-check(JSON.stringify(pageReads) === JSON.stringify([{ url: LONG_PAGE }, { url: LONG_PAGE, offset: 20000 }, { url: LONG_PAGE }]), `read, read on, and save_link's read (${JSON.stringify(pageReads)})`);
+check(JSON.stringify(pageReads) === JSON.stringify([{ url: LONG_PAGE, speculative: true }, { url: LONG_PAGE }, { url: LONG_PAGE, offset: 20000 }, { url: LONG_PAGE }]), `the prewarm (a page is read too), then read, read on, and save_link's read (${JSON.stringify(pageReads)})`);
 const inbox = join(hangar.home("shuvi-1001"), "inbox");
 const saved = readdirSync(inbox);
 const md = saved.find((f) => f.endsWith(".md"));
