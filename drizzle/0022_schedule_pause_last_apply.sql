@@ -1,0 +1,1 @@
+ALTER TABLE `computers` ADD `last_apply` text;

@@ -368,6 +368,12 @@ comes due, the framework writes a `scheduled` event into the target chat, and th
 chat's conversation with its context. The assistant may `pass()` each time. There is no background
 patrol (heartbeat) and no unprompted speaking: every wake-up has a stated purpose.
 
+The owner can also **pause** a schedule, and resume or cancel it, from the chat's settings page in the console
+(docs/console.md). A paused schedule is kept but never fires; the assistant still sees it, as paused
+(`list_schedules`), and can still cancel it. Resumed, it runs next from NOW: nothing it missed while paused is
+fired, not even the one catch-up a downtime gives; a paused one-off whose time has passed is cancelled, not run
+late (src/store/schedules.ts).
+
 An **inbound source** carries external events the assistant did not start (a monitoring alert, say):
 `POST /inbound/<source>`. The chat it lands in, and whether it triggers a turn, are declared in
 `home/inbound.yaml`; its token is in the server's environment (`SHUVI_INBOUND_<NAME>_TOKEN`), never in
@@ -607,7 +613,9 @@ the owner.
 `home/` and git; policy names them, never their values.
 
 - A chat's computer gets a profile only when the assistant asks (`request_secret`) and the owner
-  approves, for 4 h / 1 d / 3 d; the owner can revoke it. Groups have none by default.
+  approves, for 4 h / 1 d / 3 d; the owner can revoke it, on its card in the control bot or from the chat's
+  settings page in the console, which presses the same card (only names are shown there, never a value; nothing
+  is granted from the console). Groups have none by default.
 - A granted profile is injected as env into the one `exec` process that runs, never written to `$HOME`.
 - Known secret values are replaced with `[REDACTED:<profile>]` in any output before the model or the
   chat sees it.

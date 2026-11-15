@@ -3,12 +3,21 @@ import { TRIGGERS } from "../policy/policy.ts";
 import { dot, href, html, page, raw, secs, short, when, type Raw } from "./html.ts";
 import type { Flash } from "./home.ts";
 import type { PolicyForm } from "./policy-form.ts";
+import { computerSection, schedulesSection, secretsSection, type ComputerView, type SchedulesView, type SecretsView } from "./chat-extras.ts";
 
 /**
- * A chat's settings page, `/chats/<id>/settings` (DESIGN.md "A chat's settings"): what the control bot's `/model`
- * and `/profile` cards, the chat's `/new` and `/stop`, and its entry in policy.yaml decide, in one place. Drawn
- * from a view (chat-settings-data.ts loads it); every button is a POST form through the console's write boundary
- * (server.ts), answered with a 303 back here and its result shown once (chat-settings-write.ts).
+ * A chat's settings (DESIGN.md "A chat's settings"): what the control bot's `/model` and `/profile` cards, the
+ * chat's `/new` and `/stop`, its entry in policy.yaml, its schedules, secrets and computer decide. Three categories,
+ * each a page of its own with its own URL, reached by real tabs at the top of the detail pane:
+ *
+ *   Chat                   `/chats/<id>/settings` (where every way in lands): Model, Profile, Conversation.
+ *   Permissions            `/chats/<id>/settings/permissions`: the chat's entry in policy.yaml.
+ *   Automation & machine   `/chats/<id>/settings/automation`: Schedules, Secrets, Computer (chat-extras.ts).
+ *
+ * Drawn from a view (chat-settings-data.ts loads it); every button is a POST form through the console's write
+ * boundary (server.ts), answered with a 303 back to the category it came from and its result shown once
+ * (chat-settings-write.ts). Adjacent pieces of inline text are separated by real whitespace in the markup, so a
+ * page still reads without its stylesheet.
  *
  *   Model         the catalog as a radio list, by provider. A row is a link (`?to=<model>#model`, a read): the
  *                 page comes back with Lossless / Lossy under it, each with what it would do in this chat now
@@ -18,6 +27,7 @@ import type { PolicyForm } from "./policy-form.ts";
  *                 conversation, which asks first (`?confirm=new#conversation`).
  *   Permissions   the chat's entry as a form; "Review changes" comes back with the diff to policy.yaml, then
  *                 "Save" writes it; a form the parser refuses comes back as it was typed, with its reason.
+ *   Schedules, Secrets, Computer   chat-extras.ts.
  */
 
 export interface ModelRow {
@@ -97,8 +107,20 @@ export interface PermissionsView {
   broken?: string;
 }
 
+export type SettingsCategory = "chat" | "permissions" | "automation";
+
+export const CATEGORIES: readonly { id: SettingsCategory; label: string; path: string }[] = [
+  { id: "chat", label: "Chat", path: "" },
+  { id: "permissions", label: "Permissions", path: "/permissions" },
+  { id: "automation", label: "Automation & machine", path: "/automation" },
+];
+
+/** A category's page. */
+export const categoryHref = (chatId: number, c: SettingsCategory) => `/chats/${chatId}/settings${CATEGORIES.find((x) => x.id === c)!.path}`;
+
 export interface ChatSettingsView {
   chat: { id: number; name: string; kind: "private" | "group"; tgChatId: number };
+  category: SettingsCategory;
   timeZone: string;
   now: number;
   csrf: string;
@@ -108,6 +130,10 @@ export interface ChatSettingsView {
   profile: { current: string | null; gone: boolean; rows: ProfileRow[]; flash?: Flash };
   conversation: { began: string | null; how?: string; segments: number; contextTokens: number | null; running?: RunningTurn; confirmNew: boolean; flash?: Flash };
   permissions: PermissionsView;
+  /** Loaded for the Automation & machine page only. */
+  schedules?: SchedulesView;
+  secrets?: SecretsView;
+  computer?: ComputerView;
   who?: string;
 }
 
@@ -123,9 +149,9 @@ function modelRow(v: ChatSettingsView, m: ModelRow): Raw {
   const cur = m.id === v.model.current;
   const picked = v.model.picked?.id === m.id;
   const cls = `mrow${cur ? " cur" : ""}${picked ? " picked" : ""}${m.warned ? " warn" : ""}`;
-  const inner = html`<span class="radio-dot" aria-hidden="true"></span><span class="mid">${m.id}</span>${m.label ? html`<span class="mlabel">${m.label}</span>` : ""}${cur ? html`<span class="nowtag">current</span>` : ""}${
-    m.warned ? html`<span class="mwarn" title="its last probe got no tool call">⚠</span>` : ""
-  }${m.isDefault ? html`<span class="mstar" title="the default">★</span>` : ""}<span class="mctx">${ctxSize(m.contextWindow)}</span>`;
+  const inner = html`<span class="radio-dot" aria-hidden="true"></span> <span class="mid">${m.id}</span> ${m.label ? html`<span class="mlabel">${m.label}</span> ` : ""}${cur ? html`<span class="nowtag">current</span> ` : ""}${
+    m.warned ? html`<span class="mwarn" title="its last probe got no tool call">⚠</span> ` : ""
+  }${m.isDefault ? html`<span class="mstar" title="the default">★</span> ` : ""}<span class="mctx">${ctxSize(m.contextWindow)}</span>`;
   // A row is a read: it shows the mode step under it. The one being switched to is not a link meanwhile.
   if (v.model.switching) return html`<span class="${cls}" aria-disabled="true">${inner}</span>`;
   return html`<a class="${cls}" href="${href(base(v), picked ? {} : { to: m.id })}#model" role="radio" aria-checked="${cur ? "true" : "false"}">${inner}</a>`;
@@ -133,12 +159,12 @@ function modelRow(v: ChatSettingsView, m: ModelRow): Raw {
 
 function switchBox(v: ChatSettingsView, p: Picked): Raw {
   const cancel = html`<a class="btn ghost" href="${base(v)}#model">Cancel</a>`;
-  if (p.error || p.noop) return html`<div class="switchbox"><div class="swfoot"><span class="${p.error ? "c-failed" : "faint"}">${p.error ?? p.noop}</span>${cancel}</div></div>`;
+  if (p.error || p.noop) return html`<div class="switchbox"><div class="swfoot"><span class="${p.error ? "c-failed" : "faint"}">${p.error ?? p.noop}</span> ${cancel}</div></div>`;
   const mode = (m: "lossless" | "lossy", name: string, line: string) => html`<form method="post" action="${base(v)}/switch" class="modef">${csrfField(v)}<input type="hidden" name="to" value="${p.id}"><input type="hidden" name="mode" value="${m}"><input type="hidden" name="key" value="${v.pageKey}">
-<button type="submit" class="mode"><span class="mname">${name}</span><span class="mline">${line}</span></button></form>`;
+<button type="submit" class="mode"><span class="mname">${name}</span> <span class="mline">${line}</span></button></form>`;
   return html`<div class="switchbox" id="switchbox"><div class="swhead">Switch from <span class="mono">${v.model.current ?? "none"}</span> to <span class="mono">${p.id}</span>. How?</div>
 <div class="modes compact">${mode("lossless", "Lossless", p.lossless ?? "")}${mode("lossy", "Lossy", p.lossy ?? "")}</div>
-<div class="swfoot"><span class="faint">Either way her files and notes stay.${p.running ? ` ${p.running[0]!.toUpperCase()}${p.running.slice(1)}.` : ""}</span>${cancel}</div></div>`;
+<div class="swfoot"><span class="faint">Either way her files and notes stay.${p.running ? ` ${p.running[0]!.toUpperCase()}${p.running.slice(1)}.` : ""}</span> ${cancel}</div></div>`;
 }
 
 /**
@@ -158,10 +184,10 @@ function modelSection(v: ChatSettingsView): Raw {
       html`<div class="mgroup"><div class="mgh">${g.provider}<span class="faint"> · ${g.kind}</span></div>${g.models.map((r) => html`${modelRow(v, r)}${m.picked?.id === r.id && !m.switching ? switchBox(v, m.picked) : ""}`)}</div>`,
   );
   const warned = m.groups.some((g) => g.models.some((r) => r.warned));
-  return html`<section class="cs" id="model"><div class="cshd"><h2>Model</h2><span class="faint">what her turns here run on</span><a class="right" href="/settings">The catalog →</a></div>
+  return html`<section class="cs" id="model"><div class="cshd"><h2>Model</h2> <span class="faint">what her turns here run on</span> <a class="right" href="/settings">The catalog →</a></div>
 ${m.switching ? switchingLine(v, m.switching) : flashLine(m.flash)}
 ${m.groups.length ? html`<div class="mlist${m.picked && !m.switching ? " switching" : ""}" role="radiogroup" aria-label="Model">${rows}</div>` : html`<p class="hint">The catalog is empty: add a provider in <a href="/settings">Settings</a>.</p>`}
-<div class="pfoot"><span>★ the default, for chats with no model of their own</span>${warned ? html`<span>⚠ its last probe got no tool call</span>` : ""}</div></section>`;
+<div class="pfoot"><span>★ the default, for chats with no model of their own</span>${warned ? html` <span>⚠ its last probe got no tool call</span>` : ""}</div></section>`;
 }
 
 // ---- profile -----------------------------------------------------------------------------------------------
@@ -170,11 +196,11 @@ function profileSection(v: ChatSettingsView): Raw {
   const p = v.profile;
   const row = (name: string, label: string | undefined, hint: string) => {
     const cur = (p.gone ? null : p.current) === (name || null);
-    return html`<button type="submit" name="profile" value="${name}" class="prow${cur ? " cur" : ""}" role="radio" aria-checked="${cur ? "true" : "false"}"><span class="radio-dot" aria-hidden="true"></span><span class="pname">${name || "Base"}</span>${
-      label ? html`<span class="plabel">${label}</span>` : ""
+    return html`<button type="submit" name="profile" value="${name}" class="prow${cur ? " cur" : ""}" role="radio" aria-checked="${cur ? "true" : "false"}"><span class="radio-dot" aria-hidden="true"></span> <span class="pname">${name || "Base"}</span> ${
+      label ? html`<span class="plabel">${label}</span> ` : ""
     }<span class="phint">${hint}</span></button>`;
   };
-  return html`<section class="cs" id="profile"><div class="cshd"><h2>Profile</h2><span class="faint">which copy of her files this chat reads and writes, from its next turn</span><a class="right" href="/home">Profiles in Home →</a></div>
+  return html`<section class="cs" id="profile"><div class="cshd"><h2>Profile</h2> <span class="faint">which copy of her files this chat reads and writes, from its next turn</span> <a class="right" href="/home">Profiles in Home →</a></div>
 ${flashLine(p.flash)}${p.gone ? html`<p class="notice refused">This chat is on <b>${p.current}</b>, which no longer exists: it runs on Base.</p>` : ""}
 <form method="post" action="${base(v)}/profile" class="plist" role="radiogroup" aria-label="Profile">${csrfField(v)}
 ${row("", undefined, "her own files, no overlay")}${p.rows.map((r) => row(r.name, r.label, r.own ? `${plural(r.own, "file")} of its own` : "no files of its own yet"))}</form></section>`;
@@ -185,12 +211,12 @@ ${row("", undefined, "her own files, no overlay")}${p.rows.map((r) => row(r.name
 function conversationSection(v: ChatSettingsView): Raw {
   const c = v.conversation;
   const facts = c.began
-    ? html`<p class="sline">The current conversation began <b>${when(c.began, v.timeZone)}</b>${c.how ? ` (${c.how})` : ""} · ${plural(c.segments, "segment")}${
+    ? html`<p class="xline">The current conversation began <b>${when(c.began, v.timeZone)}</b>${c.how ? ` (${c.how})` : ""} · ${plural(c.segments, "segment")}${
         c.contextTokens ? html` · <b>${short(c.contextTokens)}</b> tokens of context` : ""
       }</p>`
-    : html`<p class="sline">No conversation yet: her next turn here starts one.</p>`;
+    : html`<p class="xline">No conversation yet: her next turn here starts one.</p>`;
   const stop = c.running
-    ? html`<div class="crow running"><div class="stext"><b>${dot("running")}Turn ${c.running.id} is running<span class="faint num">${secs(Math.max(0, v.now - Date.parse(c.running.startedAt)))}</span></b><span>As <span class="mono">/stop</span> does: she stops now; what she already sent stays.</span></div>
+    ? html`<div class="crow running"><div class="stext"><b>${dot("running")}Turn ${c.running.id} is running <span class="faint num">${secs(Math.max(0, v.now - Date.parse(c.running.startedAt)))}</span></b> <span>As <span class="mono">/stop</span> does: she stops now; what she already sent stays.</span></div>
 <form method="post" action="${base(v)}/stop">${csrfField(v)}<input type="hidden" name="turn" value="${c.running.id}"><button type="submit" class="btn">Stop the turn</button></form></div>`
     : "";
   const fresh = c.confirmNew
@@ -198,8 +224,8 @@ function conversationSection(v: ChatSettingsView): Raw {
         c.running ? ` Turn ${c.running.id} is running and will be stopped.` : ""
       } Her files and notes stay.</p>
 <form method="post" action="${base(v)}/new">${csrfField(v)}<button type="submit" class="btn danger solid">New conversation</button> <a class="btn ghost" href="${base(v)}#conversation">Cancel</a></form></div>`
-    : html`<div class="crow"><div class="stext"><b>New conversation</b><span>As <span class="mono">/new</span> does: her next turn starts fresh, opened with the chat's last 10 messages. Her files and notes stay.</span></div><a class="btn" href="${href(base(v), { confirm: "new" })}#conversation">New conversation</a></div>`;
-  return html`<section class="cs" id="conversation"><div class="cshd"><h2>Conversation</h2><a class="right" href="/chats/${v.chat.id}">The chat's log →</a></div>${flashLine(c.flash)}${facts}${stop}${fresh}</section>`;
+    : html`<div class="crow"><div class="stext"><b>New conversation</b> <span>As <span class="mono">/new</span> does: her next turn starts fresh, opened with the chat's last 10 messages. Her files and notes stay.</span></div><a class="btn" href="${href(base(v), { confirm: "new" })}#conversation">New conversation</a></div>`;
+  return html`<section class="cs" id="conversation"><div class="cshd"><h2>Conversation</h2> <a class="right" href="/chats/${v.chat.id}">The chat's log →</a></div>${flashLine(c.flash)}${facts}${stop}${fresh}</section>`;
 }
 
 // ---- permissions -------------------------------------------------------------------------------------------
@@ -234,19 +260,19 @@ function permissionsSection(v: ChatSettingsView): Raw {
     if (priv && group) return html`<label class="opt off" title="private layers are for your DM only"><input type="checkbox" disabled> ${label} <span class="faint">your DM only</span></label>`;
     return html`<label class="opt"><input type="checkbox" name="${name}" value="${value}"${checked(on)}> ${label}</label>`;
   };
-  const seesRow = html`<div class="prow2${bad("persona")}${bad("memory")}"><div class="plab">Sees</div><div class="pctl"><div class="pair"><span class="faint pk">persona</span>${layer("persona", "public", "public persona")}${layer("persona", "private", "private side")}</div>
-<div class="pair"><span class="faint pk">memory</span>${layer("memory", "chat", "this chat's notes")}${layer("memory", "private", "private memory")}</div></div></div>`;
+  const seesRow = html`<div class="prow2${bad("persona")}${bad("memory")}"><div class="plab">Sees</div><div class="pctl"><div class="pair"><span class="faint pk">persona</span> ${layer("persona", "public", "public persona")} ${layer("persona", "private", "private side")}</div>
+<div class="pair"><span class="faint pk">memory</span> ${layer("memory", "chat", "this chat's notes")} ${layer("memory", "private", "private memory")}</div></div></div>`;
 
   const capRow = (c: CapabilityRow) => {
     const on = f.toolsMode === "all" || f.tools.includes(c.id);
     const params = Object.entries(c.params ?? {});
-    return html`<div class="cap${bad(`tools.${c.id}`)}"><label class="cmain"><input class="sw" type="checkbox" name="tool" value="${c.id}"${checked(on)}${disabledIf(f.toolsMode === "all")} role="switch"><span class="cname">${c.label}</span><span class="cgives">${c.gives}</span>${
-      c.here ? "" : html`<span class="ctag" title="its environment does not turn it on in this process">not set up here</span>`
+    return html`<div class="cap${bad(`tools.${c.id}`)}"><label class="cmain"><input class="sw" type="checkbox" name="tool" value="${c.id}"${checked(on)}${disabledIf(f.toolsMode === "all")} role="switch"> <span class="cname">${c.label}</span> <span class="cgives">${c.gives}</span>${
+      c.here ? "" : html` <span class="ctag" title="its environment does not turn it on in this process">not set up here</span>`
     }</label>${
       params.length
         ? html`<div class="cparams">${params.map(
             ([k, d]) =>
-              html`<label class="cparam"><span class="mono">${k}</span><input type="text" name="param.${c.id}.${k}" value="${f.params[`${c.id}.${k}`] ?? ""}" placeholder="${d.default}"${disabledIf(f.toolsMode === "all")}><span class="faint">${d.meaning}${d.type === "string[]" ? "; comma-separated" : ""}</span></label>`,
+              html`<label class="cparam"><span class="mono">${k}</span> <input type="text" name="param.${c.id}.${k}" value="${f.params[`${c.id}.${k}`] ?? ""}" placeholder="${d.default}"${disabledIf(f.toolsMode === "all")}> <span class="faint">${d.meaning}${d.type === "string[]" ? "; comma-separated" : ""}</span></label>`,
           )}</div>`
         : ""
     }</div>`;
@@ -281,17 +307,17 @@ function permissionsSection(v: ChatSettingsView): Raw {
     : "";
 
   const review = p.review
-    ? html`<div class="review" id="review"><div class="rvhead"><b>Review: home/policy.yaml</b>${p.review.created ? html`<span class="faint">does not exist yet; it would be created</span>` : ""}<span class="faint">one commit, as you, from the console</span></div>
+    ? html`<div class="review" id="review"><div class="rvhead"><b>Review: home/policy.yaml</b> ${p.review.created ? html`<span class="faint">does not exist yet; it would be created</span> ` : ""}<span class="faint">one commit, as you, from the console</span></div>
 ${p.review.rewritten ? html`<p class="notice refused">This file's layout cannot be edited in place, so it would be written whole: its comments would not be kept.</p>` : ""}
 ${p.review.diff}
-<div class="rvfoot"><button type="submit" name="action" value="save" class="btn primary">Save to policy.yaml</button><button type="submit" name="action" value="edit" class="btn ghost">Back to editing</button><span class="faint">It applies from her next turn here once the server reloads the file (within seconds).</span></div></div>`
+<div class="rvfoot"><button type="submit" name="action" value="save" class="btn primary">Save to policy.yaml</button> <button type="submit" name="action" value="edit" class="btn ghost">Back to editing</button> <span class="faint">It applies from her next turn here once the server reloads the file (within seconds).</span></div></div>`
     : "";
 
   const foot = p.review
     ? ""
-    : html`<div class="pfoot2"><button type="submit" name="action" value="review" class="btn primary"${disabledIf(!!p.broken)}>Review changes</button><a class="btn ghost" href="${base(v)}#permissions">Reset</a><span class="faint">Nothing is written until you have seen the diff.</span></div>`;
+    : html`<div class="pfoot2"><button type="submit" name="action" value="review" class="btn primary"${disabledIf(!!p.broken)}>Review changes</button> <a class="btn ghost" href="${categoryHref(v.chat.id, "permissions")}#permissions">Reset</a> <span class="faint">Nothing is written until you have seen the diff.</span></div>`;
 
-  return html`<section class="cs" id="permissions"><div class="cshd"><h2>Permissions</h2><span class="faint">policy.yaml, ${listedAs}</span></div>
+  return html`<section class="cs" id="permissions"><div class="cshd"><h2>Permissions</h2> <span class="faint">policy.yaml, ${listedAs}</span></div>
 ${flashLine(p.flash)}${p.broken ? html`<p class="notice failed">${brokenText(p.broken)}</p>` : ""}
 ${p.refusal ? html`<p class="notice refused" role="alert"><b>Not saved.</b> ${p.refusal.text}</p>` : ""}${intro}
 <form method="post" action="${base(v)}/policy" class="pform${p.review ? " reviewing" : ""}">${hidden}
@@ -316,14 +342,27 @@ export function chatSettingsDetail(v: ChatSettingsView): Raw {
   const conv = v.conversation.began ? `conversation since ${when(v.conversation.began, v.timeZone).replace(/, \d\d:\d\d$/, "")}` : "no conversation yet";
   return html`<div class="detail cset">
 <a class="back" href="/chats/${c.id}">← ${c.name}</a>
-<div class="head"><div class="title"><h1>${c.name}</h1><span class="meta">settings · ${c.kind === "group" ? "group" : "direct chat"}</span></div>
-<p class="facts">on <span class="mono">${v.model.current ?? "no model"}</span><span class="sep"></span>profile <b>${v.profile.gone || !v.profile.current ? "Base" : v.profile.current}</b><span class="sep"></span>${conv}<span class="sep"></span><a href="/chats/${c.id}">the chat's log</a></p></div>
-<nav class="tabs cjump"><a href="#model">Model</a><a href="#profile">Profile</a><a href="#conversation">Conversation</a><a href="#permissions">Permissions</a></nav>
-${modelSection(v)}${profileSection(v)}${conversationSection(v)}${permissionsSection(v)}
+<div class="head"><div class="title"><h1>${c.name}</h1> <span class="meta">settings · ${c.kind === "group" ? "group" : "direct chat"}</span></div>
+<p class="facts">on <span class="mono">${v.model.current ?? "no model"}</span> <span class="sep"></span> profile <b>${v.profile.gone || !v.profile.current ? "Base" : v.profile.current}</b> <span class="sep"></span> ${conv} <span class="sep"></span> <a href="/chats/${c.id}">the chat's log</a></p></div>
+<nav class="tabs ctabs" aria-label="Settings">${CATEGORIES.map((t) =>
+    t.id === v.category ? html`<a class="on" href="${categoryHref(c.id, t.id)}" aria-current="page">${t.label}</a> ` : html`<a href="${categoryHref(c.id, t.id)}">${t.label}</a> `,
+  )}</nav>
+${body(v)}
 </div>`;
+}
+
+/** The sections of the category shown. */
+function body(v: ChatSettingsView): Raw {
+  if (v.category === "permissions") return permissionsSection(v);
+  if (v.category === "automation") {
+    const c = { chatId: v.chat.id, csrf: v.csrf, timeZone: v.timeZone, now: v.now };
+    return html`${v.schedules ? schedulesSection(c, v.schedules) : ""}${v.secrets ? secretsSection(c, v.secrets) : ""}${v.computer ? computerSection(c, v.computer) : ""}`;
+  }
+  return html`${modelSection(v)}${profileSection(v)}${conversationSection(v)}`;
 }
 
 /** The whole page: the chats list on the left (`pane`), the settings on the right. */
 export function chatSettingsPage(v: ChatSettingsView, pane: Raw): string {
-  return page(`${v.chat.name}: settings`, html`<div class="split selected"><aside class="list-pane">${pane}</aside><main class="detail-pane">${chatSettingsDetail(v)}</main></div>`, v.who, "turns");
+  const label = CATEGORIES.find((x) => x.id === v.category)!.label;
+  return page(`${v.chat.name}: ${label === "Chat" ? "settings" : label}`, html`<div class="split selected"><aside class="list-pane">${pane}</aside><main class="detail-pane">${chatSettingsDetail(v)}</main></div>`, v.who, "turns");
 }

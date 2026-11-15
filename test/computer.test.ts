@@ -789,6 +789,10 @@ describe("~/.computer.yaml", () => {
     expect(existsSync(join(t.fake.home(CT), ".cache/computer/apt/example-tool.deb"))).toBe(true);
     expect(setupLog(t)).toBe("setup-ran\n");
     expect(appliedHash(t)).toBe(sha256(Buffer.from(yaml)));
+    // Recorded on the chat's row, for the console.
+    const recorded = getComputer(t.db, ownerChatId(t.db))!.lastApply!;
+    expect(recorded).toMatchObject({ ok: true, what: "apt: example-tool, other-tool; the setup script" });
+    expect(Date.now() - Date.parse(recorded.at)).toBeLessThan(60_000);
     // The check reads the file as the user; only the apply runs as root.
     expect(t.fake.execs.filter((e) => e.user === "0").every((e) => e.command.join(" ").includes("flock"))).toBe(true);
 
@@ -852,6 +856,9 @@ describe("~/.computer.yaml", () => {
     expect(text(a, 0)).toContain("~/.computer.yaml was NOT applied: its apt step failed (exit 100). The command ran anyway, without it.");
     expect(text(a, 0)).toContain("E: Unable to locate package fake-missing-tool");
     expect(appliedHash(t)).toBeNull();
+    const recorded = getComputer(t.db, ownerChatId(t.db))!.lastApply!;
+    expect(recorded).toMatchObject({ ok: false, step: "apt", why: "exit 100" });
+    expect(recorded.output).toContain("E: Unable to locate package fake-missing-tool");
     expect(alertTexts(t).filter((x) => x.startsWith("Applying ~/.computer.yaml on the computer of") && x.includes("apt step (exit 100)"))).toHaveLength(1);
     // Not retried within the same boot...
     expect(text(a, 1)).not.toContain(".computer.yaml");
@@ -884,6 +891,35 @@ describe("~/.computer.yaml", () => {
     const d = await turn(t, [{ tool: "exec", args: { command: "true" } }]);
     expect(text(d, 0)).toContain("~/.computer.yaml was applied first");
     expect(appliedHash(t)).toBe(sha256(Buffer.from("apt: [example-tool]\n")));
+  });
+
+  test("last_apply, through the apply itself: a parse failure, an exec that ends mid-apply, and a secret value redacted in the stored row", async () => {
+    const t = setup();
+    const lastApply = () => getComputer(t.db, ownerChatId(t.db))!.lastApply!;
+    // A file that does not parse: the parse step, its reason, the parser's words.
+    declare(t, "pip: [example-lib]\n");
+    ownerSays(t.db, "go");
+    await turn(t, [{ tool: "exec", args: { command: "true" } }]);
+    expect(lastApply()).toMatchObject({ ok: false, step: "parse", why: "the file is not valid" });
+    expect(lastApply().output).toMatch(/Unrecognized key[^\n]*pip/);
+
+    // The apply's exec ends before its step reports (the apply's own shell killed, the one holding apply.lock):
+    // the step it was in, and how it ended.
+    declare(t, "setup: |\n  echo started-setup\n  pkill -9 -f apply.lock\n");
+    ownerSays(t.db, "again");
+    await turn(t, [{ tool: "apply_computer_config" }]);
+    expect(lastApply()).toMatchObject({ ok: false, step: "setup" });
+    expect(lastApply().why).toMatch(/^(exit \d+ before it finished|the exec ended: .+)$/);
+    expect(lastApply().output).toContain("started-setup");
+
+    // A secret value in the apply's output: redacted before the row is written.
+    declare(t, `setup: |\n  echo "token=${SECRET}"\n  exit 3\n`);
+    ownerSays(t.db, "once more");
+    await turn(t, [{ tool: "apply_computer_config" }]);
+    expect(lastApply()).toMatchObject({ ok: false, step: "setup", why: "exit 3" });
+    expect(lastApply().output).toContain("token=[REDACTED:modal]");
+    const row = t.db.$client.query("select last_apply from computers").get() as { last_apply: string };
+    expect(row.last_apply).not.toContain(SECRET);
   });
 
   test("a step past its time limit is stopped and reported as timed out", async () => {

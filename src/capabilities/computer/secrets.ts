@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
-import { requestApproval } from "../../control/approvals.ts";
+import { answerApproval, getApproval, requestApproval } from "../../control/approvals.ts";
 import type { Db } from "../../store/db.ts";
-import { getChat } from "../../store/events.ts";
+import { getChat, type Speaker } from "../../store/events.ts";
 import { approvals, secretGrants } from "../../store/schema.ts";
 import { chatLabel, IMMEDIATE } from "../../store/turns.ts";
 import { loadProfiles, redactionFor, type Redaction } from "../../secrets/redaction.ts";
@@ -26,7 +26,8 @@ import { loadProfiles, redactionFor, type Redaction } from "../../secrets/redact
  *   GRANT      one per approved card (`secret_grants`, keyed on the approval), for that chat only, until
  *              its ttl from the answer. Made from the answered card by whichever process looks first
  *              (`syncGrants`, run before every exec and by the server's loop), which also puts a "Revoke
- *              now" card in the control bot: pressing it ends the grant at once.
+ *              now" card in the control bot: pressing it ends the grant at once. The console's "Revoke now" (a
+ *              chat's settings page) presses the same card (`revokeGrant`), so the card says it is revoked either way.
  *   USE        a live grant's values go into the `env` of the exec calls in that chat (hangar/client.ts):
  *              never into a file, the container's spec, or the store.
  *   REDACTION  (src/secrets/redaction.ts, shared with the turn transcripts) every value of every profile in
@@ -137,6 +138,27 @@ export function liveGrants(db: Db, chatId: number, now = Date.now()): Grant[] {
     .where(eq(secretGrants.chatId, chatId))
     .all()
     .filter((g) => Date.parse(g.expiresAt) > now && !revoked(db, g.id));
+}
+
+/**
+ * Revoke a live grant of this chat as the owner pressing its revoke card in the control bot would: the card is
+ * answered `revoke` (approvals.ts `answerApproval`, which edits the card to say so), and from then on the grant is
+ * not live. `already`: it had ended (expired or revoked) before.
+ */
+export function revokeGrant(db: Db, grantId: number, chatId: number, from: Speaker, now = Date.now()): { revoked: Grant } | { already: Grant } | { error: string } {
+  syncGrants(db, now);
+  const g = db.select().from(secretGrants).where(eq(secretGrants.id, grantId)).get();
+  if (!g || g.chatId !== chatId) return { error: `There is no grant #${grantId} in this chat.` };
+  if (Date.parse(g.expiresAt) <= now || revoked(db, g.id)) return { already: g };
+  if (g.revokeApprovalId == null) return { error: `Grant #${g.id} has no revoke card yet; try again in a moment.` };
+  const r = db.transaction((tx) => {
+    const tdb = tx as unknown as Db;
+    const card = getApproval(tdb, g.revokeApprovalId!);
+    const option = card ? card.options.findIndex((o) => o.id === "revoke") : -1;
+    return option < 0 ? { result: "closed" as const } : answerApproval(tdb, card!.id, option, from, now);
+  }, IMMEDIATE);
+  if (r.result === "answered") return { revoked: g };
+  return revoked(db, g.id) ? { already: g } : { error: `Grant #${g.id}'s revoke card is closed; it ends at ${g.expiresAt.slice(0, 16).replace("T", " ")} UTC.` };
 }
 
 /**

@@ -3,7 +3,7 @@
 A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
 timeline. It is for the owner, to debug and tune her. It is read-only, except for four things: **Settings**,
 which manages the model catalog, **Home**, where her files are edited, **a chat's settings** (its model,
-profile, conversation and permissions), and **deleting chat messages** (all below). Nothing else in it can
+profile, conversation, permissions, schedules and secret grants), and **deleting chat messages** (all below). Nothing else in it can
 change anything.
 
 ## What it shows
@@ -31,7 +31,8 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
     index, memory), each with its size, and a diff against the previous turn's prompt in the chat.
   - *Raw input*: the exact text and images the model received.
 - **A chat** (`/chats/<id>`): the chat's whole log, each turn's boundary a divider linking to it.
-- **A chat's settings** (`/chats/<id>/settings`): its model, profile, conversation and permissions. See below.
+- **A chat's settings** (`/chats/<id>/settings`, `/permissions`, `/automation`): its model, profile and
+  conversation; its permissions; its schedules, secrets and computer. See below.
 - **Home** (`/home`): her files in `home/`, edited by hand, with each file's history. See below.
 - **Settings** (`/settings`): the model catalog. See below.
 
@@ -143,10 +144,17 @@ chat's entry at a time, and the assistant's own proposals still need your approv
 
 ## A chat's settings
 
-`/chats/<id>/settings`, reached from "⚙ Settings" next to the chat's name on every page about it (its log, a
-segment, a conversation, a turn) and from the ⚙ on its header in the list (shown on hover; always on a touch
-screen). A facts line (its model, profile, how old its conversation is, a link to its log), jumps to the four
-sections, then:
+Reached from "⚙ Settings" next to the chat's name on every page about it (its log, a segment, a conversation, a
+turn) and from the ⚙ on its header in the list (shown on hover; always on a touch screen). A facts line (its model,
+profile, how old its conversation is, a link to its log), then three tabs, each a page of its own:
+
+| Tab | Address | Sections |
+|---|---|---|
+| **Chat** (where every way in lands) | `/chats/<id>/settings` | Model, Profile, Conversation |
+| **Permissions** | `/chats/<id>/settings/permissions` | Permissions |
+| **Automation & machine** | `/chats/<id>/settings/automation` | Schedules, Secrets, Computer |
+
+Every button comes back to the tab it is on, with its result shown once.
 
 - **Model**: the catalog as a radio list by provider: the chat's model marked current, ★ the default, ⚠ a model
   whose last probe got no tool call, each one's context window. Picking another opens **Lossless** / **Lossy**
@@ -172,13 +180,30 @@ sections, then:
   are (a file laid out so that the entry cannot be edited in place is written whole, and the review says its
   comments would not survive). If the file changed after you reviewed, Save shows the diff against the file as it
   is now instead of writing. The server reloads the file within seconds.
+- **Schedules**: each of the chat's schedules still to run, active and paused, soonest first: once or recurring,
+  the cron in plain words ("every weekday at 09:00"; the expression itself when it cannot be said simply), the next
+  run in your time zone, its note, who set it (you, or an operator by name). **Pause** keeps it without running it;
+  she still sees it, as paused, and can still cancel it. **Resume** runs it next from now: nothing it missed while
+  paused is run, not even once; a paused one-off whose time has passed is cancelled instead, and the page says so.
+  **Cancel** asks first.
+- **Secrets**: the secret profiles granted to the chat's computer now: the profile, its variable names (never a
+  value: nothing else is read from the secrets file), time left, who asked for it. **Revoke now** presses the same
+  button as the grant's "Revoke now" card in the control bot, so the card says it is revoked too. A secrets file
+  that cannot be used (readable by others, not valid YAML) is said plainly. Nothing is granted from here: a grant
+  is still her `request_secret` and your answer to its card.
+- **Computer**, read only: not created, running, stopped or boosted (for which job); when it stops if left idle;
+  its disk's allocated size and the most it may grow to (asked of Hangar after the page has loaded, waiting at most
+  3 s, else "unknown"; it is the disk's size, not how much of it is used); its running background jobs (the
+  command, redacted as their output is, and how long); and the last time `~/.computer.yaml` was applied (ok, or
+  the step that failed, its reason and its output, redacted). With the computer off in this process, it says so.
 
 ### The write boundary
 
 The console has four ways in for a write: Settings, Home, a chat's settings, and deleting messages.
 Every other page answers GET and HEAD only (and `/login` its POST); a POST to it is refused with 405. Settings'
 buttons POST to `/settings/<area>/<verb>`, Home's Save to `/home/save` and its profile actions to
-`/home/profile/<verb>`, a chat's settings to `/chats/<id>/settings/<verb>` (switch, profile, stop, new, policy), a delete to `/messages/delete` and its
+`/home/profile/<verb>`, a chat's settings to `/chats/<id>/settings/<verb>` (switch, profile, stop, new, policy,
+schedule-cancel, schedule-pause, schedule-resume, revoke), a delete to `/messages/delete` and its
 undo to `/messages/undo`, and a GET to any of them is refused too. A POST there is carried out only if it passes,
 on top of the sign-in and the Host check:
 

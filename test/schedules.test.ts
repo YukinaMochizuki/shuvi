@@ -9,7 +9,7 @@ import type { Db } from "../src/store/db.ts";
 import { getEvent, type ScheduledPayload } from "../src/store/events.ts";
 import { capabilityLoops } from "../src/capabilities/types.ts";
 import { controlMessagesOf } from "../src/store/control.ts";
-import { activeSchedules, cancelSchedule, createSchedule, fireDue, getSchedule, MIN_CRON_INTERVAL_MS, parseAt, validateCron } from "../src/store/schedules.ts";
+import { activeSchedules, cancelSchedule, createSchedule, fireDue, getSchedule, MIN_CRON_INTERVAL_MS, parseAt, pauseSchedule, resumeSchedule, validateCron } from "../src/store/schedules.ts";
 import { claimTurn, finishTurn, getTurn } from "../src/store/turns.ts";
 import { memDb, OWNER, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./helpers.ts";
 
@@ -194,5 +194,100 @@ describe("the tools", () => {
     ownerSays(db, "hi");
     const { adapter } = await turnWith(db, [{ tool: "pass" }]);
     expect(adapter.calls[0]!.systemPrompt).toContain("## Schedules");
+  });
+});
+
+describe("paused (from the console)", () => {
+  test("a paused schedule never fires, through its time and long after; pause is per chat and only of an active one", () => {
+    const db = memDb();
+    ownerSays(db, "daily");
+    const chat = ownerChatId(db);
+    const t0 = new Date("2026-11-01T00:00:00Z");
+    const s = createSchedule(db, { chatId: chat, note: "morning check", cron: "0 8 * * *", timeZone: TZ }, t0);
+    expect(pauseSchedule(db, s.id, chat + 1)).toBe(false);
+    expect(pauseSchedule(db, s.id, chat)).toBe(true);
+    expect(pauseSchedule(db, s.id, chat)).toBe(false);
+    expect(getSchedule(db, s.id)!.state).toBe("paused");
+    expect(fireDue(db, new Date("2026-11-02T00:00:00Z")).fired).toEqual([]);
+    expect(fireDue(db, new Date("2026-11-20T00:00:00Z")).fired).toEqual([]);
+    expect(scheduledEvents(db)).toHaveLength(0);
+    // Still listed, as paused.
+    expect(activeSchedules(db, chat).map((x) => [x.id, x.state])).toEqual([[s.id, "paused"]]);
+  });
+
+  test("resume runs a cron next from NOW: nothing missed while paused is fired, not even once", () => {
+    const db = memDb();
+    ownerSays(db, "daily");
+    const chat = ownerChatId(db);
+    const s = createSchedule(db, { chatId: chat, note: "morning check", cron: "0 8 * * *", timeZone: TZ }, new Date("2026-11-01T00:00:00Z"));
+    pauseSchedule(db, s.id, chat);
+    const now = new Date("2026-11-11T03:00:00Z");
+    const r = resumeSchedule(db, s.id, chat, now);
+    expect("resumed" in r && r.resumed.nextAt).toBe("2026-11-12T00:00:00.000Z");
+    expect(getSchedule(db, s.id)!.state).toBe("active");
+    expect(fireDue(db, now).fired).toEqual([]);
+    expect(fireDue(db, new Date("2026-11-12T00:00:00Z")).fired).toEqual([s.id]);
+    expect(scheduledEvents(db)).toHaveLength(1);
+    expect(resumeSchedule(db, s.id, chat, now)).toEqual({ missing: true });
+  });
+
+  test("a paused one-off: resumed before its time, it keeps it; resumed after, it is cancelled, never run late", () => {
+    const db = memDb();
+    ownerSays(db, "remind me");
+    const chat = ownerChatId(db);
+    const t0 = new Date("2026-11-11T10:00:00Z");
+    const a = createSchedule(db, { chatId: chat, note: "early", at: new Date("2026-11-11T12:00:00Z"), timeZone: TZ }, t0);
+    const b = createSchedule(db, { chatId: chat, note: "late", at: new Date("2026-11-11T11:00:00Z"), timeZone: TZ }, t0);
+    pauseSchedule(db, a.id, chat);
+    pauseSchedule(db, b.id, chat);
+    const now = new Date("2026-11-11T11:30:00Z");
+    expect(fireDue(db, now).fired).toEqual([]);
+    const ra = resumeSchedule(db, a.id, chat, now);
+    expect("resumed" in ra && ra.resumed.nextAt).toBe("2026-11-11T12:00:00.000Z");
+    const rb = resumeSchedule(db, b.id, chat, now);
+    expect("cancelled" in rb && rb.dueAt).toBe("2026-11-11T11:00:00.000Z");
+    expect(getSchedule(db, b.id)!.state).toBe("cancelled");
+    expect(fireDue(db, new Date("2026-11-11T12:00:00Z")).fired).toEqual([a.id]);
+    expect(scheduledEvents(db).map((e) => JSON.parse(e.payload).note)).toEqual(["early"]);
+  });
+
+  test("her list_schedules: the active ones first, soonest first, then the paused; a paused one-off past its time says resuming cancels it", async () => {
+    const db = memDb();
+    ownerSays(db, "what is set?");
+    const chat = ownerChatId(db);
+    const now = Date.now();
+    const H = 3600_000;
+    // Paused, due soonest of all (a past one-off, and a cron): listed after every active one all the same.
+    const passed = createSchedule(db, { chatId: chat, note: "missed one", at: new Date(now - H), timeZone: TZ, ownerAuthorised: true }, new Date(now - 2 * H));
+    const pausedCron = createSchedule(db, { chatId: chat, note: "paused cron", cron: "*/5 * * * *", timeZone: TZ, ownerAuthorised: true }, new Date(now));
+    const later = createSchedule(db, { chatId: chat, note: "later", at: new Date(now + 5 * H), timeZone: TZ, ownerAuthorised: true }, new Date(now));
+    const sooner = createSchedule(db, { chatId: chat, note: "sooner", at: new Date(now + 2 * H), timeZone: TZ, ownerAuthorised: true }, new Date(now));
+    const pausedLater = createSchedule(db, { chatId: chat, note: "paused, not yet due", at: new Date(now + 9 * H), timeZone: TZ, ownerAuthorised: true }, new Date(now));
+    for (const s of [passed, pausedCron, pausedLater]) pauseSchedule(db, s.id, chat);
+    const { adapter } = await turnWith(db, [{ tool: "list_schedules", args: {} }]);
+    const lines = resultText(adapter, 0).split("\n");
+    expect(lines.map((l) => Number(/^#(\d+):/.exec(l)![1]))).toEqual([sooner.id, later.id, passed.id, pausedCron.id, pausedLater.id]);
+    expect(lines[2]).toContain("its time passed while paused, so resuming cancels it");
+    expect(lines[3]).not.toContain("its time passed");
+    expect(lines[4]).not.toContain("its time passed");
+  });
+
+  test("her list_schedules shows a paused schedule as paused, and her cancel_schedule still cancels it", async () => {
+    const db = memDb();
+    ownerSays(db, "every weekday at 9, and remind me in an hour");
+    const chat = ownerChatId(db);
+    const now = new Date();
+    const c = createSchedule(db, { chatId: chat, note: "weekday check", cron: "0 9 * * 1-5", timeZone: TZ, ownerAuthorised: true }, now);
+    const o = createSchedule(db, { chatId: chat, note: "ping them", at: new Date(now.getTime() + 3600_000), timeZone: TZ, ownerAuthorised: true }, now);
+    pauseSchedule(db, c.id, chat);
+    const { adapter } = await turnWith(db, [{ tool: "list_schedules", args: {} }, { tool: "cancel_schedule", args: { id: c.id } }, { tool: "list_schedules", args: {} }]);
+    const lines = resultText(adapter, 0).split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines.find((l) => l.startsWith(`#${c.id}:`))).toContain("PAUSED");
+    expect(lines.find((l) => l.startsWith(`#${o.id}:`))).not.toContain("PAUSED");
+    expect(resultText(adapter, 1)).toBe(`Cancelled schedule #${c.id}.`);
+    expect(getSchedule(db, c.id)!.state).toBe("cancelled");
+    expect(resultText(adapter, 2).split("\n")).toHaveLength(1);
+    expect(cancelSchedule(db, c.id, chat)).toBe(false);
   });
 });

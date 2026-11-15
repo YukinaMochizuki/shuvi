@@ -10,8 +10,12 @@ import type { SignalTurn } from "../server/spawn.ts";
 import type { Db } from "../store/db.ts";
 import { forgetConversations } from "../store/events.ts";
 import { HISTORY_ON_NEW } from "../agent/turn.ts";
-import { policyHash, type ChatSettingsResult } from "./chat-settings-data.ts";
-import { brokenText } from "./chat-settings.ts";
+import { revokeGrant } from "../capabilities/computer/secrets.ts";
+import { cancelSchedule, getSchedule, pauseSchedule, resumeSchedule } from "../store/schedules.ts";
+import { whenDay } from "./chat-extras.ts";
+import { categoryOf, policyHash, type ChatSettingsResult } from "./chat-settings-data.ts";
+import { brokenText, categoryHref } from "./chat-settings.ts";
+import type { Flash } from "./home.ts";
 import { ghDiff } from "./ghdiff.ts";
 import { switchChatProfile } from "./home-write.ts";
 import { href } from "./html.ts";
@@ -21,8 +25,8 @@ import { chatById } from "./queries.ts";
 
 /**
  * The writes of a chat's settings page (chat-settings.ts), each a POST to `/chats/<id>/settings/<verb>` through the
- * console's write boundary (server.ts: POST only, the Origin, the CSRF token), answered with a 303 back to the page
- * and its result kept in memory, read once (`?r=<id>`, at most KEEP_MAX for KEEP_MS, as Home's results):
+ * console's write boundary (server.ts: POST only, the Origin, the CSRF token), answered with a 303 back to the
+ * category page the write came from (chat-settings.ts `CATEGORIES`) and its result kept in memory, read once (`?r=<id>`, at most KEEP_MAX for KEEP_MS, as Home's results):
  *
  *   switch   asks for the switch exactly as the control bot's mode step does (control/model-cards.ts
  *            `consoleSwitch`: a switch card with no message, the same `requestSwitch`, finished by the same
@@ -42,9 +46,15 @@ import { chatById } from "./queries.ts";
  *            The entry is replaced in place (policy/edit.ts): the file's comments and the other chats' entries are
  *            kept. A form the parser refuses comes back as it was typed, with its reason; nothing is written. The
  *            server's policy loop (policy/load.ts `PolicyWatch`) takes the new file up within seconds.
+ *   schedule-cancel, schedule-pause, schedule-resume   one schedule of this chat (`id`), through store/schedules.ts
+ *            (`cancelSchedule`, `pauseSchedule`, `resumeSchedule`). Cancel is asked for first on the page
+ *            (`?confirm=schedule:<id>`). A resume runs it next from now; a one-off whose time passed while it was
+ *            paused is cancelled instead, and the result says so.
+ *   revoke   a live secret grant of this chat (`grant`), as the owner pressing its revoke card in the control bot
+ *            (computer/secrets.ts `revokeGrant`): the card is answered and edited to say so.
  */
 
-export const CHAT_SETTINGS_WRITE = /^\/chats\/(\d+)\/settings\/(switch|profile|stop|new|policy)$/;
+export const CHAT_SETTINGS_WRITE = /^\/chats\/(\d+)\/settings\/(switch|profile|stop|new|policy|schedule-cancel|schedule-pause|schedule-resume|revoke)$/;
 
 const KEEP_MS = 10 * 60_000;
 const KEEP_MAX = 20;
@@ -76,6 +86,8 @@ export interface ChatSettingsWriteDeps {
   login?: string;
   signal?: SignalTurn;
   now: number;
+  /** The owner's time zone, for the times a result names. Default UTC. */
+  timeZone?: string;
 }
 
 const text = (form: MultiForm, name: string) => {
@@ -91,7 +103,7 @@ function lastSeq(db: Db, chatId: number): number {
 /** Run one write; returns where to send the browser. */
 export function chatSettingsWrite(deps: ChatSettingsWriteDeps, chatId: number, verb: string, form: MultiForm): string {
   const { db, now } = deps;
-  const back = (r: Omit<ChatSettingsResult, "chatId">) => `${href(`/chats/${chatId}/settings`, { r: keepResult(now, { ...r, chatId }) })}#${r.section}`;
+  const back = (r: Omit<ChatSettingsResult, "chatId">) => `${href(categoryHref(chatId, categoryOf(r.section)), { r: keepResult(now, { ...r, chatId }) })}#${r.section}`;
   const chat = chatById(db, chatId);
   if (!chat) return href("/turns");
   const label = chatName(chat);
@@ -127,9 +139,52 @@ export function chatSettingsWrite(deps: ChatSettingsWriteDeps, chatId: number, v
     }
     case "policy":
       return back(policyWrite(deps, { kind: chat.kind as "private" | "group", tgChatId: chat.tgChatId, label }, form));
+    case "schedule-cancel":
+    case "schedule-pause":
+    case "schedule-resume":
+      return back({ section: "schedules", flash: scheduleWrite(deps, chatId, verb, Number(text(form, "id"))) });
+    case "revoke": {
+      if (deps.ownerId === undefined) return back({ section: "secrets", flash: { tone: "refused", text: "The owner is not configured (SHUVI_OWNER_ID), so nothing can be revoked as him." } });
+      const r = revokeGrant(db, Number(text(form, "grant")), chatId, { id: deps.ownerId, name: deps.login ?? "Owner" }, now);
+      if ("error" in r) return back({ section: "secrets", flash: { tone: "refused", text: r.error } });
+      if ("already" in r) return back({ section: "secrets", flash: { tone: "ok", text: `"${r.already.profile}" (grant #${r.already.id}) had already ended: nothing to revoke.` } });
+      return back({
+        section: "secrets",
+        flash: {
+          tone: "ok",
+          text: `Revoked "${r.revoked.profile}" (grant #${r.revoked.id}): commands started from now on no longer get it, and its card in the control bot says so. A background job already running keeps the values it started with.`,
+        },
+      });
+    }
     default:
       return href(`/chats/${chatId}/settings`);
   }
+}
+
+/** Cancel, pause or resume one schedule of the chat; the result as the page says it. */
+function scheduleWrite(deps: ChatSettingsWriteDeps, chatId: number, verb: string, id: number): Flash {
+  const tz = deps.timeZone ?? "UTC";
+  const s = Number.isInteger(id) && id > 0 ? getSchedule(deps.db, id) : undefined;
+  if (!s || s.chatId !== chatId) return { tone: "refused", text: `There is no schedule #${id} in this chat.` };
+  const gone = { tone: "ok" as const, text: `Schedule #${id} is ${s.state === "done" ? "done" : "cancelled"} already: nothing to change.` };
+  if (verb === "schedule-cancel") return cancelSchedule(deps.db, id, chatId) ? { tone: "ok", text: `Cancelled schedule #${id}. She is not woken by it again.` } : gone;
+  if (verb === "schedule-pause") {
+    if (s.state === "paused") return { tone: "ok", text: `Schedule #${id} is paused already.` };
+    return pauseSchedule(deps.db, id, chatId) ? { tone: "ok", text: `Paused schedule #${id}: it does not run until you resume it. She still sees it, as paused.` } : gone;
+  }
+  if (s.state === "active") return { tone: "ok", text: `Schedule #${id} is not paused.` };
+  const r = resumeSchedule(deps.db, id, chatId, new Date(deps.now));
+  if ("missing" in r) return gone;
+  if ("cancelled" in r) {
+    const due = r.dueAt ? `, due ${whenDay(r.dueAt, tz, deps.now)},` : "";
+    return {
+      tone: "refused",
+      text: s.cron
+        ? `Schedule #${id} has no run left after now: it was cancelled, not resumed.`
+        : `Schedule #${id} was a one-off${due} whose time passed while it was paused: it was cancelled, not resumed or run late.`,
+    };
+  }
+  return { tone: "ok", text: `Resumed schedule #${id}: it runs next ${whenDay(r.resumed.nextAt!, tz, deps.now)}. Nothing it missed while paused is run.` };
 }
 
 /** The Permissions form posted: back to the form, the diff, a refusal, or the commit (see the header). */

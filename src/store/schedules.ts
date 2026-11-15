@@ -1,5 +1,5 @@
 import { Cron } from "croner";
-import { and, asc, eq, lte } from "drizzle-orm";
+import { and, asc, eq, inArray, lte } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import { recordFrameworkEvent, type ScheduledPayload } from "./events.ts";
 import { schedules } from "./schema.ts";
@@ -22,6 +22,11 @@ import { IMMEDIATE } from "./turns.ts";
  * `SHUVI_TZ` when it is set. Only the five-field form (minute hour day month weekday) or a nickname
  * (`@daily` …) is accepted: croner also takes a seconds field, and a schedule that wakes a turn every few
  * seconds is a runaway, not a reminder. Two runs are never less than `MIN_CRON_INTERVAL_MS` apart.
+ *
+ * Paused (from the console, `pauseSchedule`): kept, never fired (`fireDue` takes `active` rows only), still listed
+ * and still cancellable. Resumed (`resumeSchedule`), it runs next from NOW, as after downtime but without even the
+ * one catch-up firing: a cron moves to its next run after now; a one-off whose time passed while it was paused is
+ * not run late but cancelled, and the caller says so.
  */
 
 export const MIN_CRON_INTERVAL_MS = 60_000;
@@ -139,25 +144,69 @@ export function getSchedule(db: Db, id: number): Schedule | undefined {
   return db.select().from(schedules).where(eq(schedules.id, id)).get();
 }
 
-/** The active schedules of a chat, soonest first. */
+/** The schedules of a chat that are still to run: active and paused, soonest first. */
 export function activeSchedules(db: Db, chatId: number): Schedule[] {
   return db
     .select()
     .from(schedules)
-    .where(and(eq(schedules.chatId, chatId), eq(schedules.state, "active")))
+    .where(and(eq(schedules.chatId, chatId), inArray(schedules.state, ["active", "paused"])))
     .orderBy(asc(schedules.nextAt))
     .all();
 }
 
-/** Cancel an active schedule of this chat. False when there is no such schedule here. */
+/** Cancel an active (or paused) schedule of this chat. False when there is no such schedule here. */
 export function cancelSchedule(db: Db, id: number, chatId: number): boolean {
   const rows = db
     .update(schedules)
     .set({ state: "cancelled", nextAt: null })
+    .where(and(eq(schedules.id, id), eq(schedules.chatId, chatId), inArray(schedules.state, ["active", "paused"])))
+    .returning({ id: schedules.id })
+    .all();
+  return rows.length > 0;
+}
+
+/** Pause an active schedule of this chat: it is kept, and not fired until resumed. False when there is none such here. */
+export function pauseSchedule(db: Db, id: number, chatId: number): boolean {
+  const rows = db
+    .update(schedules)
+    .set({ state: "paused" })
     .where(and(eq(schedules.id, id), eq(schedules.chatId, chatId), eq(schedules.state, "active")))
     .returning({ id: schedules.id })
     .all();
   return rows.length > 0;
+}
+
+/** When a paused schedule would run next if resumed at `now` (null: a one-off whose time has passed, or a cron with no run left). */
+export function nextAfterResume(s: Schedule, now: Date): Date | null {
+  if (!s.cron) {
+    const at = s.at ?? s.nextAt;
+    return at && Date.parse(at) > now.getTime() ? new Date(at) : null;
+  }
+  try {
+    return nextCronRun(s.cron, s.timeZone, now);
+  } catch {
+    return null;
+  }
+}
+
+export type ResumeResult =
+  | { resumed: Schedule }
+  /** A one-off whose time passed while it was paused (or a cron with no run left): cancelled instead. */
+  | { cancelled: Schedule; dueAt: string | null }
+  | { missing: true };
+
+/** Resume a paused schedule of this chat, from NOW (see the header). */
+export function resumeSchedule(db: Db, id: number, chatId: number, now = new Date()): ResumeResult {
+  return db.transaction((tx) => {
+    const s = tx.select().from(schedules).where(eq(schedules.id, id)).get();
+    if (!s || s.chatId !== chatId || s.state !== "paused") return { missing: true as const };
+    const next = nextAfterResume(s, now);
+    if (!next) {
+      const cancelled = tx.update(schedules).set({ state: "cancelled", nextAt: null }).where(eq(schedules.id, id)).returning().get()!;
+      return { cancelled, dueAt: s.at ?? s.nextAt };
+    }
+    return { resumed: tx.update(schedules).set({ state: "active", nextAt: next.toISOString() }).where(eq(schedules.id, id)).returning().get()! };
+  }, IMMEDIATE);
 }
 
 /** A cron schedule that fired for the last time because its expression no longer parses. */
