@@ -639,7 +639,9 @@ export function loadHome(
     main,
     ...(path ? { selected: path } : {}),
     historyOpen: q.get("hist") !== "0",
-    pane: pane === "edit" || pane === "history" ? pane : path || q.get("view") === "preview" ? "edit" : "files",
+    // Asked for, any of the three (a narrow screen's "‹ Files" names the file, so its row stays marked); else the
+    // file's editor when one is selected, the file list when none is.
+    pane: pane === "files" || pane === "edit" || pane === "history" ? pane : path || q.get("view") === "preview" ? "edit" : "files",
     ...(result?.flash ? { flash: result.flash } : {}),
     csrf: ctx.csrf,
     timeZone: ctx.timeZone,

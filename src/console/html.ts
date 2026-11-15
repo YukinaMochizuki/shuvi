@@ -70,12 +70,16 @@ const HTMX_CONFIG = JSON.stringify({
  * `scripts`: same-origin scripts only this page needs (the Home editor's `/editor.js`), loaded after the shared
  * two. A boosted navigation keeps the head it started with, so such a page is reached with a full load: its
  * links into it carry `hx-boost="false"` (home.ts), and it upgrades what a later swap brings itself.
+ *
+ * `keyboard: "resizes"` (the Home page, where one types in a full-height editor): on Android Chrome the on-screen
+ * keyboard shrinks the page (`interactive-widget=resizes-content`) instead of covering its bottom, so a pane sized in
+ * `dvh` ends on the keyboard. Other pages keep the browser's default (the keyboard overlays the page).
  */
-export function page(title: string, body: Raw, who?: string, here?: "turns" | "home" | "settings", scripts: readonly string[] = []): string {
+export function page(title: string, body: Raw, who?: string, here?: "turns" | "home" | "settings", scripts: readonly string[] = [], keyboard?: "resizes"): string {
   return `<!doctype html>${html`<html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1${keyboard === "resizes" ? ", interactive-widget=resizes-content" : ""}">
 <meta name="robots" content="noindex">
 <title>${title} · shuvi</title>
 <meta name="htmx-config" content="${HTMX_CONFIG}">

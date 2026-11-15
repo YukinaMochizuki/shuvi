@@ -402,6 +402,30 @@ describe("history, undo, restore", () => {
     expect(text).toContain("When booking a trip.");
     expect(text).toContain('src="/editor.js"');
   });
+
+  test("a narrow screen's panes: ‹ Files shows the files even with a file selected", async () => {
+    const db = memDb();
+    const home = newHome();
+    byHand(home, "directives.md", "- one\n");
+    const pane = async (q: string) => (await get(db, home, `/home${q}`)).text.match(/<main class="home[^"]*pane-(\w+)"/)?.[1];
+    expect(await pane("?file=directives.md")).toBe("edit");
+    expect(await pane("?file=directives.md&pane=files")).toBe("files");
+    expect(await pane("?file=directives.md&pane=history")).toBe("history");
+    expect(await pane("")).toBe("files");
+    // The editor's own link back to the files asks for them.
+    const edit = (await get(db, home, "/home?file=directives.md&pane=edit")).text;
+    const back = edit.match(/<a class="back" href="([^"]+)">‹ Files<\/a>/)?.[1]?.replaceAll("&amp;", "&");
+    expect(await pane(back!.slice("/home".length))).toBe("files");
+  });
+
+  test("Home lets the on-screen keyboard shrink the page; other pages keep the default", async () => {
+    const db = memDb();
+    const home = newHome();
+    byHand(home, "directives.md", "- one\n");
+    expect((await get(db, home, "/home?file=directives.md")).text).toContain('content="width=device-width, initial-scale=1, interactive-widget=resizes-content"');
+    expect((await get(db, home, "/home/history")).text).toContain("interactive-widget=resizes-content");
+    expect((await get(db, home, "/turns")).text).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
+  });
 });
 
 describe("the editor and the diff", () => {

@@ -2836,8 +2836,11 @@ a.hfile.hidden-pb .hpath {
     flex-direction: column;
     border: 0;
   }
+  /* The space left above the on-screen keyboard (dvh: the viewport as it is now; html.ts's viewport meta makes
+     Android Chrome shrink it for the keyboard), so the Save bar sits on the keyboard. */
   .home.pane-edit > .hedit {
     height: calc(100vh - var(--topbar));
+    height: calc(100dvh - var(--topbar));
   }
   .home .hhead {
     padding: var(--s2) var(--s4);
