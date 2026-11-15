@@ -13,7 +13,7 @@ import { storedProbe } from "./text.ts";
  * is logged (never the URL) and forgotten.
  *
  * WHAT IS KEPT: a row per link with the link's hash (no URL) and host, and for an hour the probe's answer as
- * `probeText` reads it (`storedProbe`: title, uploader, length, chapters, subtitle languages; no URL), so a
+ * `probeText` reads it (`storedProbe`: title, description, uploader, length, chapters, subtitle languages; no URL of the video), so a
  * joined `video_probe` needs no second request. After that `media-prune` drops the answer and only the
  * accounting stays. (The link itself is in the message, in `chat_events`, like everything said.)
  *

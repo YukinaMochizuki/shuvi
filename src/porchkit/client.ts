@@ -56,6 +56,8 @@ export interface Probe {
   canonical_url?: string;
   extractor?: string;
   title?: string | null;
+  /** The site's own text: a tweet's full text (its title is cut short), a caption, a video description. */
+  description?: string | null;
   uploader?: string | null;
   uploader_id?: string | null;
   upload_date?: string | null;

@@ -9,6 +9,8 @@ import { parseTime, timeLabel } from "../computer/media.ts";
  */
 
 export const MAX_CHAPTERS = 40;
+/** A description longer than this is cut (YouTube's run to 5000 characters, mostly links). */
+export const DESCRIPTION_MAX_CHARS = 3_000;
 export const SUBS_MAX_CHARS = 12_000;
 
 const date = (d: string | null | undefined) => (d && /^\d{8}$/.test(d) ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}` : d || undefined);
@@ -42,18 +44,23 @@ export function probeText(p: Probe): string {
   const heights = p.formats?.video_heights ?? [];
   const extra = [p.storyboard?.available ? "storyboard previews (quick sheets)" : undefined, heights.length ? `video up to ${Math.max(...heights)}p` : undefined, p.formats?.audio === false ? "no audio" : undefined].filter(Boolean);
   if (extra.length) lines.push(`Has: ${extra.join(" · ")}`);
+  // The post's own text: on X, TikTok or Instagram it is what the post says, beside the video.
+  const desc = p.description?.trim();
+  if (desc) lines.push(`Text:\n${desc.length > DESCRIPTION_MAX_CHARS ? `${desc.slice(0, DESCRIPTION_MAX_CHARS)}…(cut, ${desc.length} characters in all)` : desc}`);
   return lines.join("\n");
 }
 
 /**
  * What a prewarm keeps of a probe (media_prewarms.result, for an hour): exactly what `probeText` reads, and
- * so no URL (not `canonical_url`, not porchkit's `id`). The title, uploader and chapters stay, which is what
+ * so no URL of the video (not `canonical_url`, not porchkit's `id`). The title, description, uploader and
+ * chapters stay (links the description itself carries are the site's text, not the link sent), which is what
  * a joined `video_probe` answers with.
  */
 export function storedProbe(p: Probe): Probe {
   return {
     id: "",
     ...(p.title != null ? { title: p.title } : {}),
+    ...(p.description != null ? { description: p.description } : {}),
     ...(p.uploader != null ? { uploader: p.uploader } : {}),
     ...(p.uploader_id != null ? { uploader_id: p.uploader_id } : {}),
     ...(p.upload_date != null ? { upload_date: p.upload_date } : {}),
