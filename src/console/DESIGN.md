@@ -85,13 +85,14 @@ page marks those turns. `j` / `k` move between segments.
   its transcript was pruned after the retention period, or it was never recorded (it ended before its prompt
   reached the model). The first recorded turn is a marker in `kv`, so the three are told apart.
 - **/chats/:id**: a chat's whole log, each turn's boundary a thin divider linking to it.
+- **/chats/:id/settings**: the chat's settings (below), the list on the left as for the chat's log.
 - **/home**: her files, edited by hand, with their history (below).
 - **/settings**: the model catalog (below).
 - **Deleting messages**, on every page that shows bubbles (a chat's log, a segment, a conversation, a turn's
   Conversation tab): see "Deleting messages" below.
 - **/login**, **403**, **404**: the same shell, a small centred card.
 
-Settings, Home and deleting messages are the console's only ways to change anything.
+Settings, Home, a chat's settings and deleting messages are the console's only ways to change anything.
 
 ## Settings
 
@@ -137,6 +138,49 @@ the background: the button is disabled and shows a spinner, and the answer's `<m
 place (no reload, no jump). A probe or a listing runs in the server; while one is pending, its row or the
 listing panel fetches itself every second until it is done (without script, a reload shows it). The write
 boundary is in server.ts's header.
+
+## A chat's settings
+
+One column (max 760px) in the detail pane, the chat's group open in the list (chat-settings.ts). The ways in:
+"⚙ Settings", small and faint, after the chat's name in the title of its log, a segment, a conversation and a turn;
+and a ⚙ on the chat's header in the list, shown on hover (always where there is no hover).
+
+```
+┌ Example Group  settings · group                                     ┐
+│ on vllm/qwen · profile work · conversation since 13 Nov · the log   │
+│ Model  Profile  Conversation  Permissions        (sticky jumps)     │
+│ MODEL  what her turns here run on ─────────────────── The catalog → │
+│ claude · Claude login                                               │
+│ ○ claude/opus  Opus                                                 │
+│ ○ claude/sonnet  Sonnet  current  ★                           200k  │
+│ ◉ lab/qwen3-32b  Qwen3 32B   (picked)                          33k  │
+│   ┌ Switch from claude/sonnet to lab/qwen3-32b. How? ─────────┐     │
+│   │ [Lossless: carries 14 new…]  [Lossy: resumes … 3 days ago]│     │
+│   │ Either way her files stay. Turn 24 will be stopped. Cancel│     │
+│   └───────────────────────────────────────────────────────────┘     │
+│ PROFILE ──────────────────────────────────── Profiles in Home →     │
+│ CONVERSATION  facts · [Stop the turn] · [New conversation]          │
+│ PERMISSIONS  policy.yaml, listed as "-100123" ──────────────────    │
+│ Wakes her  ○ every message ◉ only: ☑ mention ☑ reply ☐ follow-up 3  │
+│ Sees       persona ☑ public ☐ private (DM only) · memory ☑ chat …   │
+│ Can use    ◉ only what is on below: ⊂● web lookups  description     │
+│ Operators  ◉ nobody ○ everyone ○ these ids […]; may also ask for ☐  │
+│ [Review changes] → the diff (GhDiff) → [Save to policy.yaml]        │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+- **Sections** have the Settings page's heading style (uppercase, a rule under it, a link on the right).
+- **Model rows** are radios in look, links in fact (`?to=<model>#model`, a read): the picked one opens the mode
+  step under it (a SwitchBox: the two modes as cards, the note, Cancel); its buttons are the writes. While a switch
+  is pending the rows are inert and a blue Notice with a spinner fetches itself every second.
+- **Profile rows** are radio-looking buttons of one form.
+- **Conversation**: a facts line; a row per action (what it does in a line, the button on the right; below it under
+  760px); New conversation opens a Confirm in place (`?confirm=new`).
+- **Permissions**: label column (140px) and controls; capabilities as rows (a CSS switch made of a checkbox, the
+  label, what it gives, "not set up here"), a capability's parameters under it while it is on; the always-on ones
+  as one line under the list. A refused form comes back with a pink Notice and the field it is about marked with a
+  pink edge. Review shows the fieldset dimmed and an accent-edged panel with the diff, Save and Back.
+- Under 760px: one column throughout, labels above controls, buttons full width.
 
 ## Deleting messages
 
@@ -236,8 +280,7 @@ Three panes, full height, each scrolling on its own (home.ts):
   carries the editor's text.
 - **Preview**: a tab beside the file's; a chat picker in the header; the sections as the turn page's System
   prompt tab draws them, each label followed by its source (`· base` faint, `· <p>` accent, `· code` faint).
-- **A chat's page**: a Profile select next to the title (console.js posts it on change; a Switch button without
-  script), and the result once under it.
+- **A chat's profile** is switched on its settings page (below).
 
 The editor (editor/editor.ts) is the page's only extra script, bundled by Bun in the server (editor/bundle.ts), and
 only an upgrade: the page is a textarea and a form without it. It never rewrites text; the colours of its changes
@@ -278,6 +321,8 @@ are GitHub's, as in the diff.
 | Pickable | a deletable bubble: its check slot (left, while selecting), the bubble, its ⋯ menu (top right, on hover) |
 | SelPill | while selecting: "3 selected · Delete · ✕", a refusal under it; fixed at the bottom centre |
 | Snackbar | after a delete: "Deleted 3 · Undo", a thin line running out with the 10 s; fixed at the bottom left |
+| SwitchBox | a chat's settings: the mode step under the model picked (Lossless / Lossy cards, the note, Cancel) |
+| CapRow | a chat's settings: a capability as a switch, its label and what it gives, its parameters under it while on |
 | FileRow | Home: path · when · who-dot, who and a hint; selected like a list row |
 | WhoDot | 7px: her (accent), you (amber), anyone else (grey) |
 | HistEntry | Home: who-dot · who · where (chat · #turn) · when, the message, the date and +/− |

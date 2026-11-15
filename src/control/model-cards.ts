@@ -241,13 +241,13 @@ function setState(db: Db, card: Card, state: State, o: { step?: boolean; status?
 const close = (db: Db, card: Card, text: string) => setState(db, card, { step: "closed", text }, { step: true });
 
 /** Close the open cards of `kind` (of chat `chatId`, for a switch card) older than `newer`: superseded by it. */
-function supersede(db: Db, kind: CardKind, newer: number, chatId?: number): void {
+function supersede(db: Db, kind: CardKind, newer: number, chatId?: number, text = SUPERSEDED): void {
   const open = db
     .select()
     .from(controlCards)
     .where(and(eq(controlCards.kind, kind), eq(controlCards.status, "open"), chatId === undefined ? undefined : eq(controlCards.chatId, chatId)))
     .all();
-  for (const c of open) if (c.id < newer) close(db, c, SUPERSEDED);
+  for (const c of open) if (c.id < newer) close(db, c, text);
 }
 
 /**
@@ -795,6 +795,55 @@ export function switchCardPass(db: Db): number {
     }, IMMEDIATE);
   }
   return n;
+}
+
+// ---- the console's switch ------------------------------------------------------------------------------
+//
+// A chat's settings page in the console (console/chat-settings-write.ts) switches a chat's model through a switch
+// card of its own, opened with no message (its idem key starts CONSOLE_SWITCH) straight at the `switching` step:
+// the same switch request as the mode step's Lossless / Lossy (`requestSwitch`), finished by the same
+// `switchCardPass`, its result in the same words (`switchResultText`). Opening it closes the chat's open switch
+// cards in the control bot, each edited to say the switch was asked for from the console.
+
+export const CONSOLE_SWITCH = "console-switch:";
+export const SWITCHED_IN_CONSOLE = "Superseded: a switch was asked for from the console.";
+
+/**
+ * Ask from the console for chat `chatId` to switch to `to` in `mode`. `key` is the page's (drawn once per page load,
+ * console/chat-settings.ts): the same key again (a double submit) opens no second card and asks for nothing more; it
+ * answers the request the first one asked for. Returns the request, or why there is none (the chat is already on
+ * it, or it cannot be).
+ */
+export function consoleSwitch(db: Db, chatId: number, to: string, mode: SwitchMode, key: string): { request: SwitchRequest } | { already: string } | { error: string } {
+  const chat = getChat(db, chatId);
+  if (!chat) return { error: "There is no such chat." };
+  if (!findModel(db, to)) return { error: `There is no model ${to} in the catalog.` };
+  let noop: boolean;
+  try {
+    noop = previewSwitch(db, chatId, to).noop;
+  } catch (e) {
+    return { error: `${chatLabel(chat)} → ${to} failed: ${errorText(e)}` };
+  }
+  const idemKey = `${CONSOLE_SWITCH}${key}`;
+  const earlier = () => {
+    const c = db.select().from(controlCards).where(eq(controlCards.idemKey, idemKey)).get();
+    return c?.chatId === chatId && c.switchRequestId != null ? getSwitchRequest(db, c.switchRequestId) : undefined;
+  };
+  const asked = earlier();
+  if (asked) return { request: asked };
+  if (noop) return { already: `${chatLabel(chat)}: already on ${to}` };
+  return db.transaction((tx) => {
+    const t = tx as unknown as Db;
+    const card = openCard(t, { kind: "switch", chatId, idemKey, state: { step: "switching", model: to, mode }, status: "waiting" }, false);
+    if (!card) {
+      const r = earlier();
+      return r ? { request: r } : { error: "That switch was already asked for." };
+    }
+    supersede(t, "switch", card.id, chatId, SWITCHED_IN_CONSOLE);
+    const request = requestSwitch(t, chatId, to, mode);
+    t.update(controlCards).set({ switchRequestId: request.id }).where(eq(controlCards.id, card.id)).run();
+    return { request };
+  }, IMMEDIATE);
 }
 
 // ---- the console's listings ----------------------------------------------------------------------------

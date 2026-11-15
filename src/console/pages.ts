@@ -52,34 +52,22 @@ export interface PageContext {
   now?: number;
   /** How long transcripts are kept (SHUVI_TRANSCRIPT_DAYS), to say why one is gone. */
   transcriptDays?: number;
-  /** This session's CSRF token (server.ts), for the page's writes: the delete form, the chat page's Profile select. Unset: no form (a test rendering a page). */
+  /** This session's CSRF token (server.ts), for the page's writes: the delete form. Unset: no form (a test rendering a page). */
   csrf?: string;
   /** The page's own path and query, where a delete without script comes back to. */
   here?: string;
   /** A delete's result, shown once at the top of the page it came back to (delete-write.ts). */
   notice?: Raw;
-  /** The chat page's Profile select: the profiles there are, and the result of the last switch (shown once). */
-  profiles?: ProfileChoice;
 }
 
-export interface ProfileChoice {
-  names: readonly { name: string; label?: string }[];
-  /** The chat's profile, as stored (it may name one that no longer exists). */
-  current?: string;
-  flash?: { tone: "ok" | "refused" | "failed"; text: string };
+/** "⚙ Settings" beside a chat's name on every page about it: its settings page (chat-settings.ts). */
+function settingsLink(chatId: number): Raw {
+  return html`<a class="tgear" href="/chats/${chatId}/settings" title="This chat's settings: model, profile, conversation, permissions">⚙ Settings</a>`;
 }
 
-/**
- * The Profile select next to a chat's title: Base or one of the profiles, posted at once (`/chats/<id>/profile`,
- * a write: console.js submits it on change; without script, the Switch button does).
- */
-function profileSelect(chatId: number, csrf: string | undefined, p: ProfileChoice): Raw {
-  const known = p.current === undefined || p.names.some((n) => n.name === p.current);
-  return html`<form class="chprof" method="post" action="/chats/${chatId}/profile"><input type="hidden" name="csrf" value="${csrf ?? ""}">
-<label>Profile <select name="profile" data-autosubmit aria-label="Profile"><option value=""${p.current === undefined ? raw(" selected") : ""}>Base</option>${p.names.map(
-    (n) => html`<option value="${n.name}"${n.name === p.current ? raw(" selected") : ""}>${n.name}${n.label ? ` · ${n.label}` : ""}</option>`,
-  )}${known ? "" : html`<option value="${p.current}" selected disabled>${p.current} (gone: runs on Base)</option>`}</select></label>
-<button class="btn" type="submit" data-autosubmit-btn>Switch</button></form>`;
+/** The chats list with chat `chatId`'s group open and marked, for a page about that chat (its settings). */
+export function chatListPane(ctx: PageContext, chatId: number, q: URLSearchParams = new URLSearchParams()): Raw {
+  return listPane(ctx, q, { chat: chatId, inChat: chatId }).pane;
 }
 
 export const TURNS_PER_PAGE = 50;
@@ -474,7 +462,7 @@ ${f.outcome ? html`<input type="hidden" name="outcome" value="${f.outcome}">` : 
     const c = g.chat;
     const open = single || c.id === selChat || (selChat === undefined && i < OPEN_GROUPS);
     const hidden = c.segments - g.segments.length;
-    const head = html`<summary class="ghead${sel.chat === c.id ? " on" : ""}"><span class="gl1"><a class="gname" href="${href(`/chats/${c.id}`, f)}" title="the chat's whole log">${chatName(c)}</a><span class="gwhen">${ago(c.lastEventAt, now)}</span></span>
+    const head = html`<summary class="ghead${sel.chat === c.id ? " on" : ""}"><span class="gl1"><a class="gname" href="${href(`/chats/${c.id}`, f)}" title="the chat's whole log">${chatName(c)}</a><a class="ggear" href="/chats/${c.id}/settings" title="Chat settings" aria-label="${chatName(c)}: settings">⚙</a><span class="gwhen">${ago(c.lastEventAt, now)}</span></span>
 <span class="gmeta">${c.kind === "group" ? "group" : "direct"} · ${c.turns} turn${c.turns === 1 ? "" : "s"}${c.failed ? html` · <span class="c-failed">${c.failed} failed</span>` : ""}</span></summary>`;
     // Segments newest first, each conversation's header above its first (newest) segment shown.
     const rows: Raw[] = [];
@@ -797,7 +785,7 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
   ];
   const head = html`<div class="head">
 <a class="back" href="${href("/turns", f)}">← All chats</a>
-<div class="title">${badge(turn.status)}<h1>Turn ${turn.id}</h1><a href="/chats/${chat.id}#e${turn.toSeq}">${chatName(chat)}</a><span class="meta" title="${when(turn.startedAt, ctx.timeZone, true)}">${when(turn.startedAt, ctx.timeZone)} · ${ago(turn.startedAt, ctx.now)}</span>
+<div class="title">${badge(turn.status)}<h1>Turn ${turn.id}</h1><a href="/chats/${chat.id}#e${turn.toSeq}">${chatName(chat)}</a>${settingsLink(chat.id)}<span class="meta" title="${when(turn.startedAt, ctx.timeZone, true)}">${when(turn.startedAt, ctx.timeZone)} · ${ago(turn.startedAt, ctx.now)}</span>
 <span class="nav">${prev ? html`<a href="${href(`/turns/${prev}`, f)}" title="the chat's previous turn">‹ turn ${prev}</a>` : ""}${next ? html`<a href="${href(`/turns/${next}`, f)}" title="the chat's next turn">turn ${next} ›</a>` : ""}</span></div>
 ${trigger ? html`<p class="trigger">Triggered by ${eventPreview(trigger.kind, trigger.payload)} <span class="mono">#${trigger.seq}</span></p>` : ""}
 ${place ? html`<p class="trigger context">In <a href="${href(`/segments/${place.id}`, f)}">the segment of ${when(turnById(ctx.db, place.id)?.startedAt, ctx.timeZone)}</a> (turn ${place.turnIds.indexOf(turn.id) + 1} of ${place.turnIds.length}), of <a href="${href(`/conversations/${place.conversation.id}`, f)}">${inSentence(conversationLabel(place.conversation))}</a></p>` : ""}
@@ -867,7 +855,7 @@ function spanDetail(ctx: PageContext, sp: Span, level: "segment" | "conversation
   const missing = turns.filter((t) => !getTranscript(ctx.db, t.id));
   const head = html`<div class="head">
 <a class="back" href="${href("/turns", f)}">← All chats</a>
-<div class="title">${badge(outcome)}<h1>${title}</h1><a href="${href(`/chats/${chat.id}`, f)}#e${first.toSeq}">${chatName(chat)}</a>
+<div class="title">${badge(outcome)}<h1>${title}</h1><a href="${href(`/chats/${chat.id}`, f)}#e${first.toSeq}">${chatName(chat)}</a>${settingsLink(chat.id)}
 <span class="nav">${sp.prev ? html`<a href="${href(`${base}/${sp.prev}`, f)}" title="the chat's previous ${level}">‹ earlier</a>` : ""}${sp.next ? html`<a href="${href(`${base}/${sp.next}`, f)}" title="the chat's next ${level}">later ›</a>` : ""}</span></div>
 ${context}
 <p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
@@ -982,8 +970,7 @@ export function chatPage(ctx: PageContext, chatId: number, q: URLSearchParams = 
   const failed = spans.filter((t) => t.status === "failed").length;
   const detail = html`<div class="detail">
 <a class="back" href="${href("/turns", currentFilters(q))}">← All chats</a>
-<div class="head"><div class="title"><h1>${chatName(chat)}</h1><span class="meta">${chat.kind === "group" ? "group" : "direct chat"}</span>${ctx.profiles ? profileSelect(chat.id, ctx.csrf, ctx.profiles) : ""}</div>
-${ctx.profiles?.flash ? html`<p class="notice ${ctx.profiles.flash.tone} chflash" role="status">${ctx.profiles.flash.text}</p>` : ""}
+<div class="head"><div class="title"><h1>${chatName(chat)}</h1><span class="meta">${chat.kind === "group" ? "group" : "direct chat"}</span>${settingsLink(chat.id)}</div>
 <p class="facts">telegram <span class="mono">${chat.tgChatId}</span><span class="sep"></span>cursor <span class="mono">#${chat.cursorSeq}</span><span class="sep"></span>${
     chat.backendSessionId ? html`conversation with <b>${short(chat.contextTokens)}</b> tokens of context` : "a fresh conversation next"
   }<span class="sep"></span><a href="${href("/turns", { chat: chat.id })}">${spans.length} turn${spans.length === 1 ? "" : "s"}</a>${failed ? html`, <span class="c-failed">${failed} failed</span>` : ""}</p></div>

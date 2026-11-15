@@ -12,7 +12,7 @@ document.documentElement.classList.add("js");
 /** What a page (or a piece swapped into one) needs once it is in: its copy buttons shown, the selected row in view. */
 function arrive(root) {
   for (const b of root.querySelectorAll("button.copy[data-copy][hidden]")) b.hidden = false;
-  // A select that acts on change (the chat page's Profile, Home's Preview chat): its button is for no script only.
+  // A select that acts on change (Home's profile switch and Preview chat): its button is for no script only.
   for (const b of root.querySelectorAll("[data-autosubmit-btn]")) b.hidden = true;
   const on = root.querySelector(".rows a.row.on");
   if (on) on.scrollIntoView({ block: "nearest" });

@@ -9,7 +9,8 @@ import { PLAYBOOK_NAME } from "./layers.ts";
  *
  * The allow-list is the whole of what is reachable. A path is matched as written, against exact names
  * and one pattern; nothing is normalised first, so `..`, absolute paths, `./x` and backslashes simply do
- * not match. policy.yaml is not on it: policy changes go through the owner's approval (M4), never here.
+ * not match. policy.yaml is not on it: policy changes go through the owner's approval (M4), or the owner's own edit of one chat's
+ * entry on its settings page (console/chat-settings-write.ts, which commits through `commitHomeEdit`), never here.
  *
  *   persona/public.md, persona/private.md, directives.md, memory/private.md   the assistant herself
  *   chats/<this chat>.md                                                      this chat's notes

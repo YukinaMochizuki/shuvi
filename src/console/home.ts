@@ -327,7 +327,7 @@ function layerPanel(v: HomeView, panel: NonNullable<Layers["panel"]>): Raw {
     return html`<form class="hpanel" method="post" action="/home/profile/new">${hidden}
 <p class="hpt">New profile</p>
 ${nameField("Name")}${labelField()}
-<p class="faint">It starts with nothing of its own: every file comes from Base until you make its own version. Switch a chat to it on the chat's page or with /profile.</p>
+<p class="faint">It starts with nothing of its own: every file comes from Base until you make its own version. Switch a chat to it on that chat's settings page (⚙ Settings beside its name), or with /profile in the control bot.</p>
 <div class="hpbtns"><button class="btn primary" type="submit">Create</button>${cancel}</div></form>`;
   if (panel === "rename")
     return html`<form class="hpanel" method="post" action="/home/profile/rename">${hidden}
