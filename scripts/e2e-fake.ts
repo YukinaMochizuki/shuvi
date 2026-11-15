@@ -182,18 +182,26 @@ tg.updates.push(dmUpdate(1, "Can you check tomorrow's weather"));
 await until("the first two messages to reach Telegram", () => texts().length >= 2);
 check(texts().join("|") === "On it, let me look|Halfway there, here is the gist", `text before a tool call and a say() arrive in order (${texts().join("|")})`);
 await until("the slow model step to start", () => slowStepStarted);
+const db = openDb(join(dataDir, "shuvi.db"));
+const outboundPending = () =>
+  (db.$client.query("select payload from chat_events where kind = 'bot_message' and status = 'pending' order by seq").all() as { payload: string }[]).map(
+    (r) => (JSON.parse(r.payload) as { text: string }).text,
+  );
+// The fake has received both messages, but the server records each as sent only once Telegram's answer is back.
+// Kill it before that and the row stays pending (or is sent again: the window the sender's header owns), which
+// is not what this section is about. So the kill waits until both are recorded; the slow step is still running.
+await until("the first two messages to be recorded as sent", () => outboundPending().length === 0);
 
 process.kill(-server!.pid, "SIGKILL"); // the whole group, no drain: only a detached child survives this
 await server!.exited;
 log("server's process group killed mid-turn");
-const db = openDb(join(dataDir, "shuvi.db"));
 const running = db.$client.query("select id, pid from turns where status = 'running'").all() as { id: number; pid: number }[];
 check(running.length === 1, "the turn is still running with no server");
 
 await until("the turn to finish on its own", () => (db.$client.query("select status from turns where id = ?").get(running[0]!.id) as { status: string }).status !== "running", 30_000);
 check(texts().length === 2, "nothing was sent while no server was up");
-const pending = db.$client.query("select count(*) as n from chat_events where status = 'pending'").get() as { n: number };
-check(pending.n === 1, "the turn's last message waits, queued");
+const pending = outboundPending();
+check(pending.join("|") === "All done.", `the turn's last message waits, queued (${pending.join("|")})`);
 
 startServer();
 await until("the queued message to be delivered", () => texts().length >= 3);
@@ -285,6 +293,9 @@ await until("the server to index the pack and fetch its set", () => {
 log("ok  the server indexed home/stickers/Cats.yaml and fetched the set (getStickerSet)");
 tg.updates.push(dmUpdate(8, "send me a sticker"));
 await until("the sticker to be sent", () => tg.sent("sendSticker").length >= 1);
+// `sticker` queues the row and answers at once; the server's sendSticker and that answer's way back to the
+// model (runner child → Claude Code → the fake's next request) then race. Wait for the answer, whichever is first.
+await until("sticker()'s result to reach the model", () => stickerResult !== "");
 check(stickerFound.includes("Cats/1") && stickerFound.includes("a cat waving"), `find_sticker offered Cats/1 (${stickerFound.slice(0, 120)})`);
 check(stickerResult.includes("Sent Cats/1."), `sticker() accepted it (${stickerResult})`);
 check(tg.sent("sendSticker")[0]!.sticker === "cats-f1", "the fake Bot API received sendSticker with the sticker's file_id");

@@ -163,7 +163,10 @@ const env = {
   SHUVI_TELEGRAM_API_ROOT: tg.apiRoot,
   SHUVI_CONTROL_API_ROOT: control.apiRoot,
   SHUVI_COMMIT: "e2e1234",
-  SHUVI_TURN_MAX_MINUTES: "0.15", // 9 s
+  // 24 s. It is every turn's limit, not just section 3's hang: an ordinary turn here takes ~2 s alone but up to
+  // ~6 s on a loaded machine, and section 5's recovery (two CLI runs: the refused resume, then fresh) up to ~11 s.
+  // At 9 s those were stopped now and then, and the section waiting on them timed out.
+  SHUVI_TURN_MAX_MINUTES: "0.4",
   SHUVI_MODEL: "claude-sonnet-4-5",
   SHUVI_TZ: "Asia/Taipei",
   SHUVI_CONSOLE_LISTEN: "127.0.0.1:0",
@@ -243,7 +246,7 @@ control.updates.push(dmUpdate(5, "/status"));
 await until("the second /status reply", () => controlTexts().filter((t) => t.startsWith("shuvi, commit")).length >= 2);
 const status = controlTexts().filter((t) => t.startsWith("shuvi, commit")).at(-1)!;
 check(/Running turns: 1\n- chat 1 \(tg 1001\): turn 4, running \d+s, pid \d+/.test(status) && status.includes("Failed turns, last 24h: 3") && status.includes("API Error: 400"), `/status shows the running turn and the recent failures (${JSON.stringify(status)})`);
-await until("the wall-clock alert", () => controlTexts().some((t) => t.includes("wall-clock limit") && t.includes("is being stopped")), 40_000);
+await until("the wall-clock alert", () => controlTexts().some((t) => t.includes("wall-clock limit") && t.includes("is being stopped")), 60_000);
 await until("the hung turn to close", () => (db.$client.query("select status from turns order by id desc limit 1").get() as { status: string }).status !== "running", 30_000);
 const hung = db.$client.query("select status, term_at, error from turns order by id desc limit 1").get() as { status: string; term_at: string | null; error: string | null };
 check(hung.status === "stopped" && !!hung.term_at && hung.error === WALL_CLOCK_STOP, `the hung turn closed as stopped, with the limit as its reason (${hung.error})`);
