@@ -211,25 +211,33 @@ interface BubbleOpts {
 }
 
 /**
- * A bubble the owner may delete: a round checkbox on its left (shown on hover, and always while selecting), and a
- * "⋯" menu at its top right. Both belong to the page's delete form (`deleteBar`) by its id, so the trace needs no
- * form of its own. `side` counts it in the bar: you (the owner), her, or someone else.
+ * A bubble the owner may delete. Idle, nothing about deleting shows: with script (console.js) a faint "⋯" fades in
+ * at its top right on hover or focus (on a touch screen a long press opens the same menu instead), offering Select
+ * and Delete; while selecting, a round check on its left (`dsel`). Without script there is only what `<noscript>`
+ * holds: a checkbox for the page's delete form (`deleteBar`), which is inside `<noscript>` too. `side` counts it:
+ * you (the owner), her, or someone else.
+ *
+ * No `<style>` may go in a `<noscript>` here: htmx swaps pages in parsed with scripting off, so a `<noscript>`'s
+ * content becomes real elements; they stay hidden (`noscript` is display:none with script on), but a style in it
+ * would apply.
  */
 function pickable(e: ChatEvent, side: "you" | "her" | "other", inner: Raw): Raw {
   if (!DELETABLE_KINDS.includes(e.kind)) return inner;
-  return html`<div class="pickable ${side}" data-seq="${e.seq}" data-side="${side}"><label class="pick" title="Select"><input type="checkbox" name="seq" value="${e.seq}" form="del" aria-label="Select #${e.seq}"><span class="ring" aria-hidden="true"></span></label><div class="pbody">${inner}<details class="bmenu"><summary title="More" aria-label="More">⋯</summary><div class="menu"><button type="button" class="pick-one">Select</button><button type="submit" form="del" name="only" value="${e.seq}" class="danger">Delete</button></div></details></div></div>`;
+  return html`<div class="pickable ${side}" data-seq="${e.seq}" data-side="${side}"><span class="dslot"><button type="button" class="dsel" aria-pressed="false" aria-label="Select #${e.seq}" tabindex="-1"></button><noscript><label class="nspick" title="Tick to delete"><input type="checkbox" name="seq" value="${e.seq}" form="del" aria-label="Tick #${e.seq} to delete"></label></noscript></span><div class="pbody">${inner}<details class="bmenu"><summary title="More" aria-label="More for #${e.seq}">⋯</summary><div class="menu"><button type="button" class="dm-sel">Select</button><button type="button" class="dm-del">Delete</button></div></details></div></div>`;
 }
 
 /**
- * The page's delete form: the bar at the bottom of the detail pane. With script (console.js) it shows once a
- * bubble is selected ("3 selected (you 2, her 1) · Delete · Cancel") and the delete runs in the background, with a toast
- * to undo it; without script it is always there, a plain form posting the checked boxes (`delete-write.ts`).
+ * What deleting needs on a page, at the end of its detail pane. With script (console.js): the pill that floats at
+ * the bottom centre only while something is selected ("3 selected · Delete · ✕", a refusal's reason under it), and
+ * the snackbar at the bottom left after a delete ("Deleted 3 · Undo", a thin line counting down its 10 s); the
+ * delete is posted in the background with the CSRF token of `data-csrf`. Without script: a plain form posting the
+ * ticked boxes (`delete-write.ts`), all inside `<noscript>`, so nothing of it shows with script on.
  */
 function deleteBar(ctx: PageContext): Raw {
   if (!ctx.csrf) return raw("");
-  return html`<noscript><style>.detail .pick{opacity:1;display:grid!important}.selbar{display:flex}.bmenu .pick-one,.selbar .cancel{display:none}</style></noscript>
-<form id="del" class="selbar" method="post" action="/messages/delete" hx-boost="false"><input type="hidden" name="csrf" value="${ctx.csrf}"><input type="hidden" name="back" value="${ctx.here ?? "/turns"}"><span class="selcount">Tick the messages to delete</span><span class="selwhy" role="alert"></span><span class="acts"><button type="submit" class="btn danger solid">Delete</button><button type="button" class="btn cancel">Cancel</button></span></form>
-<div class="toast" role="status" hidden><span class="what"></span><button type="button" class="btn undo">Undo</button></div>`;
+  return html`<noscript><form id="del" class="nsdel" method="post" action="/messages/delete"><input type="hidden" name="csrf" value="${ctx.csrf}"><input type="hidden" name="back" value="${ctx.here ?? "/turns"}"><button type="submit" class="btn danger">Delete the ticked messages</button></form></noscript>
+<div class="delui" data-csrf="${ctx.csrf}"><div class="selpill" role="toolbar" hidden aria-label="Selected messages"><span class="pn" aria-live="polite"></span><span class="psep" aria-hidden="true"></span><button type="button" class="pdel" title="Delete (Del)">Delete</button><button type="button" class="px" aria-label="Clear the selection" title="Clear (Esc)">✕</button><span class="pwhy" role="alert"></span></div>
+<div class="snack" role="status" hidden><span class="swhat"></span><button type="button" class="sundo">Undo</button><span class="sline" aria-hidden="true"></span></div></div>`;
 }
 
 /** An event someone (or something) sent into the chat: a left bubble. */

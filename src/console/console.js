@@ -1,10 +1,13 @@
 // The console's own script (same origin; the pages work without it, and without htmx). Copy buttons, j / k to
 // move through the turn list, a line when the console cannot be reached, and selecting messages to delete
-// (below: the bar, the "⋯" menu, the toast with its undo; pages.ts `pickable` / `deleteBar`, delete-write.ts).
+// (below: the "⋯" menu, the pill, the snackbar with its undo; pages.ts `pickable` / `deleteBar`, delete-write.ts).
 // htmx (html.ts `page`) swaps pages in place, so nothing here holds on to an element of a page: clicks and keys
 // are handled on the document, and what a new page needs is done for each piece htmx puts in (`htmx.onLoad`), or
 // once without htmx.
 "use strict";
+
+// What shows only with script (the "⋯" on a bubble) is styled under `.js`; <html> stays across htmx's swaps.
+document.documentElement.classList.add("js");
 
 /** What a page (or a piece swapped into one) needs once it is in: its copy buttons shown, the selected row in view. */
 function arrive(root) {
@@ -60,24 +63,28 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---- deleting messages -------------------------------------------------------------------------------------
-// Hover a bubble for its checkbox; a click selects it and starts selecting (the detail gets `.selecting`, the bar
-// shows), Shift-click selects the range from the last one clicked, Esc or Cancel stops. Delete hides the bubbles at
-// once and posts in the background; the answer is the deletion's id (a toast counts down its undo) or a refusal
-// (the bubbles come back, the bar says why). The server holds the deletion for its undo window either way: the
-// countdown here only says how long that is.
+// Idle, nothing shows. Hovering a bubble fades in its "⋯" (a long press opens the same menu on a touch screen):
+// Select, Delete. Select (or `x` with the pointer over a bubble) starts selecting: the detail gets `.selecting`, every
+// bubble a round check, and the pill floats at the bottom ("3 selected · Delete · ✕"); a click toggles a bubble,
+// Shift-click selects the range from the last one clicked, `Delete` deletes, `Esc` or ✕ stops. A delete hides the
+// bubbles at once and posts in the background; the answer is the deletion's id (the snackbar "Deleted 3 · Undo"
+// counts down its window with a thin line) or a refusal (the bubbles come back selected, the pill says why). The
+// server holds the deletion for its undo window either way: the countdown here only says how long that is.
 
 const SIDES = { you: "you", her: "her", other: "others" };
 let anchor = null; // the seq last clicked, where a Shift-click's range starts
+let hovered = null; // the bubble under the mouse, for `x`
 
 const detailOf = (el) => el.closest(".detail");
 const picks = (detail) => [...detail.querySelectorAll(".pickable")].filter((p) => !p.classList.contains("gone"));
-const boxOf = (p) => p.querySelector(".pick input");
+const csrfOf = (detail) => detail.querySelector(".delui")?.dataset.csrf ?? "";
+const typing = (t) => t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement || (t instanceof HTMLElement && t.isContentEditable);
 
 /** Mark every copy of `seq` on the page (a segment can show a message twice) as (un)selected. */
 function setPicked(detail, seq, on) {
   for (const p of detail.querySelectorAll(`.pickable[data-seq="${seq}"]`)) {
     p.classList.toggle("on", on);
-    boxOf(p).checked = on;
+    p.querySelector(".dsel")?.setAttribute("aria-pressed", String(on));
   }
 }
 
@@ -87,31 +94,32 @@ function selected(detail) {
   return seen;
 }
 
-/** The bar's line: "3 selected (you 2, her 1)", and selection mode on or off with it. */
-function updateBar(detail, why = "") {
-  const bar = detail.querySelector("form.selbar");
-  if (!bar) return;
+/** Selection mode on while anything is selected, and the pill with it: "3 selected", a refusal's reason under it. */
+function render(detail, why = "") {
   const sel = selected(detail);
+  const on = sel.size > 0;
+  const was = detail.classList.contains("selecting");
+  detail.classList.toggle("selecting", on);
+  for (const b of detail.querySelectorAll(".pickable .dsel")) b.tabIndex = on ? 0 : -1;
+  const pill = detail.querySelector(".selpill");
+  if (!pill) return;
   const n = { you: 0, her: 0, other: 0 };
   for (const side of sel.values()) n[side] = (n[side] ?? 0) + 1;
-  const parts = Object.keys(SIDES).filter((k) => n[k]).map((k) => `${SIDES[k]} ${n[k]}`);
-  bar.querySelector(".selcount").textContent = `${sel.size} selected${parts.length ? ` (${parts.join(", ")})` : ""}`;
-  bar.querySelector(".selwhy").textContent = why;
-  bar.classList.toggle("refused", !!why);
-  detail.classList.toggle("selecting", sel.size > 0 || !!why);
+  pill.querySelector(".pn").textContent = `${sel.size} selected`;
+  pill.title = Object.keys(SIDES).filter((k) => n[k]).map((k) => `${SIDES[k]} ${n[k]}`).join(", ");
+  pill.querySelector(".pwhy").textContent = why;
+  pill.classList.toggle("refused", !!why);
+  pill.hidden = !on;
+  if (on && !was) closeMenus();
 }
 
 function stopSelecting(detail) {
   for (const p of detail.querySelectorAll(".pickable.on")) setPicked(detail, p.dataset.seq, false);
   anchor = null;
-  updateBar(detail);
+  render(detail);
 }
 
-function closeMenus(except) {
-  for (const d of document.querySelectorAll("details.bmenu[open]")) if (d !== except) d.open = false;
-}
-
-/** A checkbox (or a bubble while selecting) clicked: toggle it (`on`: to this), or with Shift select the range from the anchor. */
+/** A bubble clicked while selecting (or Selected from its menu): toggle it (`on`: to this), or with Shift select the range from the anchor. */
 function pick(p, shift, on = !p.classList.contains("on")) {
   const detail = detailOf(p);
   const all = picks(detail);
@@ -122,44 +130,115 @@ function pick(p, shift, on = !p.classList.contains("on")) {
     for (const x of all.slice(a, b + 1)) setPicked(detail, x.dataset.seq, true);
   } else setPicked(detail, p.dataset.seq, on);
   anchor = p.dataset.seq;
-  updateBar(detail);
+  render(detail);
 }
+
+function closeMenus(except) {
+  for (const d of document.querySelectorAll("details.bmenu[open]")) if (d !== except) d.open = false;
+  if (!except) unlift();
+}
+
+// ---- a long press on a touch screen: the page dims, the bubble lifts, its menu opens under it ----------------
+let press = null; // { p, x, y, timer } while a finger is down on a bubble
+let held = false; // the finger that lifted a bubble is still down
+let swallow = 0; // until when the click that finger's lifting ends with is not a choice yet
+
+function lift(p) {
+  closeMenus();
+  p.classList.add("lp");
+  const scrim = document.createElement("div");
+  scrim.className = "lpscrim";
+  document.body.append(scrim);
+  const menu = p.querySelector("details.bmenu");
+  if (menu) menu.open = true;
+  window.getSelection()?.removeAllRanges();
+  held = true;
+}
+
+function unlift() {
+  for (const p of document.querySelectorAll(".pickable.lp")) p.classList.remove("lp");
+  for (const s of document.querySelectorAll(".lpscrim")) s.remove();
+}
+
+document.addEventListener("pointerdown", (e) => {
+  if (e.pointerType !== "touch" || !(e.target instanceof Element)) return;
+  const p = e.target.closest(".pickable");
+  if (!p || e.target.closest(".bmenu, a, button") || p.closest(".selecting")) return;
+  press = { p, x: e.clientX, y: e.clientY, timer: setTimeout(() => ((press = null), lift(p)), 500) };
+});
+const unpress = (e) => {
+  if (press) clearTimeout(press.timer);
+  press = null;
+  if (held && e.type !== "pointermove") {
+    held = false;
+    swallow = Date.now() + 400;
+  }
+};
+document.addEventListener("pointermove", (e) => press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10 && unpress(e));
+document.addEventListener("pointerup", unpress);
+document.addEventListener("pointercancel", unpress);
+document.addEventListener("contextmenu", (e) => {
+  // The long press is the menu: not the browser's as well.
+  if (e.target instanceof Element && (press || document.querySelector(".pickable.lp")) && e.target.closest(".pickable, .lpscrim")) e.preventDefault();
+});
+
+document.addEventListener("mouseover", (e) => {
+  hovered = e.target instanceof Element ? e.target.closest(".pickable") : null;
+});
 
 document.addEventListener("click", (e) => {
   const t = e.target instanceof Element ? e.target : null;
   if (!t) return;
+  // The click a long press ends with (when the browser sends one) is not a choice yet.
+  if (Date.now() < swallow && !t.closest(".bmenu .menu")) {
+    swallow = 0;
+    return void e.preventDefault();
+  }
+  swallow = 0;
+  if (t.closest(".lpscrim")) return closeMenus();
   if (!t.closest("details.bmenu")) closeMenus();
   else closeMenus(t.closest("details.bmenu"));
-  const one = t.closest(".bmenu .pick-one");
-  if (one) {
-    t.closest("details.bmenu").open = false;
-    pick(one.closest(".pickable"), false);
-    return;
+  const menuItem = t.closest(".bmenu .dm-sel, .bmenu .dm-del");
+  if (menuItem) {
+    const p = menuItem.closest(".pickable");
+    closeMenus();
+    if (menuItem.classList.contains("dm-sel")) return pick(p, false, true);
+    return void remove(detailOf(p), [p.dataset.seq], false);
   }
-  if (t.closest(".selbar .cancel")) return stopSelecting(detailOf(t));
-  // A checkbox toggles itself; its `change` (below) does the rest. Shift is remembered for it.
-  if (t.closest(".pick")) return void (shiftPick = e.shiftKey);
-  // While selecting, a click on a bubble (not on a link or a fold in it) selects it too.
+  if (t.closest(".selpill .px")) return stopSelecting(detailOf(t));
+  if (t.closest(".selpill .pdel")) return void remove(detailOf(t), [...selected(detailOf(t)).keys()], true);
+  // While selecting, a click on a bubble (its check, or anywhere not a link or a fold in it) toggles it.
   const p = t.closest(".selecting .pickable");
-  if (p && !t.closest("a, summary, button, details")) {
+  if (p && (t.closest(".dsel") || !t.closest("a, summary, button, details"))) {
     e.preventDefault();
     pick(p, e.shiftKey);
   }
 });
 
-let shiftPick = false;
-document.addEventListener("change", (e) => {
-  const box = e.target instanceof HTMLInputElement ? e.target : null;
-  if (!box?.closest(".pick")) return;
-  pick(box.closest(".pickable"), shiftPick, box.checked);
-  shiftPick = false;
-});
-
 document.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
-  closeMenus();
-  const detail = document.querySelector(".detail.selecting");
-  if (detail) stopSelecting(detail);
+  if (e.key === "Escape") {
+    const menu = document.querySelector("details.bmenu[open]");
+    closeMenus();
+    if (menu) return void menu.querySelector("summary")?.focus();
+    const detail = document.querySelector(".detail.selecting");
+    if (detail) stopSelecting(detail);
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return;
+  if (e.key === "x") {
+    // The bubble under the pointer, or the one keyboard focus is in.
+    const p = (hovered?.isConnected && hovered) || (document.activeElement instanceof Element ? document.activeElement.closest(".pickable") : null);
+    if (!p || p.classList.contains("gone")) return;
+    e.preventDefault();
+    closeMenus();
+    return pick(p, e.shiftKey);
+  }
+  if (e.key === "Delete" || e.key === "Backspace") {
+    const detail = document.querySelector(".detail.selecting");
+    if (!detail) return;
+    e.preventDefault();
+    remove(detail, [...selected(detail).keys()], true);
+  }
 });
 
 async function post(action, fields) {
@@ -175,10 +254,6 @@ async function post(action, fields) {
   }
 }
 
-let toastTimer = null;
-/** The deletion the toast is for, and every message it took on this page: a delete while it is open joins it. */
-let toasted = { id: null, seqs: new Set() };
-
 /** Hide (or bring back) the bubbles of `seqs`, and her reactions to them, which go with them. */
 function setGone(detail, seqs, gone) {
   for (const s of seqs) {
@@ -186,60 +261,73 @@ function setGone(detail, seqs, gone) {
   }
 }
 
-function showToast(detail, form, deleted, answer) {
-  const toast = detail.querySelector(".toast");
-  if (!toast) return;
-  clearInterval(toastTimer);
-  // The server joins a delete to the chat's open deletion (store/deletions.ts): one toast, one Undo, for all.
-  if (toasted.id !== answer.id || toast.hidden) toasted = { id: answer.id, seqs: new Set() };
-  for (const s of deleted) toasted.seqs.add(s);
-  const seqs = [...toasted.seqs];
-  const until = Date.now() + answer.seconds * 1000;
-  const undo = toast.querySelector(".undo");
-  toast.querySelector(".what").textContent = `Deleted ${answer.count}`;
-  const tick = () => {
-    const left = Math.ceil((until - Date.now()) / 1000);
-    if (left > 0) return void (undo.textContent = `Undo (${left})`);
-    // The undo window is over: the server purges them; here they leave the page for good.
-    clearInterval(toastTimer);
-    toast.hidden = true;
-    for (const s of seqs) for (const p of detail.querySelectorAll(`.pickable[data-seq="${s}"].gone, .pill[data-target="${s}"].gone`)) p.remove();
-  };
-  undo.disabled = false;
-  undo.onclick = async () => {
-    undo.disabled = true;
-    const r = await post("/messages/undo", [["csrf", form.elements.csrf.value], ["id", String(answer.id)]]);
-    undo.disabled = false;
-    if (r.refused) return void (toast.querySelector(".what").textContent = r.refused);
-    clearInterval(toastTimer);
-    toast.hidden = true;
-    setGone(detail, seqs, false);
-  };
-  toast.hidden = false;
-  tick();
-  toastTimer = setInterval(tick, 250);
-}
-
-document.addEventListener("submit", async (e) => {
-  const form = e.target;
-  if (!(form instanceof HTMLFormElement) || !form.classList.contains("selbar")) return;
-  e.preventDefault();
-  const detail = detailOf(form);
-  // "Delete" in a bubble's menu deletes that one alone; the bar's Delete, what is selected.
-  const only = e.submitter?.name === "only" ? e.submitter.value : null;
-  closeMenus();
-  const seqs = only ? [only] : [...selected(detail).keys()];
-  if (!seqs.length) return;
+/** Delete `seqs` (the selection, or one bubble from its menu): gone at once, back with the reason if refused. */
+async function remove(detail, seqs, fromSelection) {
+  if (!detail || !seqs.length) return;
   setGone(detail, seqs, true);
-  if (!only) stopSelecting(detail);
-  const answer = await post(form.action, [["csrf", form.elements.csrf.value], ...seqs.map((s) => ["seq", s])]);
+  if (fromSelection) stopSelecting(detail);
+  const answer = await post("/messages/delete", [["csrf", csrfOf(detail)], ...seqs.map((s) => ["seq", s])]);
   if (answer.refused) {
     setGone(detail, seqs, false);
     for (const s of seqs) setPicked(detail, s, true);
-    return updateBar(detail, answer.refused);
+    return render(detail, answer.refused);
   }
-  showToast(detail, form, seqs, answer);
-});
+  showSnack(detail, seqs, answer);
+}
+
+/** The deletion the snackbar is for, and every message it took on this page: a delete while it is open joins it. */
+let snacked = { id: null, seqs: new Set(), timer: null };
+
+function hideSnack(snack, detail) {
+  clearTimeout(snacked.timer);
+  snack.classList.add("fading");
+  snacked.timer = setTimeout(() => {
+    snack.hidden = true;
+    snack.classList.remove("fading");
+    detail.classList.remove("snacking");
+  }, 300);
+}
+
+function showSnack(detail, deleted, answer) {
+  const snack = detail.querySelector(".snack");
+  if (!snack) return;
+  clearTimeout(snacked.timer);
+  // The server joins a delete to the chat's open deletion (store/deletions.ts): one snackbar, one Undo, for all.
+  if (snacked.id !== answer.id || snack.hidden) snacked = { id: answer.id, seqs: new Set(), timer: null };
+  for (const s of deleted) snacked.seqs.add(s);
+  const seqs = [...snacked.seqs];
+  const what = snack.querySelector(".swhat");
+  const undo = snack.querySelector(".sundo");
+  what.textContent = `Deleted ${answer.count}`;
+  snack.classList.remove("refused", "fading");
+  undo.hidden = false;
+  undo.disabled = false;
+  // The thin line runs out with the window, restarted by a delete that joins it.
+  const line = snack.querySelector(".sline");
+  line.style.animation = "none";
+  void line.offsetWidth;
+  line.style.animation = `snack-down ${answer.seconds}s linear forwards`;
+  undo.onclick = async () => {
+    undo.disabled = true;
+    const r = await post("/messages/undo", [["csrf", csrfOf(detail)], ["id", String(answer.id)]]);
+    if (r.refused) {
+      what.textContent = r.refused;
+      snack.classList.add("refused");
+      undo.hidden = true;
+      line.style.animation = "none";
+      clearTimeout(snacked.timer);
+      snacked.timer = setTimeout(() => hideSnack(snack, detail), 5000);
+      return;
+    }
+    setGone(detail, seqs, false);
+    snacked.id = null;
+    hideSnack(snack, detail);
+  };
+  snack.hidden = false;
+  detail.classList.add("snacking");
+  // The window is over: the server purges them, they stay off the page; the snackbar fades.
+  snacked.timer = setTimeout(() => hideSnack(snack, detail), answer.seconds * 1000);
+}
 
 if (window.htmx) {
   window.htmx.onLoad(arrive);
