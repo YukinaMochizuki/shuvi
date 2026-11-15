@@ -169,6 +169,13 @@
       "when": 1794748106241,
       "tag": "0023_clean_conversations",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1794753290902,
+      "tag": "0024_turn_deletions",
+      "breakpoints": true
     }
   ]
 }

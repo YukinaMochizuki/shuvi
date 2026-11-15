@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CALLED_PREFIX, renderMessage, renderTurnInput } from "../src/agent/render.ts";
@@ -13,9 +13,10 @@ import { FIXTURE_PNG } from "./console-fixture.ts";
 import { allowedHosts, allowedOrigins } from "../src/console/index.ts";
 import { csrfToken, handleConsole, LOGIN_HEADER, type ConsoleDeps } from "../src/console/server.ts";
 import type { Db } from "../src/store/db.ts";
-import { DELETE_UNDO_MS, deleteMessages, dropEventLines, purgeDeletions, undoDeletion } from "../src/store/deletions.ts";
+import { DELETE_UNDO_MS, REUSE_GRACE_MS, deleteMessages, deleteTurns, deletionLabel, deletionOf, deletionsMark, dropEventLines, purgeDeletions, turnDeletionPlan, turnMessageCount, undoDeletion } from "../src/store/deletions.ts";
 import { ensureChat, enqueueOutbound, getChat, getEvent, lastMessage, markSent, previousEvent, recentHistory, recordInbound, triggersAfter, type ChatEvent } from "../src/store/events.ts";
-import { addStep, saveTranscript } from "../src/store/transcripts.ts";
+import { addStep, pruneTranscripts, savePrompt, saveTranscript } from "../src/store/transcripts.ts";
+import { createSchedule } from "../src/store/schedules.ts";
 import { claimTurn, extendTurn, finishTurn } from "../src/store/turns.ts";
 import { lastSeq, memDb, OWNER, ownerChatId, ownerSays } from "./helpers.ts";
 
@@ -166,7 +167,7 @@ describe("deleting messages (store/deletions.ts)", () => {
     expect(JSON.stringify(dump(db).steps)).not.toContain("pineapple noted");
     expect(JSON.stringify(dump(db).steps)).not.toContain("  mango too, by say ");
     if (!res.ok) throw new Error(res.refused);
-    expect(undoDeletion(db, res.id, T0 + DELETE_UNDO_MS - 1)).toEqual({ ok: true, count: 3 });
+    expect(undoDeletion(db, res.id, T0 + DELETE_UNDO_MS - 1)).toEqual({ ok: true, count: 3, turns: 0 });
     expect(dump(db)).toEqual(before);
     expect(db.$client.query("select (select count(*) from deletions) + (select count(*) from deleted_events) + (select count(*) from deletion_scrubs) as n").get()).toEqual({ n: 0 });
   });
@@ -266,7 +267,7 @@ describe("the console's delete (console/delete-write.ts)", () => {
     expect(again.status).toBe(409);
     expect(((await again.json()) as { refused: string }).refused).toContain("not in the chat's log");
     const undo = await post(db, "/messages/undo", [["id", String(answer.id)]], { json: true });
-    expect(await undo.json()).toEqual({ count: 2 });
+    expect(await undo.json()).toEqual({ count: 2, turns: 0 });
     expect(await get(db, `/chats/${ownerChatId(db)}`)).toContain("secret plan");
   });
 
@@ -328,7 +329,7 @@ describe("deletes in a row, and undo once the chat has moved on", () => {
     // The window started again with the second.
     expect(second.purgeAt).toBe(new Date(T0 + 4000 + DELETE_UNDO_MS).toISOString());
     expect(db.$client.query("select count(*) as n from deletions").get()).toEqual({ n: 1 });
-    expect(undoDeletion(db, first.id, T0 + 4000 + DELETE_UNDO_MS - 1)).toEqual({ ok: true, count: 2 });
+    expect(undoDeletion(db, first.id, T0 + 4000 + DELETE_UNDO_MS - 1)).toEqual({ ok: true, count: 2, turns: 0 });
     expect(dump(db)).toEqual(before);
   });
 
@@ -340,7 +341,7 @@ describe("deletes in a row, and undo once the chat has moved on", () => {
       const r = deleteMessages(db, [c], T0 + 1000);
       if (!r.ok) throw new Error(r.refused);
       if (end === "undo") {
-        expect(undoDeletion(db, r.id, T0 + 2000)).toEqual({ ok: true, count: 2 });
+        expect(undoDeletion(db, r.id, T0 + 2000)).toEqual({ ok: true, count: 2, turns: 0 });
         expect(dump(db)).toEqual(before);
       } else {
         // Reply first, then quote, purged: before, the reply came back with the quote for good (B1).
@@ -367,7 +368,7 @@ describe("deletes in a row, and undo once the chat has moved on", () => {
     expect(input).not.toContain("secret plan");
     expect(input).not.toContain("why pineapple?");
     if (!r1.ok) throw new Error(r1.refused);
-    expect(undoDeletion(db, r1.id, T0 + 2000)).toEqual({ ok: true, count: 2 });
+    expect(undoDeletion(db, r1.id, T0 + 2000)).toEqual({ ok: true, count: 2, turns: 0 });
     expect(dump(db)).toEqual(before);
   });
 
@@ -406,7 +407,7 @@ describe("deletes in a row, and undo once the chat has moved on", () => {
     finishTurn(db, t.id, { status: "done" });
     r = deleteMessages(db, [m], T0);
     if (!r.ok) throw new Error(r.refused);
-    expect(undoDeletion(db, r.id, T0 + 1000)).toEqual({ ok: true, count: 1 });
+    expect(undoDeletion(db, r.id, T0 + 1000)).toEqual({ ok: true, count: 1, turns: 0 });
   });
 
   test("S2: a group turn's unread note and called heading follow its deleted messages; the console shows what it showed", async () => {
@@ -449,7 +450,7 @@ describe("deletes in a row, and undo once the chat has moved on", () => {
     // The one called left goes too: no heading naming nothing.
     deleteMessages(db, [m3], T0 + 3000);
     expect(text()).not.toContain(CALLED_PREFIX);
-    expect(undoDeletion(db, r.id, T0 + 4000)).toEqual({ ok: true, count: 4 });
+    expect(undoDeletion(db, r.id, T0 + 4000)).toEqual({ ok: true, count: 4, turns: 0 });
     expect(dump(db)).toEqual(before);
   });
 
@@ -486,7 +487,7 @@ describe("deletes in a row, and undo once the chat has moved on", () => {
     const deleting = { download: async () => ((id = (deleteMessages(db, [m], T0) as { id: number }).id), new Uint8Array(FIXTURE_PNG)) } as unknown as TelegramFiles;
     await downloadPass(db, deleting, dir);
     expect(existsSync(join(dir, "media/p-late"))).toBe(false);
-    expect(undoDeletion(db, id, T0 + 1000)).toEqual({ ok: true, count: 1 });
+    expect(undoDeletion(db, id, T0 + 1000)).toEqual({ ok: true, count: 1, turns: 0 });
     await downloadPass(db, { download: async () => new Uint8Array(FIXTURE_PNG) } as unknown as TelegramFiles, dir);
     expect(existsSync(join(dir, "media/p-late"))).toBe(true);
     expect((getEvent(db, m)!.payload as { media: { state: string } }).media.state).toBe("ready");
@@ -497,6 +498,301 @@ describe("deletes in a row, and undo once the chat has moved on", () => {
     const one = (await (await post(db, "/messages/delete", [["seq", String(a)]], { json: true })).json()) as { id: number; count: number };
     const two = (await (await post(db, "/messages/delete", [["seq", String(d)]], { json: true, now: T0 + 2000 })).json()) as { id: number; count: number };
     expect(two).toMatchObject({ id: one.id, count: 2 });
-    expect(await (await post(db, "/messages/undo", [["id", String(one.id)]], { json: true, now: T0 + 3000 })).json()).toEqual({ count: 2 });
+    expect(await (await post(db, "/messages/undo", [["id", String(one.id)]], { json: true, now: T0 + 3000 })).json()).toEqual({ count: 2, turns: 0 });
+  });
+});
+
+// ---- deleting a whole turn ----------------------------------------------------------------------------------
+
+/** `dump` and the turns, the prompts, and every stash table: what a turn's undo must give back byte for byte. */
+function dumpAll(db: Db) {
+  const q = (s: string) => db.$client.query(s).all();
+  return { ...dump(db), turns: q("select * from turns order by id"), prompts: q("select * from prompt_texts order by hash") };
+}
+const stashed = (db: Db) =>
+  db.$client
+    .query(
+      "select (select count(*) from deletions) + (select count(*) from deleted_events) + (select count(*) from deletion_scrubs) + (select count(*) from deleted_turns) + (select count(*) from deleted_turn_steps) + (select count(*) from deleted_turn_transcripts) as n",
+    )
+    .get();
+
+/** A file's mtime set well before T0 (and REUSE_GRACE_MS): not touched since any deletion here. */
+const old = (path: string) => {
+  const t = new Date(T0 - REUSE_GRACE_MS - 3600_000);
+  utimesSync(path, t, t);
+};
+
+/**
+ * A finished turn in the DM with `who` (OWNER: the owner's DM), its transcript sent `prompt` and showed `pics[0]`
+ * in its input, and a tool call whose result showed `pics[1]`. Returns its id.
+ */
+function turnIn(db: Db, who: number, prompt: string | null, pics: string[]): number {
+  const chat = ensureChat(db, { id: who, kind: "private" }).id;
+  recordInbound(db, { chatId: chat, kind: "message", payload: { from: { id: who, name: "Someone" }, text: "look" }, tgUpdateId: 70_000 + lastSeq(db), tgMessageId: 70_000 + lastSeq(db) });
+  const t = claimTurn(db, chat)!;
+  saveTranscript(db, t.id, { promptHash: prompt, input: [{ type: "text", text: "look" }, { type: "image", ref: pics[0]!, mimeType: "image/png" }], resumed: false });
+  addStep(db, t.id, 0, { kind: "tool", name: "look_at", args: "{}", result: "a picture", callId: `c${t.id}`, status: "ok", images: [{ ref: pics[1]!, mimeType: "image/png" }] });
+  finishTurn(db, t.id, { status: "done" });
+  return t.id;
+}
+
+describe("deleting a turn (store/deletions.ts deleteTurns)", () => {
+  test("its record, what it answered and what it wrote go at once; one count of its messages everywhere", () => {
+    const { db, chat, a, b, r, s, c, d, turn1, turn2 } = setup();
+    const plan = turnDeletionPlan(db, turn1)!;
+    expect(plan.answered.map((e) => e.seq)).toEqual([a]);
+    expect(plan.wrote.map((e) => e.seq)).toEqual([b, r, s]);
+    expect(turnMessageCount(plan)).toBe(3); // her reaction is said apart
+    const res = deleteTurns(db, [turn1], T0);
+    if (!res.ok) throw new Error(res.refused);
+    expect(res.seqs).toEqual([a, b, r, s]);
+    for (const seq of [a, b, r, s]) expect(getEvent(db, seq)).toBeUndefined();
+    for (const t of ["turns where id", "turn_steps where turn_id", "turn_transcripts where turn_id"]) expect(db.$client.query(`select count(*) as n from ${t} = ?`).get(turn1)).toEqual({ n: 0 });
+    expect(db.$client.query("select count(*) as n from deleted_turn_steps").get()).toEqual({ n: 3 });
+    const d0 = deletionOf(db, res.id)!;
+    expect(d0).toMatchObject({ count: 3, turns: [{ id: turn1, messages: 3 }], loose: 0 });
+    expect(deletionLabel(d0)).toBe(`turn ${turn1} and its 3 messages`);
+    // The readers of the log, as for messages: and the other turn's input is scrubbed as it would be.
+    expect(recentHistory(db, chat, d, 10).map((e) => e.seq)).toEqual([c, d]);
+    expect(readChat(db, chat, null, 50).events.map((e) => e.seq)).toEqual([c, d]);
+    expect(searchChats(db, { terms: ["secret plan"], chats: [getChat(db, chat)!], limit: 10 }).total).toBe(0);
+    expect(JSON.stringify(db.$client.query("select input from turn_transcripts where turn_id = ?").get(turn2))).not.toContain("secret plan");
+  });
+
+  test("joined with messages deleted just before: one deletion, one undo puts everything back byte for byte", () => {
+    const { db, c, turn1 } = setup();
+    const before = dumpAll(db);
+    const m = deleteMessages(db, [c], T0);
+    const t = deleteTurns(db, [turn1], T0 + 3000);
+    if (!m.ok || !t.ok) throw new Error("refused");
+    expect(t.id).toBe(m.id);
+    const d0 = deletionOf(db, t.id)!;
+    expect(d0).toMatchObject({ count: 4, loose: 1, turns: [{ id: turn1, messages: 3 }] });
+    expect(deletionLabel(d0)).toBe(`turn ${turn1} and its 3 messages, and 1 more message`);
+    expect(t.purgeAt).toBe(new Date(T0 + 3000 + DELETE_UNDO_MS).toISOString());
+    expect(undoDeletion(db, t.id, T0 + 4000)).toEqual({ ok: true, count: 4, turns: 1 });
+    expect(dumpAll(db)).toEqual(before);
+    expect(stashed(db)).toEqual({ n: 0 });
+  });
+
+  test("a message deleted after the turn joins it too, and the undo still restores byte for byte", () => {
+    const { db, d, turn1 } = setup();
+    const before = dumpAll(db);
+    const t = deleteTurns(db, [turn1], T0);
+    const m = deleteMessages(db, [d], T0 + 1000);
+    if (!m.ok || !t.ok) throw new Error("refused");
+    expect(m.id).toBe(t.id);
+    expect(undoDeletion(db, t.id, T0 + 2000)).toMatchObject({ ok: true, turns: 1 });
+    expect(dumpAll(db)).toEqual(before);
+  });
+
+  test("refused, nothing changed: a running turn, a pending row it wrote, a turn not there", () => {
+    const db = memDb();
+    const chat = ownerChatId(db);
+    ownerSays(db, "hello");
+    const turn = claimTurn(db, chat)!;
+    const before = dumpAll(db);
+    expect(deleteTurns(db, [turn.id], T0)).toEqual({ ok: false, refused: `Turn ${turn.id} is still running. Delete it once it has ended.` });
+    const out = enqueueOutbound(db, { chatId: chat, kind: "bot_message", payload: { text: "hi" }, idemKey: "t:1", turnId: turn.id })!;
+    finishTurn(db, turn.id, { status: "done" });
+    expect(deleteTurns(db, [turn.id], T0)).toEqual({ ok: false, refused: `#${out}, which turn ${turn.id} wrote, has not been sent yet. Delete the turn once it has gone out (or failed).` });
+    expect(deleteTurns(db, [999], T0)).toMatchObject({ ok: false, refused: expect.stringContaining("not here any more") });
+    expect(dumpAll(db).turns).toEqual(before.turns.map((t) => ({ ...(t as object), status: "done", ended_at: expect.any(String) })));
+    expect(db.$client.query("select count(*) as n from deletions").get()).toEqual({ n: 0 });
+  });
+
+  test("undo is refused under the same rules: a turn started since", () => {
+    const { db, chat, turn2 } = setup();
+    const r = deleteTurns(db, [turn2], T0);
+    if (!r.ok) throw new Error(r.refused);
+    ownerSays(db, "next");
+    claimTurn(db, chat);
+    expect(undoDeletion(db, r.id, T0 + 1000)).toEqual({ ok: false, refused: expect.stringContaining("started a turn in this chat since") });
+    expect(db.$client.query("select count(*) as n from turns where id = ?").get(turn2)).toEqual({ n: 0 });
+  });
+
+  test("the purge drops the stash, a prompt nothing else uses (one another turn uses stays) and pictures nothing names", () => {
+    const dir = tmp();
+    const { db, chat, turn1, turn2 } = setup(dir);
+    mkdirSync(join(dir, "media/transcript"), { recursive: true });
+    writeFileSync(join(dir, "media/transcript/abc.png"), "png");
+    old(join(dir, "media/transcript/abc.png"));
+    const shared = savePrompt(db, "shared prompt", []);
+    const own = savePrompt(db, "turn 1's own prompt", []);
+    db.$client.query("update turn_transcripts set prompt_hash = ? where turn_id = ?").run(own, turn1);
+    db.$client.query("update turn_transcripts set prompt_hash = ? where turn_id = ?").run(shared, turn2);
+    ownerSays(db, "a third turn");
+    const t3 = claimTurn(db, chat)!;
+    saveTranscript(db, t3.id, { promptHash: shared, input: [{ type: "text", text: "x" }], resumed: false });
+    finishTurn(db, t3.id, { status: "done" });
+    addStep(db, turn1, 3, { kind: "tool", name: "look_at", args: "{}", result: "a picture", callId: "call-l", status: "ok", images: [{ ref: "media/transcript/abc.png", mimeType: "image/png" }] });
+    const mark = deletionsMark(db, chat);
+    const r1 = deleteTurns(db, [turn1], T0);
+    expect(deletionsMark(db, chat)).not.toBe(mark);
+    // While it can be undone, the prompt and the picture stay, even through the transcripts' own pruning.
+    pruneTranscripts(db, new Date(0).toISOString());
+    expect(db.$client.query("select count(*) as n from prompt_texts where hash = ?").get(own)).toEqual({ n: 1 });
+    expect(purgeDeletions(db, dir, T0 + 1000)).toEqual({ deletions: 0, files: 0 });
+    const r2 = deleteTurns(db, [turn2], T0 + DELETE_UNDO_MS + 1);
+    if (!r1.ok || !r2.ok) throw new Error("refused");
+    expect(r2.id).not.toBe(r1.id); // the first window had closed
+    const purged = purgeDeletions(db, dir, T0 + 3 * DELETE_UNDO_MS);
+    expect(purged.deletions).toBe(2);
+    expect(existsSync(join(dir, "media/transcript/abc.png"))).toBe(false);
+    expect(existsSync(join(dir, "media/photo-a"))).toBe(false);
+    expect(db.$client.query("select hash from prompt_texts order by hash").all()).toEqual([{ hash: shared }]);
+    expect(stashed(db)).toEqual({ n: 0 });
+  });
+
+  test("a picture or a prompt another chat's deletion still holds (open, not due) is kept by this one's purge", () => {
+    const dir = tmp();
+    const db = memDb();
+    mkdirSync(join(dir, "media/transcript"), { recursive: true });
+    const pics = ["media/transcript/in-input.png", "media/transcript/in-step.png"];
+    for (const p of pics) {
+      writeFileSync(join(dir, p), "png");
+      old(join(dir, p));
+    }
+    const prompt = savePrompt(db, "a prompt both turns sent", []);
+    const a = turnIn(db, OWNER, prompt, pics);
+    const b = turnIn(db, 5005, prompt, pics);
+    expect(deleteTurns(db, [a], T0).ok).toBe(true);
+    // Another chat: another deletion, its window still open when the first is purged.
+    expect(deleteTurns(db, [b], T0 + 5000).ok).toBe(true);
+    expect(purgeDeletions(db, dir, T0 + DELETE_UNDO_MS + 1)).toEqual({ deletions: 1, files: 0 });
+    for (const p of pics) expect([p, existsSync(join(dir, p))]).toEqual([p, true]);
+    expect(db.$client.query("select count(*) as n from prompt_texts where hash = ?").get(prompt)).toEqual({ n: 1 });
+    // Then the second: nothing names them any more.
+    expect(purgeDeletions(db, dir, T0 + 5000 + DELETE_UNDO_MS + 1)).toEqual({ deletions: 1, files: 2 });
+    expect(db.$client.query("select count(*) as n from prompt_texts where hash = ?").get(prompt)).toEqual({ n: 0 });
+  });
+
+  test("a picture a live turn's step or input names survives the purge; one touched since the deletion is left to pruning", () => {
+    const dir = tmp();
+    const db = memDb();
+    mkdirSync(join(dir, "media/transcript"), { recursive: true });
+    const pics = ["media/transcript/in-input.png", "media/transcript/in-step.png"];
+    for (const p of pics) {
+      writeFileSync(join(dir, p), "png");
+      old(join(dir, p));
+    }
+    const a = turnIn(db, OWNER, null, pics);
+    turnIn(db, 5005, null, pics); // a live turn, in another chat, naming the same pictures
+    deleteTurns(db, [a], T0);
+    expect(purgeDeletions(db, dir, T0 + DELETE_UNDO_MS + 1)).toEqual({ deletions: 1, files: 0 });
+    for (const p of pics) expect(existsSync(join(dir, p))).toBe(true);
+
+    // Nothing names it, but a runner touched it after the delete (agent/transcript.ts imageRef: in use again, its
+    // step not written yet): left for pruneTranscriptMedia.
+    const db2 = memDb();
+    const t = turnIn(db2, OWNER, null, pics);
+    deleteTurns(db2, [t], T0);
+    const touched = new Date(T0 + 2000);
+    utimesSync(join(dir, pics[1]!), touched, touched);
+    expect(purgeDeletions(db2, dir, T0 + DELETE_UNDO_MS + 1)).toEqual({ deletions: 1, files: 1 });
+    expect(existsSync(join(dir, pics[0]!))).toBe(false);
+    expect(existsSync(join(dir, pics[1]!))).toBe(true);
+  });
+
+  test("each stash table holds every column of the table it stashes (a column added to one must be added to the other)", () => {
+    const db = memDb();
+    const cols = (t: string) => (db.$client.query(`select name from pragma_table_info('${t}')`).all() as { name: string }[]).map((r) => r.name).sort();
+    for (const [table, stash] of [
+      ["turns", "deleted_turns"],
+      ["turn_steps", "deleted_turn_steps"],
+      ["turn_transcripts", "deleted_turn_transcripts"],
+    ]) {
+      expect(cols(stash!).filter((c) => c !== "deletion_id")).toEqual(cols(table!));
+    }
+  });
+
+  test("the waker's mark moves on a turn delete that takes no message", () => {
+    const { db, chat, a, b, s, turn1 } = setup();
+    deleteMessages(db, [a, b, s], T0);
+    const r = deleteMessages(db, [], T0);
+    expect(r.ok).toBe(false);
+    const mark = deletionsMark(db, chat);
+    const t = deleteTurns(db, [turn1], T0 + 1000);
+    expect(t).toMatchObject({ ok: true, seqs: [] });
+    expect(deletionsMark(db, chat)).not.toBe(mark);
+  });
+});
+
+describe("deleting a turn from the console", () => {
+  test("its confirmation, with script (JSON, the label), the page of a deleted turn, and the undo", async () => {
+    const { db, chat, turn1, turn2 } = setup();
+    const confirm = await get(db, `/turns/${turn1}/delete?back=/chats/${chat}`);
+    expect(confirm).toContain(`Delete turn ${turn1}, with the 3 messages in it?`);
+    expect(confirm).toContain('action="/turns/delete"');
+    expect(confirm).toContain("2 messages, 1 reaction");
+    const res = await post(db, "/turns/delete", [["turn", String(turn1)]], { json: true });
+    expect(res.status).toBe(200);
+    const answer = (await res.json()) as { id: number; count: number; label: string; turnIds: number[]; seconds: number };
+    expect(answer).toMatchObject({ count: 3, label: `turn ${turn1} and its 3 messages`, turnIds: [turn1], seconds: 10 });
+    // The turn page is the plain page of a turn that is not there; the list beside it no longer names it.
+    const gone = await handleConsole(deps(db), new Request(`${BASE}/turns/${turn1}`, { headers: { [LOGIN_HEADER]: LOGIN } }));
+    expect(gone.status).toBe(404);
+    const page = await gone.text();
+    expect(page).toContain("This turn was deleted or does not exist.");
+    expect(page).not.toContain(`href="/turns/${turn1}"`);
+    expect(page).not.toContain("secret plan");
+    expect((await handleConsole(deps(db), new Request(`${BASE}/segments/${turn1}`, { headers: { [LOGIN_HEADER]: LOGIN } }))).status).not.toBe(500);
+    expect(await get(db, `/chats/${chat}`)).not.toContain(`data-turn="${turn1}"`);
+    // Turn 2's web_fetch result quotes it, and another tool's result stays as it was (as for messages): that one only.
+    expect((await get(db, `/turns/${turn2}`)).split("secret plan").length - 1).toBe(1);
+    // Again: refused, it is gone.
+    expect((await post(db, "/turns/delete", [["turn", String(turn1)]], { json: true })).status).toBe(409);
+    expect(await (await post(db, "/messages/undo", [["id", String(answer.id)]], { json: true })).json()).toEqual({ count: 3, turns: 1 });
+    expect(await get(db, `/turns/${turn1}`)).toContain("secret plan");
+  });
+
+  test("without script: 303 back to the turn's page, now the deleted page with the notice and its Undo", async () => {
+    const { db, turn1 } = setup();
+    const back = `/turns/${turn1}`;
+    const res = await post(db, "/turns/delete", [["turn", String(turn1)], ["back", back]]);
+    expect(res.status).toBe(303);
+    const loc = res.headers.get("location")!;
+    expect(loc).toMatch(new RegExp(`^${back}\\?n=[\\w-]+$`));
+    const page = await get(db, loc);
+    expect(page).toContain(`Deleted turn ${turn1} and its 3 messages.`);
+    expect(page).toContain("This turn was deleted or does not exist.");
+    const id = /name="id" value="(\d+)"/.exec(page)![1]!;
+    const undo = await post(db, "/messages/undo", [["id", id], ["back", back]]);
+    const after = await get(db, undo.headers.get("location")!);
+    expect(after).toContain("Put back the turn and 3 messages.");
+    expect(after).toContain(`Turn ${turn1}`);
+    // A running turn: the confirmation says why instead of offering the button, and the write refuses.
+    const db2 = memDb();
+    ownerSays(db2, "hi");
+    const running = claimTurn(db2, ownerChatId(db2))!;
+    const c2 = await get(db2, `/turns/${running.id}/delete`);
+    expect(c2).toContain("is still running");
+    expect(c2).not.toContain('action="/turns/delete"');
+    const refused = await post(db2, "/turns/delete", [["turn", String(running.id)], ["back", `/turns/${running.id}`]]);
+    expect(await get(db2, refused.headers.get("location")!)).toContain("Not deleted: Turn");
+  });
+
+  test("a turn whose messages another turn also answered (a retry after a failure): the confirmation names it", async () => {
+    const db = memDb();
+    const chat = ownerChatId(db);
+    ownerSays(db, "book the train");
+    const failed = claimTurn(db, chat)!;
+    finishTurn(db, failed.id, { status: "failed", error: "API error 500" });
+    const retry = claimTurn(db, chat)!;
+    finishTurn(db, retry.id, { status: "done" });
+    expect(turnDeletionPlan(db, failed.id)!.shared).toEqual([retry.id]);
+    expect(turnDeletionPlan(db, retry.id)!.shared).toEqual([failed.id]);
+    expect(await get(db, `/turns/${failed.id}/delete`)).toContain(`Some of these messages were also answered by turn ${retry.id}: they go from its input too.`);
+  });
+
+  test("pages that follow a pointer to a deleted turn answer without a 500", async () => {
+    const { db, chat, turn1 } = setup();
+    createSchedule(db, { chatId: chat, note: "set by the deleted turn", cron: "0 9 * * *", timeZone: TZ, turnId: turn1 });
+    db.$client.query("insert into model_switches (chat_id, from_model, to_model, turn_id, mode) values (?, 'a', 'b', ?, 'lossless')").run(chat, turn1);
+    deleteTurns(db, [turn1], T0);
+    for (const path of [`/turns/${turn1}`, `/turns/${turn1}/delete`, `/segments/${turn1}`, `/conversations/${turn1}`, `/chats/${chat}`, `/chats/${chat}/settings/automation`, `/chats/${chat}/settings`, "/turns", "/home"]) {
+      const r = await handleConsole(deps(db), new Request(`${BASE}${path}`, { headers: { [LOGIN_HEADER]: LOGIN } }));
+      expect([path, r.status < 500]).toEqual([path, true]);
+    }
   });
 });

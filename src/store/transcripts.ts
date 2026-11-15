@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, eq, inArray, isNotNull, lt, notInArray, sql } from "drizzle-orm";
 import type { Db } from "./db.ts";
-import { kv, promptTexts, turns, turnSteps, turnTranscripts, type TranscriptPart } from "./schema.ts";
+import { deletedTurnTranscripts, kv, promptTexts, turns, turnSteps, turnTranscripts, type TranscriptPart } from "./schema.ts";
 
 /**
  * Turn transcripts in the store (schema.ts `prompt_texts`, `turn_transcripts`, `turn_steps`): written by
@@ -166,6 +166,12 @@ export function pruneTranscripts(db: Db, before: string, batch = 500): Pruned {
     if (ids.length < batch) break;
   }
   const used = db.selectDistinct({ h: turnTranscripts.promptHash }).from(turnTranscripts).where(isNotNull(turnTranscripts.promptHash));
-  out.prompts = db.delete(promptTexts).where(notInArray(promptTexts.hash, used)).returning({ h: promptTexts.hash }).all().length;
+  // A deleted turn still waiting out its undo (store/deletions.ts) keeps its prompt: the undo puts it back.
+  const stashed = db.selectDistinct({ h: deletedTurnTranscripts.promptHash }).from(deletedTurnTranscripts).where(isNotNull(deletedTurnTranscripts.promptHash));
+  out.prompts = db
+    .delete(promptTexts)
+    .where(and(notInArray(promptTexts.hash, used), notInArray(promptTexts.hash, stashed)))
+    .returning({ h: promptTexts.hash })
+    .all().length;
   return out;
 }

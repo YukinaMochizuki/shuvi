@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, max, ne, notInArray, or } from "drizzle-orm";
 import type { Db } from "./db.ts";
-import { asksForTurn, chatConversations, chatEvents, chats, kv, OUTBOUND_KINDS, TRIGGER_KINDS } from "./schema.ts";
+import { asksForTurn, chatConversations, chatEvents, chats, deletedEvents, kv, OUTBOUND_KINDS, spentIdemKeys, TRIGGER_KINDS } from "./schema.ts";
 
 /**
  * Reads and writes on `chat_events`, `chats` and `kv`. Every write that must happen once is an
@@ -356,6 +356,7 @@ export function markCommandDone(db: Db, seq: number, note: string): void {
  * event is a trigger. Keyed on the approval, so it is recorded once.
  */
 export function recordApprovalEvent(db: Db, chatId: number, payload: ApprovalPayload): void {
+  if (idemKeySpent(db, `approval:${payload.approvalId}`)) return;
   db.insert(chatEvents)
     .values({ chatId, kind: "approval", payload: payload as unknown as Record<string, unknown>, idemKey: `approval:${payload.approvalId}` })
     .onConflictDoNothing()
@@ -363,9 +364,19 @@ export function recordApprovalEvent(db: Db, chatId: number, payload: ApprovalPay
 }
 
 /**
+ * Whether exactly-once key `key` was used by a row the owner has since deleted (store/deletions.ts): still waiting
+ * out its undo in `deleted_events`, or purged, its key kept in `spent_idem_keys`. A write with it is dropped, as if
+ * the row were still there. Through drizzle, so a transaction (`tx`, which has no `$client`) can ask too.
+ */
+export function idemKeySpent(db: Pick<Db, "select">, key: string): boolean {
+  return !!(db.select({ k: spentIdemKeys.key }).from(spentIdemKeys).where(eq(spentIdemKeys.key, key)).get() ?? db.select({ s: deletedEvents.seq }).from(deletedEvents).where(eq(deletedEvents.idemKey, key)).get());
+}
+
+/**
  * Record an event the FRAMEWORK perceived (a schedule come due, a job's result, an inbound POST). `idemKey`
  * makes it exactly-once: a second write with the same key is dropped (an inbound POST without an
- * Idempotency-Key has none). Returns its seq, or null when the key was already recorded.
+ * Idempotency-Key has none), also after the first was deleted (`idemKeySpent`). Returns its seq, or null when the
+ * key was already recorded.
  */
 export function recordFrameworkEvent(
   db: Db,
@@ -374,6 +385,7 @@ export function recordFrameworkEvent(
     | { chatId: number; kind: "job_done"; payload: JobDonePayload; idemKey: string }
     | { chatId: number; kind: "external"; payload: ExternalPayload; idemKey: string | null },
 ): number | null {
+  if (e.idemKey && idemKeySpent(db, e.idemKey)) return null;
   const rows = db
     .insert(chatEvents)
     .values({ chatId: e.chatId, kind: e.kind, payload: e.payload as unknown as Record<string, unknown>, idemKey: e.idemKey })

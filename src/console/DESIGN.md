@@ -93,9 +93,12 @@ page marks those turns. `j` / `k` move between segments.
 - **/settings**: the model catalog (below).
 - **Deleting messages**, on every page that shows bubbles (a chat's log, a segment, a conversation, a turn's
   Conversation tab): see "Deleting messages" below.
+- **Deleting a turn**, from a turn's divider in a chat's log and from the turn's page; **/turns/:id/delete** is its
+  confirmation as a page of its own (no script): see "Deleting a turn" below. A turn (segment, conversation) that is
+  not there, deleted or never, is a plain page saying so beside the list, 404.
 - **/login**, **403**, **404**: the same shell, a small centred card.
 
-Settings, Home, a chat's settings and deleting messages are the console's only ways to change anything.
+Settings, Home, a chat's settings and deleting messages and turns are the console's only ways to change anything.
 
 ## Live
 
@@ -290,6 +293,45 @@ markup, so a page still reads when its stylesheet does not load.
   it for 9 seconds. [Undo]"), shown once. No `<style>` in a `<noscript>`: htmx parses the pages it swaps in
   with scripting off, so the style would apply with script on.
 
+## Deleting a turn
+
+```
+  ───────── ● turn 22 · done · 4 ms · $0.0124  → model (⋯) ─────────   a divider: its ⋯ faint until hovered
+                                                    Delete turn…         (shown faintly without script, and
+                                                                          on a touch screen: no long press)
+  ┌ Delete turn 22, with the 6 messages in it? ─────────────────────┐   the Confirm, under the divider (the
+  │ It goes from the chat's log, the console, her history…          │   turn page: under its header)
+  │ ┌ IT ANSWERED  4 messages · Carol 2, Alice 1, Bob 1 ──────────┐ │   messages first: one line each, who,
+  │ │ Carol Example  it was busy on Sunday…          21:50 #47    │ │   what, when (8 shown, "and N more")
+  │ │ SHE WROTE  2 messages, 1 reaction                           │ │
+  │ │ HER RECORD OF IT  input and system prompt · 2 thinking …    │ │
+  │ │ 2 tool calls: set_reminder, say                             │ │
+  │ └─────────────────────────────────────────────────────────────┘ │
+  │ Not undone: what the turn did …, nor what her conversation …    │
+  │ [Delete turn 22]  Cancel   You can undo it for 10 seconds.      │   refused: the reason in pink, Back
+  └─────────────────────────────────────────────────────────────────┘
+  [ Deleted turn 22 and its 6 messages   Undo ]                         the snackbar, as for messages
+```
+
+- The divider's "⋯" sits in its line after the label; its menu's one item, "Delete turn…", is a link to the
+  confirmation (`/turns/<id>/delete?back=…`). The turn page has "Delete this turn" at the end of its title row, a
+  quiet red-outlined Btn, on every tab.
+- With script the confirmation's panel is fetched and opened in place (one at a time; Cancel closes it); its
+  Delete posts in the background. In a chat's log the divider and every row the turn answered or wrote leave at
+  once (hidden, kept for the Undo) and the snackbar shows the server's words for the deletion ("Deleted turn 22 and
+  its 6 messages", "…, and 2 more messages" when messages deleted in a row joined it). On the turn's own page the
+  page is swapped for what a load now gives, the plain page of a turn that is not there with the list beside it
+  (no longer naming it), the snackbar on it; its Undo loads the turn page again.
+- ONE COUNT. The confirmation's "N messages", the snackbar's and the notice's are the same number
+  (store/deletions.ts `turnMessageCount`): what the turn answered plus what it wrote, her reactions not counted (the
+  confirmation names them apart, under what she wrote).
+- Without script: the confirmation page, a plain form; the write comes back to `back` with the Notice and its
+  Undo. From the turn's page, that is the page of a turn that is not there, carrying the Notice.
+- Other tabs (live.ts): the turn's divider and rows leave a chat's log, its part leaves a segment or a
+  conversation; a turn's page, or a segment or conversation named by it, is swapped in place for the plain page
+  (offered with a LiveBar instead while that tab holds an Undo or a selection). That plain page is live while the
+  undo can bring the turn back, and swaps back on the Undo.
+
 ## Home
 
 Three panes, full height, each scrolling on its own (home.ts):
@@ -388,7 +430,9 @@ are GitHub's, as in the diff.
 | Listing | a provider's `/models`: state line, then rows (model, context window, Add or ✓) |
 | Pickable | a deletable bubble: its check slot (left, while selecting), the bubble, its ⋯ menu (top right, on hover) |
 | SelPill | while selecting: "3 selected · Delete · ✕", a refusal under it; fixed at the bottom centre |
-| Snackbar | after a delete: "Deleted 3 · Undo", a thin line running out with the 10 s; fixed at the bottom left |
+| Snackbar | after a delete: "Deleted 3 · Undo" ("Deleted turn 22 and its 6 messages · Undo"), a thin line running out with the 10 s; fixed at the bottom left |
+| TurnMenu | a chat-log divider's ⋯ (in the line, after the label): "Delete turn…" |
+| TurnConfirm | a Confirm listing what a turn delete takes: messages answered and written (one line each), her record, what is not undone |
 | LivePart | a part the live stream keeps current: a wrapper with no box (`.lb`), its name and hash |
 | LiveNew | "↓ 3 new", while scrolled up on a live page: a small pill at the bottom centre that jumps to the end |
 | LiveBar | a live page's notice with its button ("New activity · Show"): a pill fixed under the top bar |

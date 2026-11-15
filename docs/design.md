@@ -126,6 +126,19 @@ Everything is in one SQLite file (WAL mode).
   turn past a message): put back, it would sit as input never seen, or behind the cursor, never answered.
   Then the server purges it, with any `media/` file nothing kept still names, and a purge due while the
   server was down runs at its next start.
+- **Deleting a turn**: the owner can delete a whole turn from the console, so that it is gone entirely: its
+  record (`turns`, `turn_steps`, `turn_transcripts`, moved into `deleted_turns`, `deleted_turn_steps`,
+  `deleted_turn_transcripts`), the messages it wrote (her messages, stickers, files and reactions), and the
+  messages it answered (every trigger event in its input range, in a group other people's chatter too). Those
+  messages go through the message delete above, so every scrub applies. It joins the chat's open deletion
+  (one Undo for messages and turns deleted in a row), undoes under the same rules, and its purge also drops a
+  system prompt (`prompt_texts`) no other turn uses and the turn's pictures nothing else names. A running
+  turn, and a turn with a message still to send, are refused. Not undone: what the turn did (home/ commits,
+  schedules, jobs) and what the model's conversation holds. Pointers to its id stay as they are
+  (`model_switches.turn_id`, `schedules.created_turn_id`, alerts' links, a commit's `Turn:` trailer); the
+  console answers them with "this turn was deleted or does not exist". Exactly-once keys survive any delete: a
+  deleted row's `idem_key` blocks a new write with it while it waits out its undo, and after the purge the key
+  alone is kept (`spent_idem_keys`), so a webhook retried with the same Idempotency-Key is not recorded again.
 
 `home/` is a second data directory, next to the SQLite file and outside the code repository:
 

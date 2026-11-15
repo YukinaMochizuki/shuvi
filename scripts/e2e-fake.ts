@@ -80,6 +80,8 @@ let afterDelete = "";
 /** Its tools' names, and those of the request that opened the clean conversation after `/newclean` (section 9). */
 let afterDeleteTools: string[] = [];
 let afterClean = { messages: "", system: "", tools: [] as string[] };
+/** The messages of the request that opened a fresh conversation after a whole turn was deleted (section 8b). */
+let afterTurnDelete = "";
 /** The system prompt of each request of the memory section (4), by step. */
 const memorySystems: Record<string, string> = {};
 const anthropic = Bun.serve({
@@ -98,6 +100,12 @@ const anthropic = Bun.serve({
     const system = JSON.stringify(body.system ?? "");
     // Section 8: a word to delete, then what a fresh conversation is given after `/new`. First, since that fresh
     // conversation's opening carries the earlier sections' words as history, in its last message.
+    // Section 8b, first too: the fresh conversation after it carries section 8's words as history.
+    if (latest.includes("what was the passcode")) {
+      afterTurnDelete = JSON.stringify(body.messages);
+      return stream(`msg_${modelRequests}`, [{ type: "text", text: "Which passcode?" }], "end_turn");
+    }
+    if (latest.includes("the passcode is rambutan")) return stream(`msg_${modelRequests}`, [{ type: "text", text: "Kept it: rambutan." }], "end_turn");
     if (latest.includes("a clean slate now")) {
       afterClean = { messages: JSON.stringify(body.messages), system, tools: (body.tools ?? []).map((t) => t.name) };
       return stream(`msg_${modelRequests}`, [{ type: "text", text: "Clean slate." }], "end_turn");
@@ -363,13 +371,40 @@ check(!afterDelete.includes("mangosteen"), "and neither the deleted message nor 
 await until("the purge", () => (db.$client.query("select count(*) as n from deletions").get() as { n: number }).n === 0, 20_000);
 check((db.$client.query("select count(*) as n from deleted_events").get() as { n: number }).n === 0, "after its 10 seconds the server purged the deletion");
 
-// ---- 9. /newclean: a clean conversation, with nothing of before and no looking back ---------------------------
+// ---- 8b. a whole turn deleted from the console: its record, what it answered and what it wrote -------------------
 await until("that turn to close", lastTurnClosed, 15_000);
 check(afterDeleteTools.includes("mcp__shuvi__read_chat") && afterDeleteTools.includes("mcp__shuvi__search_chats"), "an ordinary conversation is offered search_chats and read_chat");
-tg.updates.push(dmUpdate(12, "/newclean"));
-await until("the /newclean acknowledgement", () => tg.sent("setMessageReaction").length >= 4);
+tg.updates.push(dmUpdate(12, "the passcode is rambutan"));
+await until("her answer", () => texts().includes("Kept it: rambutan."));
+await until("that turn to close", lastTurnClosed, 15_000);
+const codeTurn = (db.$client.query("select id from turns order by id desc limit 1").get() as { id: number }).id;
+const confirmHtml = await (await consoleGet(`/turns/${codeTurn}/delete?back=/chats/1`, "owner@example.com")).text();
+check(confirmHtml.includes(`Delete turn ${codeTurn}, with the 2 messages in it?`) && confirmHtml.includes("rambutan") && confirmHtml.includes('action="/turns/delete"'), "the console's confirmation lists what deleting the turn takes");
+const turnDel = await fetch(`${origin}/turns/delete`, {
+  method: "POST",
+  headers: { "Tailscale-User-Login": "owner@example.com", origin, accept: "application/json" },
+  body: new URLSearchParams([["csrf", csrf], ["turn", String(codeTurn)]]),
+});
+const turnAnswer = (await turnDel.json()) as { label?: string; count?: number };
+check(turnDel.status === 200 && turnAnswer.label === `turn ${codeTurn} and its 2 messages` && turnAnswer.count === 2, `the console deletes the turn (${JSON.stringify(turnAnswer)})`);
+const gonePage = await consoleGet(`/turns/${codeTurn}`, "owner@example.com");
+check(gonePage.status === 404 && (await gonePage.text()).includes("This turn was deleted or does not exist."), "its page is now the page of a turn that is not there");
+check(!(await (await consoleGet("/chats/1", "owner@example.com")).text()).includes("rambutan"), "and the chat's page shows none of it");
+tg.updates.push(dmUpdate(13, "/new"));
+await until("the /new acknowledgement", () => tg.sent("setMessageReaction").length >= 4);
+tg.updates.push(dmUpdate(14, "what was the passcode?"));
+await until("the fresh conversation's answer", () => texts().includes("Which passcode?"));
+check(afterTurnDelete.includes("(A new conversation. The last"), "a fresh conversation opened with the chat's recent messages");
+check(!afterTurnDelete.includes("rambutan"), "and none of the deleted turn's messages is among them");
+await until("the purge", () => (db.$client.query("select count(*) as n from deletions").get() as { n: number }).n === 0, 20_000);
+check((db.$client.query("select (select count(*) from deleted_turns) + (select count(*) from deleted_turn_steps) + (select count(*) from deleted_turn_transcripts) as n").get() as { n: number }).n === 0, "after its 10 seconds the server purged the turn's stash");
+
+// ---- 9. /newclean: a clean conversation, with nothing of before and no looking back ---------------------------
+await until("that turn to close", lastTurnClosed, 15_000);
+tg.updates.push(dmUpdate(15, "/newclean"));
+await until("the /newclean acknowledgement", () => tg.sent("setMessageReaction").length >= 5);
 check(JSON.stringify(tg.sent("setMessageReaction").at(-1)!.reaction) === JSON.stringify([{ type: "emoji", emoji: "👌" }]), "/newclean is acknowledged with 👌");
-tg.updates.push(dmUpdate(13, "a clean slate now?"));
+tg.updates.push(dmUpdate(16, "a clean slate now?"));
 await until("the clean conversation's answer", () => texts().includes("Clean slate."));
 check(!afterClean.messages.includes("(A new conversation. The last") && !afterClean.messages.includes("what was the word") && !afterClean.messages.includes("Which word?"), "the clean conversation opened with none of the chat's earlier messages");
 check(!afterClean.tools.includes("mcp__shuvi__read_chat") && !afterClean.tools.includes("mcp__shuvi__search_chats") && afterClean.tools.includes("mcp__shuvi__say"), "and is offered neither search_chats nor read_chat");

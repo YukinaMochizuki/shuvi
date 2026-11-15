@@ -25,10 +25,16 @@ import { CHAT_COLUMNS, turnWhere, type ConsoleChat, type TurnFilter } from "./qu
  * before the change and went on after it is one conversation: the first recorded turn's `resumed` joins it.
  *
  * Conversations and segments are named by their first turn's id: new turns only extend the latest or start
- * another, and turns are never deleted. Computed in SQL with window functions (one pass over the turns per
- * query), not stored, so the rule can change without touching data. The list, which needs the grouping
- * several times, works it out once per request into a TEMP table: private to the connection, dropped after,
- * never written to the database file.
+ * another. A turn the owner DELETES from the console (store/deletions.ts `deleteTurns`) is simply not there: the
+ * grouping is worked out again without it. Deleting a segment's or a conversation's first turn RENAMES it (its id
+ * moves to its next turn; the old address is the plain page of one that is not there), and a conversation whose
+ * opener is gone loses that turn's recorded `opening`: its label falls back to what is inferred from the log as it
+ * is (e.g. "new (inferred)" while the `/new` command that began it is still there). Accepted: the deleted turn is
+ * meant to leave no mark. An undo puts it back, and its names with it.
+ *
+ * Computed in SQL with window functions (one pass over the turns per query), not stored, so the rule can change
+ * without touching data. The list, which needs the grouping several times, works it out once per request into a
+ * TEMP table: private to the connection, dropped after, never written to the database file.
  */
 
 export const SEGMENT_GAP_MS = 30 * 60_000;

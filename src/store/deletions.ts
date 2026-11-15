@@ -1,8 +1,9 @@
 import type { Database } from "bun:sqlite";
-import { existsSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 // The one line a reply renders as (a pure function): the scrub writes exactly what render.ts would.
 import { CALLED_PREFIX, calledHeading, replyLine, unreadNote } from "../agent/render.ts";
+import { TRANSCRIPT_MEDIA } from "../agent/transcript.ts";
 import type { Db } from "./db.ts";
 import type { BotMessagePayload, MessagePayload } from "./events.ts";
 import { mediaInUse } from "./media.ts";
@@ -53,7 +54,44 @@ import { TRIGGER_KINDS, type TranscriptPart } from "./schema.ts";
  * Pointers to a deleted seq (`turns.trigger_seq`, a reaction's `targetSeq`, a reply's `replyToSeq`) are left
  * as they are: every reader that follows one finds no row and goes on (the sender, triggers.ts, the console).
  * The waker's trigger memo starts over on any delete, undo or purge in the chat (`deletionsMark`).
+ *
+ * A WHOLE TURN (`deleteTurns`, the console's "Delete turn"): it goes entirely. Three things, in one IMMEDIATE
+ * transaction: its record (`turns`, `turn_steps`, `turn_transcripts`), MOVED into `deleted_turns`,
+ * `deleted_turn_steps`, `deleted_turn_transcripts` (every column, ids as they were); the events it WROTE (its
+ * outbound rows: messages, stickers, files, reactions); and the events it ANSWERED (every trigger event in its
+ * `(from_seq, to_seq]`, anyone's: in a group, the chatter around the mention too). The events take the message
+ * path above (`moveEvents`), so every scrub applies to them (replies' quotes, other turns' transcript lines,
+ * read_chat / search_chats results); each is marked with the turn that took it (`deleted_events.by_turn`), so the
+ * console counts a turn's messages one way everywhere (`turnMessageCount`: answered + written, her reactions not
+ * counted). Its own rows move first, so no scrub touches them and the undo puts them back as they were.
+ *   - It JOINS the chat's open deletion like any delete: one undo puts back messages and turns deleted in a row.
+ *     The undo puts the turns back before restoring any scrub (one made before the turn was deleted is then found
+ *     in place), and is refused under the same rules.
+ *   - REFUSED, with a reason: a turn still running, a turn with an outbound row still `pending`, and whatever the
+ *     message path refuses for its events.
+ *   - The PURGE drops the stash, then the `prompt_texts` rows its transcripts named that nothing else names (a
+ *     prompt is shared by hash; pruneTranscripts keeps one a stashed transcript names), and the files under
+ *     `media/` (its input's and its steps' pictures too) nothing still names.
+ *   - NOT touched, as for messages: the model's conversations, Telegram, backups; nor what the turn DID (home/
+ *     commits, schedules it set, jobs it started). Pointers to its id are left as they are
+ *     (`model_switches.turn_id`, `schedules.created_turn_id`, alerts' `turnId`, a home commit's `Turn:` trailer,
+ *     `jobs`): the console answers any of them with "this turn was deleted or does not exist", never a 500.
+ *   - EXACTLY-ONCE KEYS survive a delete. A deleted row's `idem_key` (an inbound POST's Idempotency-Key, a
+ *     schedule's firing, a job's result, an approval's answer, her outbound rows') blocks a new write with it while
+ *     the row waits out its undo (in `deleted_events`), and after the purge the key alone is kept in
+ *     `spent_idem_keys` (store/events.ts `idemKeySpent`, checked by `recordFrameworkEvent` and
+ *     `recordApprovalEvent`). So a webhook retried after its event was deleted is not recorded again and starts no
+ *     turn. A scheduled or job_done event was already safe through its own table; the key changes nothing for it.
+ *   - A turn whose range another turn shares (it answered some of the same messages again: a retry after a failure,
+ *     or the turn after a `/stop`, whose cursor stopped at `stop_seq`): they go, and the other turn's input is
+ *     scrubbed of them as any deleted message's would be. The confirmation names that turn.
  */
+
+/**
+ * A transcript picture touched this long before its deletion was made, or since, is not removed by the purge: it may
+ * be in use again, its step not written yet (see `purgeDeletions`).
+ */
+export const REUSE_GRACE_MS = 60_000;
 
 /** How long a delete can be undone. */
 export const DELETE_UNDO_MS = 10_000;
@@ -61,7 +99,7 @@ export const DELETE_UNDO_MS = 10_000;
 export const DELETABLE_KINDS: readonly string[] = ["message", "bot_message", "bot_sticker", "bot_file"];
 
 export type DeleteResult = { ok: true; id: number; count: number; purgeAt: string } | { ok: false; refused: string };
-export type UndoResult = { ok: true; count: number } | { ok: false; refused: string };
+export type UndoResult = { ok: true; count: number; turns: number } | { ok: false; refused: string };
 
 interface Row {
   seq: number;
@@ -175,35 +213,48 @@ export function deleteMessages(db: Db, seqs: readonly number[], now = Date.now()
     if (picked.some((r) => r.chat_id !== chatId)) return { ok: false, refused: "Those messages are from more than one chat. Delete them one chat at a time." };
     const odd = picked.find((r) => !DELETABLE_KINDS.includes(r.kind));
     if (odd) return { ok: false, refused: `#${odd.seq} is a ${odd.kind.replace("_", " ")}, which cannot be deleted.` };
-    // Her reactions to them go with them.
-    const reactions = (
-      client
-        .query(`select ${COLUMNS} from chat_events where chat_id = ? and kind = 'bot_reaction' and json_extract(payload, '$.targetSeq') in (${marks(wanted.length)})`)
-        .all(chatId, ...wanted) as Row[]
-    ).filter((r) => !wanted.includes(r.seq));
-    const rows = [...picked, ...reactions].sort((a, b) => a.seq - b.seq);
+    const rows = withReactions(client, chatId, picked);
     const why = refusal(client, chatId, rows);
     if (why) return { ok: false, refused: why };
-
-    const purgeAt = new Date(now + DELETE_UNDO_MS).toISOString();
-    const open = client.query("select id from deletions where chat_id = ? and purge_at > ? order by id desc limit 1").get(chatId, new Date(now).toISOString()) as { id: number } | null;
-    let id: number;
-    if (open) {
-      id = open.id;
-      client.query("update deletions set purge_at = ? where id = ?").run(purgeAt, id);
-    } else {
-      const chat = client.query("select cursor_seq as c, (select coalesce(max(id), 0) from turns where chat_id = ?1) as t from chats where id = ?1").get(chatId) as { c: number; t: number };
-      id = Number(
-        (client.query("insert into deletions (chat_id, created_at, purge_at, cursor_seq, last_turn_id) values (?, ?, ?, ?, ?) returning id").get(chatId, new Date(now).toISOString(), purgeAt, chat.c, chat.t) as { id: number }).id,
-      );
-    }
-    const all = rows.map((r) => r.seq);
-    client.query(`insert into deleted_events (deletion_id, ${COLUMNS}) select ?, ${COLUMNS} from chat_events where seq in (${marks(all.length)})`).run(id, ...all);
-    client.query(`delete from chat_events_fts where rowid in (${marks(all.length)})`).run(...all);
-    client.query(`delete from chat_events where seq in (${marks(all.length)})`).run(...all);
-    scrub(client, id, chatId, rows);
+    const { id, purgeAt } = openDeletion(client, chatId, now);
+    moveEvents(client, id, chatId, rows);
     return { ok: true, id, count: countOf(client, id), purgeAt };
   }).immediate();
+}
+
+/** `rows` and her reactions to them (any turn's), which go with them; in seq order. */
+function withReactions(client: Database, chatId: number, rows: Row[]): Row[] {
+  const seqs = rows.map((r) => r.seq);
+  if (!seqs.length) return [];
+  const reactions = (
+    client.query(`select ${COLUMNS} from chat_events where chat_id = ? and kind = 'bot_reaction' and json_extract(payload, '$.targetSeq') in (${marks(seqs.length)})`).all(chatId, ...seqs) as Row[]
+  ).filter((r) => !seqs.includes(r.seq));
+  return [...rows, ...reactions].sort((a, b) => a.seq - b.seq);
+}
+
+/** The chat's open deletion, its window started again; or a new one. */
+function openDeletion(client: Database, chatId: number, now: number): { id: number; purgeAt: string } {
+  const purgeAt = new Date(now + DELETE_UNDO_MS).toISOString();
+  const open = client.query("select id from deletions where chat_id = ? and purge_at > ? order by id desc limit 1").get(chatId, new Date(now).toISOString()) as { id: number } | null;
+  if (open) {
+    client.query("update deletions set purge_at = ? where id = ?").run(purgeAt, open.id);
+    return { id: open.id, purgeAt };
+  }
+  const chat = client.query("select cursor_seq as c, (select coalesce(max(id), 0) from turns where chat_id = ?1) as t from chats where id = ?1").get(chatId) as { c: number; t: number };
+  const id = Number(
+    (client.query("insert into deletions (chat_id, created_at, purge_at, cursor_seq, last_turn_id) values (?, ?, ?, ?, ?) returning id").get(chatId, new Date(now).toISOString(), purgeAt, chat.c, chat.t) as { id: number }).id,
+  );
+  return { id, purgeAt };
+}
+
+/** Move `rows` out of the log into deletion `id`, and scrub their copies elsewhere (the header). */
+function moveEvents(client: Database, id: number, chatId: number, rows: Row[]): void {
+  if (!rows.length) return;
+  const all = rows.map((r) => r.seq);
+  client.query(`insert into deleted_events (deletion_id, ${COLUMNS}) select ?, ${COLUMNS} from chat_events where seq in (${marks(all.length)})`).run(id, ...all);
+  client.query(`delete from chat_events_fts where rowid in (${marks(all.length)})`).run(...all);
+  client.query(`delete from chat_events where seq in (${marks(all.length)})`).run(...all);
+  scrub(client, id, chatId, rows);
 }
 
 /** How many messages deletion `id` holds (her reactions, which went with them, not counted). */
@@ -426,25 +477,182 @@ function scrubStep(client: Database, id: number, stepId: number, original: StepC
   stash(client, id, "step", stepId, JSON.stringify(original), JSON.stringify(scrubbed));
 }
 
+// ---- deleting a turn: what goes -------------------------------------------------------------------------
+
+/** One event a turn delete would take, as the confirmation lists it. */
+export interface TurnDeletionEvent {
+  seq: number;
+  kind: string;
+  payload: string;
+  status: string | null;
+  at: string;
+}
+
+/** What deleting turn `turnId` would take (the console's confirmation), and why it may not go now. */
+export interface TurnDeletionPlan {
+  turnId: number;
+  chatId: number;
+  status: string;
+  /** The events it answered: the trigger events in its input range `(from_seq, to_seq]`, anyone's. */
+  answered: TurnDeletionEvent[];
+  /** What it wrote: its outbound rows (messages, stickers, files, reactions). */
+  wrote: TurnDeletionEvent[];
+  /** Its record: the timeline's steps by kind, its tool calls by name (most first), and whether it has a transcript. */
+  steps: { thinking: number; text: number; tool: number; append: number; note: number; compaction: number };
+  tools: { name: string; n: number }[];
+  transcript: boolean;
+  /**
+   * Other turns that also answered some of the same events (a retry after a failure; the turn after a stopped one,
+   * whose range starts where the stop left the cursor): they lose them from their input.
+   */
+  shared: number[];
+  /** Why it may not be deleted now, or null. */
+  refused: string | null;
+}
+
+/** What deleting turn `turnId` would take, or undefined when there is no such turn. Reads only. */
+export function turnDeletionPlan(db: Db, turnId: number): TurnDeletionPlan | undefined {
+  const client = db.$client;
+  const t = client.query("select id, chat_id, status, from_seq, to_seq from turns where id = ?").get(turnId) as { id: number; chat_id: number; status: string; from_seq: number; to_seq: number } | null;
+  if (!t) return undefined;
+  const kinds = TRIGGER_KINDS as readonly string[];
+  const cols = "seq, kind, payload, status, at";
+  const answered = client.query(`select ${cols} from chat_events where chat_id = ? and seq > ? and seq <= ? and kind in (${marks(kinds.length)}) order by seq`).all(t.chat_id, t.from_seq, t.to_seq, ...kinds) as TurnDeletionEvent[];
+  const wrote = client.query(`select ${cols} from chat_events where turn_id = ? order by seq`).all(t.id) as TurnDeletionEvent[];
+  const steps = { thinking: 0, text: 0, tool: 0, append: 0, note: 0, compaction: 0 };
+  for (const r of client.query("select kind, count(*) as n from turn_steps where turn_id = ? group by kind").all(t.id) as { kind: keyof typeof steps; n: number }[]) steps[r.kind] = r.n;
+  const tools = (client.query("select name, count(*) as calls from turn_steps where turn_id = ? and kind = 'tool' group by name order by calls desc, min(n)").all(t.id) as { name: string; calls: number }[]).map((r) => ({ name: r.name, n: r.calls }));
+  const transcript = !!client.query("select 1 from turn_transcripts where turn_id = ?").get(t.id);
+  const shared = answered.length
+    ? (client.query("select id from turns where chat_id = ? and id <> ? and from_seq < ? and to_seq >= ? order by id").all(t.chat_id, t.id, answered.at(-1)!.seq, answered[0]!.seq) as { id: number }[])
+        .map((r) => r.id)
+        .filter((id) => answered.some((e) => client.query("select 1 from turns where id = ? and ? > from_seq and ? <= to_seq").get(id, e.seq, e.seq)))
+    : [];
+  const pending = wrote.find((r) => r.status === "pending");
+  const refused =
+    t.status === "running"
+      ? `Turn ${t.id} is still running. Delete it once it has ended.`
+      : pending
+        ? `#${pending.seq}, which turn ${t.id} wrote, has not been sent yet. Delete the turn once it has gone out (or failed).`
+        : null;
+  return { turnId: t.id, chatId: t.chat_id, status: t.status, answered, wrote, steps, tools, transcript, shared, refused };
+}
+
+/**
+ * How many MESSAGES a turn delete takes, by the one definition the console uses everywhere (the confirmation, the
+ * snackbar, the no-script notice): every row it answered and every row it wrote, her reactions not counted (they are
+ * said apart). The same rows `deleteTurns` marks `by_turn`.
+ */
+export function turnMessageCount(plan: Pick<TurnDeletionPlan, "answered" | "wrote">): number {
+  return plan.answered.length + plan.wrote.filter((e) => e.kind !== "bot_reaction").length;
+}
+
+export type TurnDeleteResult = { ok: true; id: number; purgeAt: string; seqs: number[] } | { ok: false; refused: string };
+
+/** The columns of the stashed turn tables, as their sources have them (a column added to one and not the other fails loudly). */
+const columnsOf = (client: Database, table: string) => (client.query(`select name from pragma_table_info('${table}')`).all() as { name: string }[]).map((r) => r.name).join(", ");
+
+/**
+ * Delete turns `turnIds` (one chat's) entirely: their records (`turns`, `turn_steps`, `turn_transcripts`) MOVED into
+ * the stash tables, and with them the events each answered (the trigger events in its `(from_seq, to_seq]`, anyone's)
+ * and wrote (its outbound rows), through the same path as `deleteMessages` (her reactions to them go too; every
+ * scrub applies). One IMMEDIATE transaction; it joins the chat's open deletion, so one undo puts back messages and
+ * turns deleted in a row. Refused, with the reason, for a turn still running or one with an outbound row still
+ * `pending`, and as a message delete is (`refusal`). `seqs`: the events this delete took, reactions included.
+ */
+export function deleteTurns(db: Db, turnIds: readonly number[], now = Date.now()): TurnDeleteResult {
+  const client = db.$client;
+  const wanted = [...new Set(turnIds)].filter((t) => Number.isSafeInteger(t) && t > 0);
+  if (!wanted.length) return { ok: false, refused: "No turn was named." };
+  return client.transaction((): TurnDeleteResult => {
+    const plans: TurnDeletionPlan[] = [];
+    for (const t of wanted) {
+      const plan = turnDeletionPlan(db, t);
+      if (!plan) return { ok: false, refused: `Turn ${t} is not here any more (deleted already?). Reload the page.` };
+      if (plan.refused) return { ok: false, refused: plan.refused };
+      plans.push(plan);
+    }
+    const chatId = plans[0]!.chatId;
+    if (plans.some((p) => p.chatId !== chatId)) return { ok: false, refused: "Those turns are from more than one chat. Delete them one chat at a time." };
+    const byTurn = new Map<number, number>();
+    for (const p of plans) for (const e of [...p.answered, ...p.wrote]) if (!byTurn.has(e.seq)) byTurn.set(e.seq, p.turnId);
+    const seqs = [...byTurn.keys()];
+    const picked = seqs.length ? (client.query(`select ${COLUMNS} from chat_events where seq in (${marks(seqs.length)})`).all(...seqs) as Row[]) : [];
+    const rows = withReactions(client, chatId, picked);
+    const why = refusal(client, chatId, rows);
+    if (why) return { ok: false, refused: why };
+
+    const { id, purgeAt } = openDeletion(client, chatId, now);
+    // The turns' own rows first: then no scrub below touches them (they are put back as they were).
+    const ids = plans.map((p) => p.turnId);
+    const m = marks(ids.length);
+    for (const [table, stashed, key] of [
+      ["turn_steps", "deleted_turn_steps", "turn_id"],
+      ["turn_transcripts", "deleted_turn_transcripts", "turn_id"],
+      ["turns", "deleted_turns", "id"],
+    ] as const) {
+      const cols = columnsOf(client, table);
+      client.query(`insert into ${stashed} (deletion_id, ${cols}) select ?, ${cols} from ${table} where ${key} in (${m})`).run(id, ...ids);
+      client.query(`delete from ${table} where ${key} in (${m})`).run(...ids);
+    }
+    moveEvents(client, id, chatId, rows);
+    for (const [seq, turn] of byTurn) client.query("update deleted_events set by_turn = ? where seq = ? and deletion_id = ?").run(turn, seq, id);
+    return { ok: true, id, purgeAt, seqs: rows.map((r) => r.seq) };
+  }).immediate();
+}
+
 // ---- undo -----------------------------------------------------------------------------------------------
 
 /**
  * What the waker's trigger memo (agent/triggers.ts `TriggerScan`) must start over on: anything a deletion did in
- * chat `chatId`. It changes with every delete (a new deletion, or rows joining one), undo and purge.
+ * chat `chatId`. It changes with every delete (a new deletion, or rows or turns joining one), undo and purge.
  */
 export function deletionsMark(db: Db, chatId: number): string {
   const r = db.$client
-    .query("select (select count(*) from deleted_events where chat_id = ?) as n, (select coalesce(max(seq), 0) from sqlite_sequence where name = 'deletions') as d")
-    .get(chatId) as { n: number; d: number };
-  return `${r.n}:${r.d}`;
+    .query(
+      "select (select count(*) from deleted_events where chat_id = ?1) as n, (select count(*) from deleted_turns where chat_id = ?1) as t, (select coalesce(max(seq), 0) from sqlite_sequence where name = 'deletions') as d",
+    )
+    .get(chatId) as { n: number; t: number; d: number };
+  return `${r.n}:${r.t}:${r.d}`;
 }
 
-/** A deletion still in its window: what the console's notice says. */
-export function deletionOf(db: Db, id: number): { id: number; chatId: number; count: number; purgeAt: string } | undefined {
-  const d = db.$client.query("select id, chat_id as chatId, purge_at as purgeAt from deletions where id = ?").get(id) as { id: number; chatId: number; purgeAt: string } | null;
+/** A deletion still in its window: what the console's notice and snackbar say. */
+export interface DeletionSummary {
+  id: number;
+  chatId: number;
+  purgeAt: string;
+  /** Every message it holds, her reactions not counted. */
+  count: number;
+  /** The turns it holds, each with the messages its delete took (`turnMessageCount`), in order. */
+  turns: { id: number; messages: number }[];
+  /** Its messages deleted by themselves, not with a turn. */
+  loose: number;
+}
+
+export function deletionOf(db: Db, id: number): DeletionSummary | undefined {
+  const q = db.$client;
+  const d = q.query("select id, chat_id as chatId, purge_at as purgeAt from deletions where id = ?").get(id) as { id: number; chatId: number; purgeAt: string } | null;
   if (!d) return undefined;
-  const count = (db.$client.query("select count(*) as n from deleted_events where deletion_id = ? and kind <> 'bot_reaction'").get(id) as { n: number }).n;
-  return { ...d, count };
+  const count = countOf(q, id);
+  const turns = q
+    .query("select t.id, (select count(*) from deleted_events e where e.deletion_id = t.deletion_id and e.by_turn = t.id and e.kind <> 'bot_reaction') as messages from deleted_turns t where t.deletion_id = ? order by t.id")
+    .all(id) as { id: number; messages: number }[];
+  return { ...d, count, turns, loose: count - turns.reduce((n, t) => n + t.messages, 0) };
+}
+
+/**
+ * What a deletion is called, the same on the snackbar and the no-script notice: "3 messages", "turn 12 and its 5
+ * messages", "turn 12 and its 5 messages, and 2 more messages", "2 turns and their 9 messages".
+ */
+export function deletionLabel(d: Pick<DeletionSummary, "count" | "turns" | "loose">): string {
+  const msgs = (n: number) => `${n} message${n === 1 ? "" : "s"}`;
+  if (!d.turns.length) return msgs(d.count);
+  const inTurns = d.count - d.loose;
+  const head =
+    d.turns.length === 1
+      ? `turn ${d.turns[0]!.id}${inTurns ? ` and its ${msgs(inTurns)}` : ""}`
+      : `${d.turns.length} turns${inTurns ? ` and their ${msgs(inTurns)}` : ""}`;
+  return d.loose ? `${head}, and ${d.loose} more message${d.loose === 1 ? "" : "s"}` : head;
 }
 
 /**
@@ -478,6 +686,18 @@ export function undoDeletion(db: Db, id: number, now = Date.now()): UndoResult {
     // The insert trigger indexed the people's messages; hers are indexed once delivered (as the update trigger does).
     const sent = rows.filter((r) => r.kind === "bot_message" && r.status === "sent").map((r) => r.seq);
     if (sent.length) client.query(`insert or replace into chat_events_fts (rowid, text) select seq, json_extract(payload, '$.text') from chat_events where seq in (${marks(sent.length)})`).run(...sent);
+    // Its turns back as they were, before any scrub is restored (one made before the turn was deleted, in the same
+    // deletion, is then found in place): the turn first, as its steps and transcript refer to it.
+    const turns = (client.query("select count(*) as n from deleted_turns where deletion_id = ?").get(id) as { n: number }).n;
+    for (const [table, stashed] of [
+      ["turns", "deleted_turns"],
+      ["turn_transcripts", "deleted_turn_transcripts"],
+      ["turn_steps", "deleted_turn_steps"],
+    ] as const) {
+      const cols = columnsOf(client, table);
+      client.query(`insert into ${table} (${cols}) select ${cols} from ${stashed} where deletion_id = ?`).run(id);
+      client.query(`delete from ${stashed} where deletion_id = ?`).run(id);
+    }
     const scrubs = client.query("select target, ref, original, scrubbed from deletion_scrubs where deletion_id = ? order by id desc").all(id) as {
       target: "event" | "transcript" | "step";
       ref: number;
@@ -488,7 +708,7 @@ export function undoDeletion(db: Db, id: number, now = Date.now()): UndoResult {
     client.query(`delete from deleted_events where deletion_id = ?`).run(id);
     client.query("delete from deletion_scrubs where deletion_id = ?").run(id);
     client.query("delete from deletions where id = ?").run(id);
-    return { ok: true, count: rows.filter((r) => r.kind !== "bot_reaction").length };
+    return { ok: true, count: rows.filter((r) => r.kind !== "bot_reaction").length, turns };
   }).immediate();
 }
 
@@ -529,27 +749,52 @@ export function purgeDeletions(db: Db, dataDir: string, now = Date.now()): { del
   const due = client.query("select id from deletions where purge_at <= ? order by id").all(new Date(now).toISOString()) as { id: number }[];
   if (!due.length) return { deletions: 0, files: 0 };
   const ids = due.map((d) => d.id);
+  const m = marks(ids.length);
+  // The earliest of them: a transcript picture touched since (minus REUSE_GRACE_MS) may be in use again (below).
+  const since = Date.parse((client.query(`select min(created_at) as c from deletions where id in (${m})`).get(...ids) as { c: string }).c) - REUSE_GRACE_MS;
   const paths = client.transaction(() => {
-    const media = (
-      client.query(`select distinct json_extract(payload, '$.media.path') as p from deleted_events where deletion_id in (${marks(ids.length)}) and kind = 'message'`).all(...ids) as { p: string | null }[]
-    )
-      .map((r) => r.p)
-      .filter((p): p is string => !!p);
-    client.query(`delete from deleted_events where deletion_id in (${marks(ids.length)})`).run(...ids);
-    client.query(`delete from deletion_scrubs where deletion_id in (${marks(ids.length)})`).run(...ids);
-    client.query(`delete from deletions where id in (${marks(ids.length)})`).run(...ids);
+    const media = new Set(
+      (client.query(`select distinct json_extract(payload, '$.media.path') as p from deleted_events where deletion_id in (${m}) and kind = 'message'`).all(...ids) as { p: string | null }[])
+        .map((r) => r.p)
+        .filter((p): p is string => !!p),
+    );
+    // A deleted turn's pictures: those its input showed and those its steps recorded (results, appends).
+    for (const r of client.query(`select input from deleted_turn_transcripts where deletion_id in (${m})`).all(...ids) as { input: string }[]) {
+      for (const p of parse<TranscriptPart[]>(r.input)) if (p.type === "image") media.add(p.ref);
+    }
+    for (const r of client.query(`select images from deleted_turn_steps where deletion_id in (${m}) and images is not null`).all(...ids) as { images: string }[]) {
+      for (const i of parse<{ ref: string }[]>(r.images)) media.add(i.ref);
+    }
+    // Exactly-once keys stay spent: a retried webhook (the same Idempotency-Key), a schedule or a job reporting
+    // again, is dropped as if the row were still there (store/events.ts `idemKeySpent`). The key alone is kept.
+    client.query(`insert or ignore into spent_idem_keys (key) select idem_key from deleted_events where deletion_id in (${m}) and idem_key is not null`).run(...ids);
+    const prompts = (client.query(`select distinct prompt_hash as h from deleted_turn_transcripts where deletion_id in (${m}) and prompt_hash is not null`).all(...ids) as { h: string }[]).map((r) => r.h);
+    for (const t of ["deleted_events", "deletion_scrubs", "deleted_turn_steps", "deleted_turn_transcripts", "deleted_turns"]) client.query(`delete from ${t} where deletion_id in (${m})`).run(...ids);
+    client.query(`delete from deletions where id in (${m})`).run(...ids);
+    // A system prompt is shared by hash between turns: only one nothing else points at goes.
+    if (prompts.length) {
+      client
+        .query(
+          `delete from prompt_texts where hash in (${marks(prompts.length)}) and not exists (select 1 from turn_transcripts where prompt_hash = prompt_texts.hash) and not exists (select 1 from deleted_turn_transcripts where prompt_hash = prompt_texts.hash)`,
+        )
+        .run(...prompts);
+    }
     // A file another row or the library still names stays. (One downloaded for a message deleted meanwhile is
     // the downloader's to remove: vision/download.ts.)
-    return media.filter((p) => !mediaInUse(db, p));
+    return [...media].filter((p) => !mediaInUse(db, p));
   }).immediate();
   let files = 0;
   const root = join(dataDir, "media");
   for (const p of paths) {
-    if (!/^media\/[A-Za-z0-9._-]+$/.test(p)) continue;
+    if (!/^media\/(?:transcript\/)?[A-Za-z0-9._-]+$/.test(p)) continue;
     const abs = join(dataDir, p);
     if (!existsSync(abs)) continue;
     try {
       if (!realpathSync(abs).startsWith(`${realpathSync(root)}${sep}`)) continue;
+      // A transcript picture is content-addressed and shared: a runner in any chat that shows the same bytes again
+      // touches it (agent/transcript.ts `imageRef`) before it writes the step naming it, after the check above. One
+      // touched since the deletion is left to the transcripts' own pruning by age (`pruneTranscriptMedia`).
+      if (p.startsWith(`${TRANSCRIPT_MEDIA}/`) && statSync(abs).mtimeMs >= since) continue;
       rmSync(abs);
       files++;
     } catch (e) {

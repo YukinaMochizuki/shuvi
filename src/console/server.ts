@@ -12,7 +12,7 @@ import { allHistory, loadHome, watch, type PromptDeps } from "./home-data.ts";
 import { HOME_WRITES, homeSave, PROFILE_WRITES, profileWrite, takeResult } from "./home-write.ts";
 import { HomeLayers } from "../capabilities/memory/layers.ts";
 import { cardPage, html } from "./html.ts";
-import { chatListPane, chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
+import { chatListPane, chatPage, conversationPage, segmentPage, turnDeletePage, turnGonePage, turnsPage, type PageContext } from "./pages.ts";
 import { chatSettingsPage, switchingLine, type SettingsCategory } from "./chat-settings.ts";
 import { loadChatSettings, switchResultFlash, type ChatSettingsDeps } from "./chat-settings-data.ts";
 import { CHAT_SETTINGS_WRITE, chatSettingsWrite, keepResult, takeSettingsResult } from "./chat-settings-write.ts";
@@ -55,7 +55,8 @@ import { openLive, type LiveHub } from "./live.ts";
  * profiles, capabilities/memory/layers.ts), to a chat's settings page's (`/chats/<id>/settings/<verb>`,
  * chat-settings-write.ts `CHAT_SETTINGS_WRITE`: its model, profile, conversation, its entry in policy.yaml, its
  * schedules (cancel, pause, resume) and revoking a secret granted to its computer), and
- * to the delete of chat messages (`/messages/delete`, `/messages/undo`: delete-write.ts, store/deletions.ts), and to
+ * to the delete of chat messages and turns (`/messages/delete`, `/turns/delete`, `/messages/undo`: delete-write.ts,
+ * store/deletions.ts), and to
  * nothing else. A
  * POST anywhere else, or any other method, gets 405; a GET to a write route gets 405 too. A write must pass,
  * after the Host check and the sign-in above, BOTH:
@@ -216,6 +217,8 @@ function refusedWrite(deps: ConsoleDeps, req: Request, why: string): Response {
 
 const forbidden = () => htmlResponse(cardPage("Not for you", html`<p>This console is open to the tailnet users it lists, and this request did not come from one of them.</p>`), 403);
 const notFound = (who?: string) => htmlResponse(cardPage("Not found", html`<p>There is nothing here. <a href="/turns">Back to the turns</a>.</p>`, who), 404);
+/** A turn (segment, conversation) that is not there: deleted (store/deletions.ts leaves every pointer to it as it was), or never was. */
+const turnNotFound = (ctx: PageContext, what = "turn", id?: number) => htmlResponse(turnGonePage(ctx, what, id), 404);
 const misdirected = () => respond("This console does not answer for that host.\n", 421, "text/plain; charset=utf-8");
 
 /** `session`: what this request's CSRF token is derived from (see the header). */
@@ -421,12 +424,18 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     const span = /^\/(segments|conversations)\/(\d+)$/.exec(path);
     if (span) {
       const out = (span[1] === "segments" ? segmentPage : conversationPage)(ctx, url.searchParams, Number(span[2]));
-      return out ? htmlResponse(out) : notFound(ctx.who);
+      return out ? htmlResponse(out) : turnNotFound(ctx, span[1] === "segments" ? "segment" : "conversation", Number(span[2]));
     }
     const turn = /^\/turns\/(\d+)$/.exec(path);
     if (turn) {
       const out = turnsPage(ctx, url.searchParams, Number(turn[1]));
-      return out ? htmlResponse(out) : notFound(ctx.who);
+      return out ? htmlResponse(out) : turnNotFound(ctx, "turn", Number(turn[1]));
+    }
+    // Deleting a turn: its confirmation, a page of its own (and what console.js opens in place).
+    const turnDelete = /^\/turns\/(\d+)\/delete$/.exec(path);
+    if (turnDelete) {
+      const out = turnDeletePage(ctx, Number(turnDelete[1]), backPath(url.searchParams.get("back") ?? `/turns/${turnDelete[1]}`));
+      return out ? htmlResponse(out) : turnNotFound(ctx);
     }
     return notFound(ctx.who);
   } catch (e) {

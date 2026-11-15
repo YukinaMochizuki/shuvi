@@ -3,8 +3,8 @@
 A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
 timeline. It is for the owner, to debug and tune her. It is read-only, except for four things: **Settings**,
 which manages the model catalog, **Home**, where her files are edited, **a chat's settings** (its model,
-profile, conversation, permissions, schedules and secret grants), and **deleting chat messages** (all below). Nothing else in it can
-change anything.
+profile, conversation, permissions, schedules and secret grants), and **deleting chat messages and whole
+turns** (all below). Nothing else in it can change anything.
 
 ## What it shows
 
@@ -93,6 +93,23 @@ conversation is shown, from `search_chats` and `read_chat`, from the console, an
 replies to it, from turn transcripts and from what `read_chat` and `search_chats` gave her, without a trace
 (docs/design.md §3, `src/store/deletions.ts`). It is not taken out of the model's conversation, Telegram, or the
 backups. After the 10 seconds it cannot be undone.
+
+## Deleting a turn
+
+A whole turn can be deleted too: "⋯ → Delete turn…" on a turn's divider in a chat's log, or "Delete this turn"
+on the turn's page. A confirmation opens in place (without script, as a page of its own, `/turns/<id>/delete`)
+and lists what goes, messages first: those the turn answered (in a group, everyone's in its range, by whom),
+those it wrote (her messages, stickers, files; her reactions said apart), then her record of it (the input and
+system prompt, thinking, text blocks, tool calls by name). It says what is not undone: what the turn did (her
+edits in home/, schedules it set, jobs it started) and what her conversation remembers. Delete, and the turn
+and its messages leave the page at once; the snackbar says "Deleted turn 12 and its 5 messages · Undo", with
+the same count the confirmation gave (a reaction is never counted as a message). A message deleted just before
+or after joins the same Undo ("…, and 2 more messages"). On the turn's own page, the page becomes the plain
+"this turn was deleted or does not exist", with the list beside it no longer showing it, and its Undo brings
+the turn page back. A running turn, or one with a message not sent yet, is refused with the reason. Every link
+to a deleted turn (an alert's, a Home commit's, a switch's) answers with the same plain page. Pages open in other
+tabs follow: the turn's divider and rows leave a chat's log, its part leaves a segment or conversation, and the
+turn's own page (or a segment named by it) becomes the plain page, and comes back on the Undo.
 
 ## Settings: the model catalog
 

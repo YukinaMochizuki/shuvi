@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { allowedHosts, allowedOrigins } from "../src/console/index.ts";
 import { assetsVersion, warmAssets } from "../src/console/assets.ts";
 import { HEARTBEAT_MS, LiveHub, LiveStream, MAX_STREAMS_PER_SESSION, parseHave, Watch, type Op } from "../src/console/live.ts";
-import { chatPage, liveView, segmentPage, turnsPage, type PageContext } from "../src/console/pages.ts";
+import { chatPage, liveView, segmentPage, turnGonePage, turnsPage, type PageContext } from "../src/console/pages.ts";
 import { handleConsole, LOGIN_HEADER, type ConsoleDeps } from "../src/console/server.ts";
 import type { Db } from "../src/store/db.ts";
-import { deleteMessages, undoDeletion } from "../src/store/deletions.ts";
+import { deleteMessages, deleteTurns, undoDeletion } from "../src/store/deletions.ts";
 import { enqueueOutbound, ensureChat, markSent, recordInbound } from "../src/store/events.ts";
 import { updateMedia } from "../src/store/media.ts";
 import { addStep, completeStep, saveTranscript, setTranscriptModel } from "../src/store/transcripts.ts";
@@ -375,6 +375,94 @@ describe("the stream", () => {
     expect(got.some((o) => "order" in o && o.order[0] === `g${g.id}`)).toBe(true);
     tick(HEARTBEAT_MS);
     expect(out.some((c) => c === ": \n\n")).toBe(true);
+  });
+});
+
+// ---- a deleted turn, on pages open in other tabs (store/deletions.ts deleteTurns) -----------------------------
+
+/** Two finished turns of a DM in one segment, each with a message of hers. */
+function twoTurns() {
+  const { db, chat, hello, turn } = setup();
+  const m1 = enqueueOutbound(db, { chatId: chat, kind: "bot_message", payload: { text: "Trains at 9:15." }, idemKey: "t:1", turnId: turn.id })!;
+  markSent(db, m1, 901);
+  finishTurn(db, turn.id, { status: "done" });
+  const ask = ownerSays(db, "and the way back?");
+  const next = claimTurn(db, chat)!;
+  saveTranscript(db, next.id, { promptHash: null, input: [{ type: "text", text: "and the way back?" }], resumed: true });
+  const m2 = enqueueOutbound(db, { chatId: chat, kind: "bot_message", payload: { text: "Back at 18:40." }, idemKey: "t:2", turnId: next.id })!;
+  markSent(db, m2, 902);
+  finishTurn(db, next.id, { status: "done" });
+  return { db, chat, hello, turn, m1, ask, next, m2 };
+}
+
+describe("a deleted turn on pages already open (another tab)", () => {
+  test("a chat's log: its divider and its rows are taken out; the undo puts them back in place", () => {
+    const { db, chat, hello, turn, m1, next } = twoTurns();
+    const here = `/chats/${chat}`;
+    const { open, tick } = harness(db);
+    const { ops } = open(here, chatPage({ ...ctxOf(db), here }, chat)!);
+    ops();
+    const r = deleteTurns(db, [turn.id], clock);
+    if (!r.ok) throw new Error(r.refused);
+    tick(3000);
+    const gone = ops().filter((o): o is { k: string; rm: true } => "rm" in o).map((o) => o.k);
+    expect(gone).toContain(`d${turn.id}`);
+    expect(gone).toEqual(expect.arrayContaining([`e${hello}`, `e${m1}`]));
+    expect(gone).not.toContain(`d${next.id}`);
+    undoDeletion(db, r.id, clock);
+    tick(3000);
+    const back = parts(ops());
+    const div = back.find((o) => o.k === `d${turn.id}`)!;
+    expect(div.html).toContain(`turn ${turn.id}`);
+    expect(back.find((o) => o.k === `e${m1}`)!.html).toContain("Trains at 9:15.");
+    // As a reload draws it.
+    expect(div.h).toBe(partIn(chatPage({ ...ctxOf(db), here }, chat)!, `d${turn.id}`)!.h);
+  });
+
+  test("the turn's own page is told to swap for the plain page; that page, live, is told to swap back on the undo", () => {
+    const { db, next } = twoTurns();
+    const here = `/turns/${next.id}`;
+    const { open, tick } = harness(db);
+    const page = open(here, turnsPage({ ...ctxOf(db), here }, new URLSearchParams(), next.id)!);
+    page.ops();
+    const r = deleteTurns(db, [next.id], clock);
+    if (!r.ok) throw new Error(r.refused);
+    tick(3000);
+    expect(page.ops()).toEqual([{ swap: true }]);
+    tick(3000);
+    expect(page.ops()).toEqual([]); // said once
+    // What it swaps to: the plain page, live while the undo can bring the turn back.
+    const goneHtml = turnGonePage({ ...ctxOf(db), here }, "turn", next.id);
+    expect(goneHtml).toContain(`data-live-page="${here}"`);
+    expect(goneHtml).not.toContain("Back at 18:40.");
+    const h2 = harness(db);
+    const again = h2.open(here, goneHtml);
+    expect(again.ops()).toEqual([]);
+    undoDeletion(db, r.id, clock);
+    h2.tick(3000);
+    expect(again.ops()).toEqual([{ swap: true }]);
+  });
+
+  test("a segment: a deleted turn's part is taken out (the first one too); the segment named by it swaps", () => {
+    const { db, turn, next } = twoTurns();
+    // The segment named by its first turn, open in one tab, and the same segment named by its second in another.
+    const byFirst = `/segments/${turn.id}`;
+    const bySecond = `/segments/${next.id}`;
+    const { open, tick } = harness(db);
+    const a = open(byFirst, segmentPage({ ...ctxOf(db), here: byFirst }, new URLSearchParams(), turn.id)!);
+    const b = open(bySecond, segmentPage({ ...ctxOf(db), here: bySecond }, new URLSearchParams(), next.id)!);
+    a.ops();
+    b.ops();
+    const r = deleteTurns(db, [turn.id], clock);
+    if (!r.ok) throw new Error(r.refused);
+    tick(3000);
+    expect(a.ops()).toEqual([{ swap: true }]);
+    const bo = b.ops();
+    expect(bo).toContainEqual({ k: `t${turn.id}`, rm: true });
+    expect(bo.some((o) => "k" in o && o.k === `t${next.id}` && "rm" in o)).toBe(false);
+    undoDeletion(db, r.id, clock);
+    tick(3000);
+    expect(parts(b.ops()).some((o) => o.k === `t${turn.id}`)).toBe(true);
   });
 });
 
