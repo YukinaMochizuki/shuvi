@@ -1,11 +1,12 @@
 import type { Api } from "grammy";
 import type { BotCommand, BotCommandScope } from "grammy/types";
-import { applySwitchRequest, noteStoppedTurn, pendingSwitchRequests, type SwitchOptions, type SwitchRequest } from "../agent/switch.ts";
+import { applySwitchRequest, noteStoppedTurn, pendingSwitchRequests, startClean, type SwitchOptions, type SwitchRequest } from "../agent/switch.ts";
 import { openProfileCard, openSwitchCard } from "../control/model-cards.ts";
 import type { Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
-import { enqueueOutbound, forgetConversations, markCommandDone, pendingCommands, type CommandPayload } from "../store/events.ts";
-import { IMMEDIATE, markStop, runningTurnFor, type Turn } from "../store/turns.ts";
+import { raiseAlert } from "../store/control.ts";
+import { enqueueOutbound, forgetConversations, getChat, markCommandDone, pendingCommands, type CommandPayload } from "../store/events.ts";
+import { chatLabel, IMMEDIATE, markStop, runningTurnFor, type Turn } from "../store/turns.ts";
 import { signalTurn, type SignalTurn } from "./spawn.ts";
 
 /**
@@ -15,6 +16,11 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  *   /new    start a fresh conversation for this chat: every model's conversation of the chat is forgotten,
  *           the active one and those parked (agent/switch.ts); the chat's events and cursor are kept. A
  *           running turn is stopped first.
+ *   /newclean as /new, but a CLEAN conversation (agent/switch.ts `startClean`): her next turn opens with its new
+ *           messages only, not the chat's last 10, and for as long as that conversation lasts she has no
+ *           search_chats / read_chat to look back with. The console's Start clean is the same. A chat with no
+ *           model to start clean on still has its turn stopped, and the owner is told in the control bot why
+ *           nothing else happened (the 👌 says only that the command was taken).
  *   /model  switch this chat's model: the control bot sends the owner a card for this chat
  *           (control/model-cards.ts), so nobody else in a group sees it. A running turn is NOT stopped here;
  *           the card says it will be, and the switch it asks for stops it.
@@ -39,6 +45,7 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
 
 export const MAIN_COMMANDS = [
   { command: "new", description: "Start a fresh conversation" },
+  { command: "newclean", description: "Start a fresh conversation without the last messages or looking back" },
   { command: "stop", description: "Stop the running turn" },
   { command: "model", description: "Switch this chat's model (a card in the control bot)" },
   { command: "profile", description: "Switch this chat's profile (a card in the control bot)" },
@@ -177,12 +184,23 @@ export function commandPass(db: Db, signal: SignalTurn = signalTurn, home?: stri
     let note: string;
     switch (p.command) {
       case "stop":
-      case "new": {
+      case "new":
+      case "newclean": {
         const running = stopTurn(db, cmd.chatId, cmd.seq, signal);
         note = running ? `stopped turn ${running.id}` : "no turn running";
         if (p.command === "new") {
           forgetConversations(db, cmd.chatId);
           note += "; conversation reset";
+        } else if (p.command === "newclean") {
+          try {
+            startClean(db, cmd.chatId, cmd.seq);
+            note += "; conversation reset clean";
+          } catch (e) {
+            const why = e instanceof Error ? e.message : String(e);
+            note += `; not started clean: ${why}`;
+            const chat = getChat(db, cmd.chatId);
+            raiseAlert(db, { key: `newclean-failed:${cmd.seq}`, text: `/newclean in ${chat ? chatLabel(chat) : `chat ${cmd.chatId}`} did not start a clean conversation: ${why}. ${running ? `Turn ${running.id} was stopped; n` : "N"}othing else changed.` });
+          }
         }
         break;
       }

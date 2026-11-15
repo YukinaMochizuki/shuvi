@@ -6,8 +6,9 @@ and sending messages, deciding when to think, assembling the context, and keepin
 restarts. The architecture, and why it is shaped this way, is in [docs/design.md](docs/design.md).
 
 What works today: the owner's private chat and the groups `home/policy.yaml` lists, text in and out. The
-assistant's reply text becomes messages, `say` speaks mid-turn, `react` reacts, `pass` stays silent; `/stop`
-and `/new` act on the chat. Photos and stickers are shown to the model as images (the `vision` capability).
+assistant's reply text becomes messages, `say` speaks mid-turn, `react` reacts, `pass` stays silent; `/stop`,
+`/new` and `/newclean` (a fresh start without the last messages, and without looking back) act on the chat.
+Photos and stickers are shown to the model as images (the `vision` capability).
 She keeps her own memory in `home/`, looks back through every chat, runs schedules and background jobs, and
 asks workstream's desk. The sticker library (`home/stickers/*.yaml`, the `stickers` capability) lets her
 find, view, send and learn stickers; a pack is added in conversation with `add_sticker_pack`. With Hangar
@@ -81,8 +82,8 @@ login of the user the server runs as (or `SHUVI_CLAUDE_CONFIG_DIR`) and `SHUVI_M
 ran on before. A chat keeps one conversation per model, and its model can be switched (`src/agent/switch.ts`;
 one asked for during a turn stops the turn first): on every switch, between any two models, the owner chooses
 whether what was said since is carried into the other model's conversation (lossless), that model's own
-conversation resumes as it was left (lossy), or that model starts over with nothing (clean start). The model
-is never told.
+conversation resumes as it was left (lossy), or that model starts over with nothing (clean start: for as long
+as that conversation lasts she cannot search or read back through the chats either). The model is never told.
 
 ## Data
 

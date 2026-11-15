@@ -124,14 +124,17 @@ const anthropic = Bun.serve({
 
 // ---- fake Chat Completions endpoint: every turn answers with its marker -------------------------------
 const openaiSeen: Msg[][] = [];
+/** The names of the tools each of those requests offered, in the same order, without their server's prefix (`shuvi__`). */
+const openaiTools: string[][] = [];
 const sse = (chunks: unknown[]) => new Response(chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
 const chunk = (delta: unknown, finish: string | null = null) => ({ id: "c", object: "chat.completion.chunk", created: 1, model: "fake-model", choices: [{ index: 0, delta, finish_reason: finish }], ...(finish ? { usage: { prompt_tokens: 50, completion_tokens: 3, total_tokens: 53 } } : {}) });
 const openai = Bun.serve({
   port: 0,
   async fetch(req) {
     if (new URL(req.url).pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
-    const body = (await req.json()) as { messages: Msg[] };
+    const body = (await req.json()) as { messages: Msg[]; tools?: Array<{ function?: { name?: string } }> };
     openaiSeen.push(body.messages);
+    openaiTools.push((body.tools ?? []).map((t) => (t.function?.name ?? "").replace(/^[A-Za-z0-9-]+__/, "")));
     const marker = lastMarker(JSON.stringify(body.messages.at(-1)));
     return sse([chunk({ role: "assistant", content: `T${marker}-ANSWER` }), chunk({}, "stop")]);
   },
@@ -345,6 +348,11 @@ try {
   check(r15.filter((m) => m.role !== "system").length === 1, "T15's request is a new conversation: one user message");
   check(!/T([1-9]|1[0-4])-(PROMPT|ANSWER|SAY)/.test(w15), "and it carries none of the earlier messages, not even the chat's last ones");
   check(lastOpening() === "switched" && !!chat().session, "T15 opened the endpoint model's new conversation");
+  const t15Tools = openaiTools.at(-1)!;
+  const before15 = openaiTools.slice(0, -1).find((names) => names.includes("read_chat"));
+  check(!!before15 && before15.includes("search_chats"), "before the clean start, the endpoint was offered search_chats and read_chat");
+  check(t15Tools.includes("say") && !t15Tools.includes("read_chat") && !t15Tools.includes("search_chats"), "a clean conversation is offered no search_chats / read_chat");
+  check(!JSON.stringify(r15).includes("Looking back"), "nor their section of the system prompt");
 
   const said = [...claudeSeen, ...openaiSeen].map((m) => JSON.stringify(m)).join("");
   check(!/switch(ed)? (from|to)|lossless|lossy|clean start/i.test(said), "nothing any model was sent says a switch happened");

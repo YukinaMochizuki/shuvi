@@ -172,6 +172,11 @@ export interface Capability<C = unknown> {
   /** On in every chat, whatever the chat's policy enables (speech: without it nothing can be said). */
   always?: boolean;
   /**
+   * It lets her look back through what was said (retrieval: search_chats, read_chat). Left out of a CLEAN
+   * conversation's turns (`chats.clean_since`, agent/switch.ts; `turnCapabilities`), tools and section alike.
+   */
+  looksBack?: boolean;
+  /**
    * The config for one chat, given the parameters its policy passes this capability (`{}` for none, and
    * for a chat whose policy is `tools: all`). Return a narrower config, never a wider one. Absent: the
    * parameters are ignored.
@@ -249,6 +254,19 @@ export function chatCapabilities(enabled: readonly EnabledCapability[], tools: C
   }
   return out;
 }
+
+/**
+ * The capabilities a turn of `chat` uses: those its policy enables (`chatCapabilities`), less those that look back
+ * (`looksBack`) when its conversation is a clean one (`chats.clean_since`, agent/switch.ts). They stay the same for
+ * as long as the conversation lasts.
+ */
+export function turnCapabilities(enabled: readonly EnabledCapability[], tools: ChatPolicy["tools"], chat: { cleanSince: number | null }): EnabledCapability[] {
+  const caps = chatCapabilities(enabled, tools);
+  return chat.cleanSince == null ? caps : caps.filter((c) => !c.capability.looksBack);
+}
+
+/** Whether any of `enabled` lets her look back through what was said (`looksBack`). */
+export const looksBack = (enabled: readonly EnabledCapability[]): boolean => enabled.some((c) => c.capability.looksBack);
 
 /** The enabled capabilities of `registry`, in registry order. */
 export function enableCapabilities(registry: readonly Capability<any>[], env: Env): EnabledCapability[] {

@@ -4,7 +4,7 @@ import type { ModelMessage } from "agent-runtime/openai-compat";
 import { appendToClaudeSession, claudeSessionMessages, findClaudeSession, forkClaudeSession, readClaudeSession } from "agent-runtime/convert";
 import { conversationEnd, conversationExists, conversationSince, insertMessages } from "../store/conversations.ts";
 import type { Db } from "../store/db.ts";
-import { getChat, type Chat } from "../store/events.ts";
+import { getChat, lastChatSeq, type Chat } from "../store/events.ts";
 import { chatModel, defaultModel, findModel, getProvider, laneOf, listModels, listProviders, parseLane, SEEDED_PROVIDER, unknownLane, type CatalogModel } from "../store/models.ts";
 import { chatConversations, chats, modelSwitches, modelSwitchRequests, turns } from "../store/schema.ts";
 import { getTurn, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
@@ -40,9 +40,19 @@ type Reader = Pick<Db, "select">;
  *     `/new` drops a chat's, for B only; A's is parked as in the other modes): B starts a brand-new
  *     conversation at the next turn, which opens with its new input ONLY, not even the chat's last few
  *     messages (`opensClean`, read by agent/turn.ts). Her persona, rules, memory and notes are in the system
- *     prompt as always, and `read_chat` reaches the history. Unlike the other modes, it is not a no-op when B's
- *     conversation is the active one only because the chat's model moved without a switch: that one is
- *     dropped too.
+ *     prompt as always, but the history is out of her reach for as long as that conversation lasts: it is a
+ *     CLEAN conversation (`chats.clean_since`), whose turns are given no `search_chats` / `read_chat`. Unlike
+ *     the other modes, it is not a no-op when B's conversation is the active one only because the chat's model
+ *     moved without a switch: that one is dropped too.
+ * A CLEAN CONVERSATION stays one wherever it goes: parked with its `clean_since` and resumed with it (a
+ * lossy or lossless switch back to it), restarted as one when its session is lost, and then shown the last few
+ * messages said since it began, never one from before. Its turns are never shown anything said before it began,
+ * not even unseen messages past the cursor (agent/turn.ts). It begins after everything said when it is started,
+ * or, for a switch request that stopped a turn, where that turn began (its input is answered again, as for
+ * every switch request). Any other conversation the chat moves to (another model's, a fresh one after `/new`)
+ * is not one. A clean start no turn has opened yet is no conversation to park: a switch away before its first
+ * turn leaves nothing clean behind, and a switch back finds the model with no conversation (not a clean one).
+ * `startClean` (`/newclean`, the console's Start clean) does the same for the model the chat is on.
  * Whichever the mode, `entered_at` becomes where B's conversation ends now, so the next switch away carries only what
  * is said from here on. Nothing is added to a conversation to say a switch happened: the model is never told.
  * The `model_switches` row records it, and the next turn's transcript notes it (agent/turn.ts) for the console.
@@ -227,19 +237,21 @@ export function opensClean(db: Db, chat: Chat, switches: readonly Switch[]): boo
 }
 
 /**
- * "Start clean" (the console's Conversation section): `/new` with a clean start's opening. Every conversation of the
+ * `/newclean`, and "Start clean" (the console's Conversation section): `/new` with a clean start's opening. Every conversation of the
  * chat is forgotten, as `/new` forgets them (store/events.ts `forgetConversations`), and the next turn opens with its
  * input only, not the chat's last messages: a clean start of the model the chat runs on, recorded as one (a
  * `model_switches` row of mode `clean` from that model to itself, `isStartClean`), which `opensClean` reads as it
- * reads a clean switch. The caller stops a running turn first, as for `/new`.
+ * reads a clean switch. The conversation it opens is a clean one (`clean_since`: no looking back, see the header),
+ * which begins after `since` (the `/newclean` command's seq), or after everything said so far.
+ * The caller stops a running turn first, as for `/new`.
  */
-export function startClean(db: Db, chatId: number): void {
+export function startClean(db: Db, chatId: number, since?: number): void {
   const chat = getChat(db, chatId);
   if (!chat) throw new Error(`there is no chat ${chatId}`);
   const model = runsOn(db, chat) ?? activeModel(db, chat);
   if (!model) throw new Error("the chat has no model: add one to the catalog first");
   db.transaction((tx) => {
-    tx.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null, conversationModel: model }).where(eq(chats.id, chatId)).run();
+    tx.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null, conversationModel: model, cleanSince: since ?? lastChatSeq(tx, chatId) }).where(eq(chats.id, chatId)).run();
     tx.delete(chatConversations).where(eq(chatConversations.chatId, chatId)).run();
     tx.insert(modelSwitches).values({ chatId, fromModel: model, toModel: model, mode: "clean", fromSessionId: chat.backendSessionId, toSessionId: null, carried: 0, compacted: false }).run();
   }, IMMEDIATE);
@@ -512,8 +524,13 @@ function moveChat(db: Db, chat: Chat, from: string | null, target: CatalogModel,
       insertMessages(tx, chat.id, session, rows);
     }
     const enteredAt = session ? laneEnd(tx, toLane, session) : null;
+    // A clean conversation stays one (the header): the target's resumed one keeps what it was, a new one is clean
+    // only when this is a clean start, which begins after everything said so far; after a turn a switch request
+    // stopped, where that turn began, so the input it was answering is the clean conversation's to answer.
+    const stopped = opts.stoppedTurnId ? getTurn(tx as unknown as Db, opts.stoppedTurnId) : undefined;
+    const cleanSince = mode === "clean" ? (stopped?.fromSeq ?? lastChatSeq(tx, chat.id)) : resumed ? (parked?.cleanSince ?? null) : null;
     if (source) {
-      const park = { backendSessionId: source.session, contextTokens: chat.contextTokens, parkedAt: new Date().toISOString() };
+      const park = { backendSessionId: source.session, contextTokens: chat.contextTokens, cleanSince: chat.cleanSince, parkedAt: new Date().toISOString() };
       tx.insert(chatConversations)
         .values({ chatId: chat.id, model: source.model, ...park })
         .onConflictDoUpdate({ target: [chatConversations.chatId, chatConversations.model], set: park })
@@ -521,7 +538,7 @@ function moveChat(db: Db, chat: Chat, from: string | null, target: CatalogModel,
     }
     tx.delete(chatConversations).where(and(eq(chatConversations.chatId, chat.id), eq(chatConversations.model, target.id))).run();
     tx.update(chats)
-      .set({ model: how.implicit ? chat.model : target.id, conversationModel: target.id, backendSessionId: session, enteredAt, contextTokens })
+      .set({ model: how.implicit ? chat.model : target.id, conversationModel: target.id, backendSessionId: session, enteredAt, contextTokens, cleanSince })
       .where(eq(chats.id, chat.id))
       .run();
     tx.insert(modelSwitches)

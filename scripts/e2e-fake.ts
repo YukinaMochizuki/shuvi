@@ -18,7 +18,9 @@
  * turn's page, fetched as a tailnet user would (the `Tailscale-User-Login` header `tailscale serve` sets),
  * shows its system prompt, its tool calls and its usage; a login not on the list gets 403. Then a message
  * and her answer are deleted through the console (its write boundary: Origin and CSRF token), `/new`, and
- * the fresh conversation's opening request carries the chat's recent messages but not those two.
+ * the fresh conversation's opening request carries the chat's recent messages but not those two. Last,
+ * `/newclean`: the clean conversation's opening request carries none of the chat's earlier messages, and is
+ * offered neither search_chats nor read_chat, which the request before it was.
  *
  *   bun scripts/e2e-fake.ts
  */
@@ -75,6 +77,9 @@ let longStepStarted = false;
 let modelRequests = 0;
 /** The messages of the request that opened a fresh conversation after the delete (section 8). */
 let afterDelete = "";
+/** Its tools' names, and those of the request that opened the clean conversation after `/newclean` (section 9). */
+let afterDeleteTools: string[] = [];
+let afterClean = { messages: "", system: "", tools: [] as string[] };
 /** The system prompt of each request of the memory section (4), by step. */
 const memorySystems: Record<string, string> = {};
 const anthropic = Bun.serve({
@@ -93,8 +98,13 @@ const anthropic = Bun.serve({
     const system = JSON.stringify(body.system ?? "");
     // Section 8: a word to delete, then what a fresh conversation is given after `/new`. First, since that fresh
     // conversation's opening carries the earlier sections' words as history, in its last message.
+    if (latest.includes("a clean slate now")) {
+      afterClean = { messages: JSON.stringify(body.messages), system, tools: (body.tools ?? []).map((t) => t.name) };
+      return stream(`msg_${modelRequests}`, [{ type: "text", text: "Clean slate." }], "end_turn");
+    }
     if (latest.includes("what was the word")) {
       afterDelete = JSON.stringify(body.messages);
+      afterDeleteTools = (body.tools ?? []).map((t) => t.name);
       return stream(`msg_${modelRequests}`, [{ type: "text", text: "Which word?" }], "end_turn");
     }
     if (latest.includes("the secret word is mangosteen")) return stream(`msg_${modelRequests}`, [{ type: "text", text: "Kept it: mangosteen." }], "end_turn");
@@ -352,6 +362,18 @@ check(afterDelete.includes("(A new conversation. The last") && afterDelete.inclu
 check(!afterDelete.includes("mangosteen"), "and neither the deleted message nor her deleted answer is among them");
 await until("the purge", () => (db.$client.query("select count(*) as n from deletions").get() as { n: number }).n === 0, 20_000);
 check((db.$client.query("select count(*) as n from deleted_events").get() as { n: number }).n === 0, "after its 10 seconds the server purged the deletion");
+
+// ---- 9. /newclean: a clean conversation, with nothing of before and no looking back ---------------------------
+await until("that turn to close", lastTurnClosed, 15_000);
+check(afterDeleteTools.includes("mcp__shuvi__read_chat") && afterDeleteTools.includes("mcp__shuvi__search_chats"), "an ordinary conversation is offered search_chats and read_chat");
+tg.updates.push(dmUpdate(12, "/newclean"));
+await until("the /newclean acknowledgement", () => tg.sent("setMessageReaction").length >= 4);
+check(JSON.stringify(tg.sent("setMessageReaction").at(-1)!.reaction) === JSON.stringify([{ type: "emoji", emoji: "👌" }]), "/newclean is acknowledged with 👌");
+tg.updates.push(dmUpdate(13, "a clean slate now?"));
+await until("the clean conversation's answer", () => texts().includes("Clean slate."));
+check(!afterClean.messages.includes("(A new conversation. The last") && !afterClean.messages.includes("what was the word") && !afterClean.messages.includes("Which word?"), "the clean conversation opened with none of the chat's earlier messages");
+check(!afterClean.tools.includes("mcp__shuvi__read_chat") && !afterClean.tools.includes("mcp__shuvi__search_chats") && afterClean.tools.includes("mcp__shuvi__say"), "and is offered neither search_chats nor read_chat");
+check(!afterClean.system.includes("Looking back"), "nor their section of the system prompt");
 
 log("PASS");
 cleanup();

@@ -14,7 +14,7 @@ export const TURN_COLUMNS = `t.id, t.chat_id as chatId, t.status, t.pid, t.pid_s
   t.profile, t.started_at as startedAt, t.ended_at as endedAt`;
 
 export const CHAT_COLUMNS = `c.id, c.tg_chat_id as tgChatId, c.kind, c.title, c.cursor_seq as cursorSeq, c.backend_session_id as backendSessionId,
-  c.context_tokens as contextTokens, c.profile, c.created_at as createdAt,
+  c.context_tokens as contextTokens, c.clean_since as cleanSince, c.profile, c.created_at as createdAt,
   (select json_extract(e.payload, '$.from.name') from chat_events e where e.chat_id = c.id and e.kind = 'message' order by e.seq desc limit 1) as person`;
 
 const EVENT_COLUMNS = `seq, chat_id as chatId, kind, payload, tg_update_id as tgUpdateId, tg_message_id as tgMessageId, idem_key as idemKey,

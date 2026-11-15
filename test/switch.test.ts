@@ -731,3 +731,101 @@ describe("clean start, after review", () => {
     expect(isStartClean({ mode: "clean", fromModel: "claude/opus", toModel: "vllm/qwen" })).toBe(false);
   });
 });
+
+describe("a clean conversation (clean_since) goes where its conversation goes", () => {
+  const cleanSince = (w: World) => getChat(w.db, w.chatId)!.cleanSince;
+  const parkedSince = (w: World, model: string) => w.db.select().from(chatConversations).all().find((p) => p.model === model)?.cleanSince ?? null;
+  const lastSeqOf = (w: World) => (w.db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
+
+  test("startClean: clean after everything said so far, or after the seq it is given (/newclean's)", () => {
+    const w = started();
+    expect(cleanSince(w)).toBeNull();
+    const before = lastSeqOf(w);
+    startClean(w.db, w.chatId);
+    expect(cleanSince(w)).toBe(before);
+    ownerSays(w.db, "later");
+    startClean(w.db, w.chatId, before);
+    expect(cleanSince(w)).toBe(before);
+  });
+
+  test("a clean switch makes the target's conversation a clean one; lossy and lossless to another model's are not", () => {
+    for (const mode of ["lossy", "lossless"] as const) {
+      const w = started();
+      switchModel(w.db, w.chatId, "vllm/qwen", "clean");
+      expect(cleanSince(w)).toBe(lastSeqOf(w));
+      speak(w, "T2");
+      // Away to another model, with nothing of its own (fresh / a copy): not clean.
+      switchModel(w.db, w.chatId, "claude/sonnet", mode);
+      expect(cleanSince(w)).toBeNull();
+    }
+  });
+
+  test("parked with its conversation and back with it, by a lossy or a lossless switch; the other model's stays as it was", () => {
+    for (const mode of ["lossy", "lossless"] as const) {
+      const w = started();
+      switchModel(w.db, w.chatId, "vllm/qwen", "clean");
+      const since = cleanSince(w)!;
+      speak(w, "T2");
+      switchModel(w.db, w.chatId, "claude/opus", "lossy");
+      expect(cleanSince(w)).toBeNull(); // opus's own conversation (T1) was never clean
+      expect(parkedSince(w, "vllm/qwen")).toBe(since);
+      speak(w, "T3");
+      switchModel(w.db, w.chatId, "vllm/qwen", mode);
+      expect(active(w).model).toBe("vllm/qwen");
+      expect(cleanSince(w)).toBe(since);
+      expect(parkedSince(w, "claude/opus")).toBeNull();
+    }
+  });
+
+  test("a clean switch to a model whose parked conversation was not clean drops it and starts a clean one", () => {
+    const w = started();
+    switchModel(w.db, w.chatId, "vllm/qwen", "lossy");
+    speak(w, "T2");
+    switchModel(w.db, w.chatId, "claude/opus", "clean");
+    expect(cleanSince(w)).toBe(lastSeqOf(w));
+    expect(getChat(w.db, w.chatId)!.backendSessionId).toBeNull();
+  });
+
+  test("kept when a lost session is reset, cleared by /new, also for the parked ones", () => {
+    const w = started();
+    switchModel(w.db, w.chatId, "vllm/qwen", "clean");
+    const since = cleanSince(w)!;
+    speak(w, "T2");
+    resetConversation(w.db, w.chatId);
+    expect(cleanSince(w)).toBe(since);
+    speak(w, "T3");
+    switchModel(w.db, w.chatId, "claude/opus", "lossy");
+    expect(parkedSince(w, "vllm/qwen")).toBe(since);
+    forgetConversations(w.db, w.chatId);
+    expect(cleanSince(w)).toBeNull();
+    expect(parked(w)).toEqual({});
+  });
+
+  test("a clean switch applied after the turn its request stopped begins where that turn began: its input is the clean conversation's", () => {
+    const w = started();
+    ownerSays(w.db, "answer this on the new model");
+    const turn = claimTurn(w.db, w.chatId)!;
+    setTurnPid(w.db, turn.id, 4242, "1");
+    const req = requestSwitch(w.db, w.chatId, "vllm/qwen", "clean");
+    switchRequestPass(w.db, () => {});
+    ownerSays(w.db, "and this, said while it stopped");
+    finishTurn(w.db, turn.id, { status: "stopped" });
+    const [done] = switchRequestPass(w.db, () => {});
+    expect(done).toMatchObject({ id: req.id, status: "done" });
+    expect(cleanSince(w)).toBe(turn.fromSeq);
+    // Without a stopped turn, a clean switch begins after everything said so far.
+    switchModel(w.db, w.chatId, "claude/sonnet", "clean");
+    expect(cleanSince(w)).toBe(lastSeqOf(w));
+  });
+
+  test("an implicit move (the chat's model changed without a switch) leaves a clean conversation for the target's own", () => {
+    const w = started();
+    startClean(w.db, w.chatId);
+    speak(w, "T2");
+    setDefaultModel(w.db, "vllm/qwen");
+    enterChatModel(w.db, getChat(w.db, w.chatId)!);
+    expect(active(w).model).toBe("vllm/qwen");
+    expect(cleanSince(w)).toBeNull();
+    expect(parkedSince(w, "claude/opus")).not.toBeNull();
+  });
+});

@@ -97,7 +97,7 @@ describe("the switch card", () => {
     say(db, "/model 1");
     const id = lastCard(db).id;
     expect(press(db, button(db, "vllm/llama"))).toBe("");
-    expect(getCard(db, id)!.text).toBe("Switch chat 1 (tg 1001) to vllm/llama:\nLossless: copies the whole conversation (2 messages) to vllm/llama\nLossy: vllm/llama starts fresh with the last 10 messages\nClean start: starts vllm/llama fresh, with no messages");
+    expect(getCard(db, id)!.text).toBe("Switch chat 1 (tg 1001) to vllm/llama:\nLossless: copies the whole conversation (2 messages) to vllm/llama\nLossy: vllm/llama starts fresh with the last 10 messages\nClean start: starts vllm/llama fresh, with no messages and no looking back through the chat");
     expect(buttons(db).map((b) => b.text)).toEqual(["Lossless", "Lossy", "Clean start", "‹ Back"]);
     // Back, and forth: nothing is lost on the way.
     press(db, button(db, "‹ Back"));
@@ -232,12 +232,12 @@ describe("the switch card", () => {
     expect(modeLines({ to: "x/y", noop: false, lossless: { kind: "carry", messages: 1 }, lossy: { kind: "resume", since: "2026-11-10T11:00:00Z" }, clean: { drops: true, since: "2026-11-10T11:00:00Z" }, running: 812 }, now)).toEqual({
       lossless: "carries 1 new message into x/y's conversation",
       lossy: "resumes x/y's conversation from 3 days ago",
-      clean: "starts x/y fresh, with no messages (its conversation from 3 days ago is dropped)",
+      clean: "starts x/y fresh, with no messages and no looking back through the chat (its conversation from 3 days ago is dropped)",
       running: "turn 812 is running and will be stopped",
     });
-    expect(modeLines({ to: "x/y", noop: false, lossless: { kind: "copy", messages: 4 }, lossy: { kind: "fresh" }, clean: { drops: false }, running: null }, now).clean).toBe("starts x/y fresh, with no messages");
+    expect(modeLines({ to: "x/y", noop: false, lossless: { kind: "copy", messages: 4 }, lossy: { kind: "fresh" }, clean: { drops: false }, running: null }, now).clean).toBe("starts x/y fresh, with no messages and no looking back through the chat");
     expect(modeLines({ to: "x/y", noop: false, lossless: { kind: "carry", messages: 0 }, lossy: { kind: "resume", since: null }, clean: { drops: true, since: null }, running: null }, now).clean).toBe(
-      "starts x/y fresh, with no messages (its current conversation is dropped)",
+      "starts x/y fresh, with no messages and no looking back through the chat (its current conversation is dropped)",
     );
     expect(relativeTime("2026-11-13T11:55:00Z", now)).toBe("5 minutes ago");
     expect(relativeTime("2026-11-13T09:00:00Z", now)).toBe("3 hours ago");

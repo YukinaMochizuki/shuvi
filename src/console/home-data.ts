@@ -6,7 +6,7 @@ import { PLAYBOOK_NAME } from "../agent/playbooks.ts";
 import { buildPromptSections } from "../agent/prompt.ts";
 import { AUTHOR, CONSOLE_AUTHOR, consoleEditable, homeHead, readHomeFile, SELF_FILES, STICKER_PREFERENCES, TRAILERS } from "../capabilities/memory/home.ts";
 import { HomeLayers, isLayered, listProfiles, profileDir, readProfile } from "../capabilities/memory/layers.ts";
-import { chatCapabilities, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
+import { turnCapabilities, type EnabledCapability, type OwnerInfo } from "../capabilities/types.ts";
 import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import type { BaseDiffState, ChatRef, ConflictState, DiffState, EditState, FileGroup, FileRow, Flash, HistEntry, HomeView, MainPane, PreviewState, ProfileInfo, Who } from "./home.ts";
@@ -532,7 +532,8 @@ export function previewState(db: Db, home: string, q: URLSearchParams, profile: 
   const layers = HomeLayers.of(home, pick.profile);
   const policy = deps?.policy?.() ?? defaultPolicy();
   const cp = resolveChat(policy, pick, deps?.ownerId) ?? undefined;
-  const caps = deps && cp ? chatCapabilities(deps.capabilities, cp.tools) : [];
+  // As her next turn there would have them: a clean conversation has nothing that looks back.
+  const caps = deps && cp ? turnCapabilities(deps.capabilities, cp.tools, pick) : [];
   const sections = buildPromptSections(layers, pick, deps?.owner ?? {}, caps, cp, db).map((s) => ({
     label: s.label,
     text: s.text,

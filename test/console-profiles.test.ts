@@ -309,6 +309,16 @@ describe("profiles on the Home page", () => {
     expect(page).toContain("- work only");
   });
 
+  test("the Preview of a chat in a clean conversation (/newclean) has no Looking back, as her turns there have none", async () => {
+    const { db, home, dm } = world();
+    const before = (await get(db, home, `/home?view=preview&chat=${dm}`)).text;
+    expect(before).toContain("capability: retrieval");
+    db.$client.exec(`update chats set clean_since = 0 where id = ${dm}`);
+    const after = (await get(db, home, `/home?view=preview&chat=${dm}`)).text;
+    expect(after).toContain("capability: speech");
+    expect(after).not.toContain("capability: retrieval");
+  });
+
   test("every profile write is a POST through the write boundary: 405 on GET, the Origin and the token checked", async () => {
     const { db, home } = world();
     expect((await get(db, home, "/home/profile/new")).status).toBe(405);

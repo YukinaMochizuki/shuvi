@@ -39,6 +39,8 @@ export const retrieval = defineCapability<RetrievalConfig>({
   label: "searching chat history",
   gives: "search_chats and read_chat over what was said: every chat from the owner's DM, only itself elsewhere.",
   enable: (env) => (env.SHUVI_RETRIEVAL === "off" ? null : { ownerId: ownerIdFrom(env) }),
+  // Not in a clean conversation (`/newclean`, a clean start): there she does not look back (types.ts `turnCapabilities`).
+  looksBack: true,
   tools(ctx: TurnContext, { ownerId }) {
     const { db, timeZone } = ctx;
     const visible = () => visibleChats(db, ctx.chat, ownerId);

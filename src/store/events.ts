@@ -90,7 +90,7 @@ export interface MessageMedia {
 
 export interface CommandPayload {
   from: Speaker;
-  command: "new" | "stop" | "model" | "profile";
+  command: "new" | "newclean" | "stop" | "model" | "profile";
 }
 
 export interface BotMessagePayload {
@@ -194,9 +194,15 @@ export function allChats(db: Db): Chat[] {
   return db.select().from(chats).all();
 }
 
+/** The chat's newest event seq, of any kind; 0 for none. Where a clean conversation begins (`chats.clean_since`). */
+export function lastChatSeq(db: Pick<Db, "select">, chatId: number): number {
+  return db.select({ s: max(chatEvents.seq) }).from(chatEvents).where(eq(chatEvents.chatId, chatId)).get()?.s ?? 0;
+}
+
 /**
  * Forget the active conversation (a lost one): the next turn starts a fresh one for the same model. The
- * conversations parked for other models (agent/switch.ts), `chat_events` and the cursor stay.
+ * conversations parked for other models (agent/switch.ts), `chat_events` and the cursor stay. A clean
+ * conversation restarts as one (`clean_since` is kept).
  */
 export function resetConversation(db: Db, chatId: number): void {
   db.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null }).where(eq(chats.id, chatId)).run();
@@ -204,11 +210,11 @@ export function resetConversation(db: Db, chatId: number): void {
 
 /**
  * `/new`: forget every model's conversation of the chat, the active one and those parked. Their histories
- * stay until retention prunes them (store/conversations.ts).
+ * stay until retention prunes them (store/conversations.ts). The next one is not a clean one (`clean_since`).
  */
 export function forgetConversations(db: Db, chatId: number): void {
   db.transaction((tx) => {
-    tx.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null }).where(eq(chats.id, chatId)).run();
+    tx.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null, cleanSince: null }).where(eq(chats.id, chatId)).run();
     tx.delete(chatConversations).where(eq(chatConversations.chatId, chatId)).run();
   }, { behavior: "immediate" });
 }
@@ -274,13 +280,21 @@ export function eventOfUpdate(db: Db, updateId: number): ChatEvent | undefined {
 /**
  * The last `limit` things said in the chat at or before `atOrBefore`, by anyone, oldest first: what a
  * fresh conversation is shown so it knows what was just being talked about. Outbound messages count only
- * once delivered (a failed one was never seen by the person).
+ * once delivered (a failed one was never seen by the person). With `after`, only what was said after that
+ * seq (a clean conversation's start, `chats.clean_since`).
  */
-export function recentHistory(db: Db, chatId: number, atOrBefore: number, limit: number): ChatEvent[] {
+export function recentHistory(db: Db, chatId: number, atOrBefore: number, limit: number, after?: number | null): ChatEvent[] {
   return db
     .select()
     .from(chatEvents)
-    .where(and(eq(chatEvents.chatId, chatId), lte(chatEvents.seq, atOrBefore), inArray(chatEvents.kind, ["message", "bot_message"])))
+    .where(
+      and(
+        eq(chatEvents.chatId, chatId),
+        lte(chatEvents.seq, atOrBefore),
+        after != null ? gt(chatEvents.seq, after) : undefined,
+        inArray(chatEvents.kind, ["message", "bot_message"]),
+      ),
+    )
     .orderBy(desc(chatEvents.seq))
     .all()
     .filter((e) => e.kind === "message" || e.status === "sent")

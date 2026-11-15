@@ -246,7 +246,7 @@ describe("model", () => {
     const w = world();
     const picked = await page(w, `/chats/${w.dm}/settings?to=vllm/llama`);
     expect(picked).toContain('<input type="hidden" name="mode" value="clean">');
-    expect(picked).toContain('<span class="mname">Clean start</span> <span class="mline">starts vllm/llama fresh, with no messages</span>');
+    expect(picked).toContain('<span class="mname">Clean start</span> <span class="mline">starts vllm/llama fresh, with no messages and no looking back through the chat</span>');
     await act(w, w.dm, "switch", { to: "vllm/llama", mode: "clean" });
     const req = w.db.$client.query("select id, mode from model_switch_requests").get() as { id: number; mode: string };
     expect(req.mode).toBe("clean");
@@ -256,7 +256,7 @@ describe("model", () => {
     expect(await page(w, to)).toContain(" → vllm/llama (clean start, a new conversation with no messages)</p>");
     expect(getChat(w.db, w.dm)!.backendSessionId).toBeNull();
     // Back to qwen: its conversation (parked by the switch) would be dropped, and the preview says so.
-    expect(await page(w, `/chats/${w.dm}/settings?to=vllm/qwen`)).toMatch(/starts vllm\/qwen fresh, with no messages \(its conversation from [^)]+ is dropped\)/);
+    expect(await page(w, `/chats/${w.dm}/settings?to=vllm/qwen`)).toMatch(/starts vllm\/qwen fresh, with no messages and no looking back through the chat \(its conversation from [^)]+ is dropped\)/);
     expect((await act(w, w.dm, "switch", { to: "vllm/llama", mode: "sideways" })).html).toContain("Pick Lossless, Lossy or Clean start.");
   });
 });
@@ -310,18 +310,22 @@ describe("Start clean", () => {
   test("beside New conversation: one line, asks first; then as /new, but the next turn opens with no messages", async () => {
     const w = world();
     const s = await page(w, `/chats/${w.dm}/settings`);
-    expect(s).toContain("<b>Start clean</b> <span>As New conversation, but her next turn opens with no earlier messages at all, only the new ones.");
+    expect(s).toContain("<b>Start clean</b> <span>As <span class=\"mono\">/newclean</span> does: a new conversation, but her next turn opens with no earlier messages at all, only the new ones, and she cannot look back through the chat's history while it lasts.");
+    expect(s).not.toContain("<b>clean</b>");
     expect(s).toContain(`href="/chats/${w.dm}/settings?confirm=clean#conversation"`);
     expect(s).not.toContain(`action="/chats/${w.dm}/settings/clean"`);
     const asking = await page(w, `/chats/${w.dm}/settings?confirm=clean`);
     expect(asking).toContain("<b>Start clean?</b>");
+    expect(asking).toContain("she cannot look back through the chat's history (no search_chats, no read_chat)");
     expect(asking).toContain(`action="/chats/${w.dm}/settings/clean"`);
     expect(getChat(w.db, w.dm)!.backendSessionId).toBe("oa-1");
     expect((await get(w, `/chats/${w.dm}/settings/clean`)).status).toBe(405);
     expect((await post(w, `/chats/${w.dm}/settings/clean`, {}, { origin: null })).status).toBe(403);
     expect(getChat(w.db, w.dm)!.backendSessionId).toBe("oa-1");
     const { html } = await act(w, w.dm, "clean", {});
-    expect(html).toContain("DM · Owner starts clean: her next turn here opens with its new messages only, no earlier ones.");
+    expect(html).toContain("DM · Owner starts clean: her next turn here opens with its new messages only, no earlier ones, and she cannot look back through the chat&#39;s history while this conversation lasts.");
+    expect(html).toContain("Started clean: her next turn here opens a <b>clean</b> conversation");
+    expect(getChat(w.db, w.dm)!.cleanSince).not.toBeNull();
     expect(getChat(w.db, w.dm)!.backendSessionId).toBeNull();
     const row = w.db.$client.query("select mode, from_model as f, to_model as t from model_switches order by id desc limit 1").get();
     expect(row).toEqual({ mode: "clean", f: "vllm/qwen", t: "vllm/qwen" });

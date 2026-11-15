@@ -9,7 +9,7 @@ import { GAP_NOTE_MINUTES, isLostSession, isRetryAfterDrain, runTurn } from "../
 import { controlMessagesOf } from "../src/store/control.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
-import { enqueueOutbound, getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
+import { enqueueOutbound, forgetConversations, getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
 import { claimTurn, DRAIN_STOP, finishTurn, getTurn, markDrainStop, markStop, saveSession } from "../src/store/turns.ts";
 import { modelSwitches } from "../src/store/schema.ts";
 import { startClean } from "../src/agent/switch.ts";
@@ -18,7 +18,7 @@ import { lastSeq, memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } fr
 
 const emptyHome = mkdtempSync(join(tmpdir(), "shuvi-home-"));
 
-async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: AbortSignal; web?: { tavilyApiKey?: string }; startedAt?: string } = {}) {
+async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: AbortSignal; web?: { tavilyApiKey?: string }; startedAt?: string; retrieval?: boolean } = {}) {
   const turn = claimTurn(db, ownerChatId(db))!;
   if (opts.startedAt) db.$client.run("update turns set started_at = ? where id = ?", [opts.startedAt, turn.id]);
   let adapter!: ScriptedAdapter;
@@ -30,8 +30,13 @@ async function turnWith(db: Db, script: Step[], opts: { home?: string; signal?: 
     makeAdapter: (b) => (adapter = new ScriptedAdapter(b, script)),
     ...(opts.signal ? { signal: opts.signal } : {}),
     // The web capability is on when the test asks for it, off otherwise, through its own variables.
-    // Schedules, memory, retrieval and playbooks are off here: these tests are about speech and web.
-    capabilities: enabledCapabilities(opts.web ? { SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_GROUPS: "off", ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) } : { SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_GROUPS: "off" }),
+    // Schedules, memory, retrieval and playbooks are off here: these tests are about speech and web (retrieval: on
+    // when asked for, for a clean conversation's).
+    capabilities: enabledCapabilities(
+      opts.web
+        ? { SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_GROUPS: "off", ...(opts.web.tavilyApiKey ? { SHUVI_TAVILY_API_KEY: opts.web.tavilyApiKey } : {}) }
+        : { SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: opts.retrieval ? "on" : "off", SHUVI_PLAYBOOKS: "off", SHUVI_GROUPS: "off" },
+    ),
   });
   return { outcome, adapter, turn: getTurn(db, turn.id)! };
 }
@@ -271,6 +276,73 @@ describe("runTurn: input and the cursor", () => {
     expect(getTurn(db, turn.id)!.opening).toBe("new");
   });
 
+  test("a clean conversation (/newclean): no search_chats / read_chat nor their section, on every turn of it; after /new they are back", async () => {
+    const db = memDb();
+    addProvider(db, { name: "vllm", kind: "openai-compat", baseUrl: "http://127.0.0.1:9/v1" });
+    addModel(db, { provider: "vllm", model: "qwen", contextWindow: 32_000, isDefault: true });
+    ownerSays(db, "we were just talking about headphones");
+    const before = await turnWith(db, [{ token: "QC Ultra is good" }], { retrieval: true });
+    expect(before.adapter.calls[0]!.tools).toEqual(expect.arrayContaining(["search_chats", "read_chat"]));
+    expect(before.adapter.calls[0]!.systemPrompt).toContain("## Looking back");
+    db.$client.exec("update chat_events set status = 'sent' where kind = 'bot_message'");
+    startClean(db, ownerChatId(db));
+    for (const [n, said] of ["which colour then", "and the case?"].entries()) {
+      ownerSays(db, said);
+      const { adapter } = await turnWith(db, [{ token: "ok" }], { retrieval: true });
+      const call = adapter.calls[0]!;
+      expect(call.method).toBe(n === 0 ? "run" : "continueRun");
+      expect(call.tools).not.toContain("search_chats");
+      expect(call.tools).not.toContain("read_chat");
+      expect(call.tools).toContain("say");
+      expect(call.systemPrompt).not.toContain("Looking back");
+      if (n === 0) expect(JSON.stringify(call.prompt)).not.toContain("headphones");
+    }
+    forgetConversations(db, ownerChatId(db));
+    ownerSays(db, "one more");
+    const after = await turnWith(db, [{ token: "ok" }], { retrieval: true });
+    expect(after.adapter.calls[0]!.tools).toEqual(expect.arrayContaining(["search_chats", "read_chat"]));
+    expect(after.adapter.calls[0]!.systemPrompt).toContain("## Looking back");
+  });
+
+  test("a message nobody answered before /newclean is not the clean conversation's: it counts as seen, unanswered", async () => {
+    const db = memDb();
+    addProvider(db, { name: "vllm", kind: "openai-compat", baseUrl: "http://127.0.0.1:9/v1" });
+    addModel(db, { provider: "vllm", model: "qwen", contextWindow: 32_000, isDefault: true });
+    ownerSays(db, "OLD-TOPIC-BEFORE-NEWCLEAN");
+    startClean(db, ownerChatId(db)); // the message above is still past the cursor
+    ownerSays(db, "the new topic");
+    const { adapter, turn } = await turnWith(db, [{ token: "ok" }]);
+    const prompt = JSON.stringify(adapter.calls[0]!.prompt);
+    expect(prompt).toContain("the new topic");
+    expect(prompt).not.toContain("OLD-TOPIC-BEFORE-NEWCLEAN");
+    expect(getChat(db, ownerChatId(db))!.cursorSeq).toBe(turn.toSeq);
+    // Only it: the turn closes empty, and counts it as seen.
+    const db2 = memDb();
+    addProvider(db2, { name: "vllm", kind: "openai-compat", baseUrl: "http://127.0.0.1:9/v1" });
+    addModel(db2, { provider: "vllm", model: "qwen", contextWindow: 32_000, isDefault: true });
+    const old = ownerSays(db2, "OLD-TOPIC-BEFORE-NEWCLEAN");
+    startClean(db2, ownerChatId(db2));
+    const empty = await turnWith(db2, [{ token: "must not run" }]);
+    expect(empty.outcome).toBe("empty");
+    expect(empty.adapter).toBeUndefined();
+    expect(getChat(db2, ownerChatId(db2))!.cursorSeq).toBe(old);
+  });
+
+  test("a clean conversation opened afresh between turns (its session gone, its clean start already opened) is shown only what was said since it began", async () => {
+    const db = memDb();
+    ownerSays(db, "FROM-BEFORE-THE-CLEAN-START");
+    const since = (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
+    ownerSays(db, "SAID-IN-THE-CLEAN-CONVERSATION");
+    // No session, no clean switch row to open: an ordinary fresh opening, but of a clean conversation.
+    db.$client.exec(`update chats set cursor_seq = (select max(seq) from chat_events), backend_session_id = null, clean_since = ${since}`);
+    ownerSays(db, "are you there");
+    const { adapter } = await turnWith(db, [{ token: "ok" }]);
+    const prompt = JSON.stringify(adapter.calls[0]!.prompt);
+    expect(adapter.calls[0]!.method).toBe("run");
+    expect(prompt).toContain("SAID-IN-THE-CLEAN-CONVERSATION");
+    expect(prompt).not.toContain("FROM-BEFORE-THE-CLEAN-START");
+  });
+
   test("the first turn starts a conversation with the system prompt; later turns continue it with the prompt built afresh", async () => {
     const db = memDb();
     const home = mkdtempSync(join(tmpdir(), "shuvi-home-"));
@@ -461,6 +533,26 @@ describe("runTurn: a lost conversation", () => {
     expect(turn.opening).toBe("lost");
     expect(adapter.calls.map((call) => call.method)).toEqual(["continueRun", "run"]);
     expect(adapter.calls[1]!.prompt as string).toContain("earlier API context");
+  });
+
+  test("a lost CLEAN conversation restarts as one: with the last messages said since it began only, and still no looking back", async () => {
+    const db = memDb();
+    ownerSays(db, "from before the clean start");
+    const chatId = ownerChatId(db);
+    const since = (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
+    ownerSays(db, "said in the clean conversation");
+    db.$client.exec(`update chats set cursor_seq = (select max(seq) from chat_events), backend_session_id = 'gone-session', clean_since = ${since}`);
+    ownerSays(db, "are you there");
+    const { outcome, adapter } = await lostTurn(db, LOST);
+    expect(outcome).toBe("done");
+    expect(adapter.calls.map((c) => c.method)).toEqual(["continueRun", "run"]);
+    const prompt = adapter.calls[1]!.prompt as string;
+    expect(prompt).toContain("said in the clean conversation");
+    expect(prompt).not.toContain("from before the clean start");
+    expect(adapter.calls[1]!.tools).not.toContain("read_chat");
+    expect(adapter.calls[1]!.tools).not.toContain("search_chats");
+    expect(adapter.calls[1]!.systemPrompt).not.toContain("Looking back");
+    expect(getChat(db, chatId)!.cleanSince).toBe(since);
   });
 
   test("the conversation is reset and the same turn runs again at once as a fresh one, with the last messages, costing no attempt", async () => {

@@ -12,7 +12,9 @@ import { answerApproval, getApproval } from "../src/control/approvals.ts";
 import { LAST_GOOD_KEY, loadPolicy, PolicyWatch } from "../src/policy/load.ts";
 import { checkEntry, DM_DEFAULT, parsePolicy, resolveChat, type Policy } from "../src/policy/policy.ts";
 import { applyChange, applyPolicyApprovals, lineDiff, requestPolicyChange } from "../src/policy/write.ts";
+import { commandPass } from "../src/server/commands.ts";
 import { recordBatch } from "../src/server/poller.ts";
+import { addModel, addProvider } from "../src/store/models.ts";
 import { wakerPass } from "../src/server/waker.ts";
 import { controlMessagesOf } from "../src/store/control.ts";
 import type { Db } from "../src/store/db.ts";
@@ -487,6 +489,39 @@ describe("a group turn", () => {
     expect(prompt).toMatch(/· Ownerly · ⚙ owner\] @shuvi_test_bot settle this/);
     expect(prompt).not.toMatch(/Alice · ⚙ owner/);
     expect(getChat(db, chat.id)!.cursorSeq).toBe(turn.toSeq);
+  });
+
+  test("after /newclean in a group, the chatter from before it is not the clean turn's context: only what came after", async () => {
+    const db = memDb();
+    addProvider(db, { name: "vllm", kind: "openai-compat", baseUrl: "http://127.0.0.1:9/v1" });
+    addModel(db, { provider: "vllm", model: "qwen", contextWindow: 32_000, isDefault: true });
+    const policy = policyOf();
+    for (let i = 1; i <= 5; i++) record(db, policy, groupUpdate(`OLDCHATTER ${i}`, i % 2 ? ALICE : BOB));
+    record(db, policy, groupUpdate("/newclean", OWNER));
+    commandPass(db, () => {});
+    record(db, policy, groupUpdate("NEWCHATTER after", BOB));
+    record(db, policy, groupUpdate("@shuvi_test_bot new topic", OWNER));
+    const { adapter, turn, chat } = await run(db, policy, [{ token: "Done." }]);
+    const prompt = String(adapter.calls[0]!.prompt);
+    expect(prompt).not.toContain("OLDCHATTER");
+    expect(prompt).not.toContain("not shown here");
+    expect(prompt).toContain("NEWCHATTER after");
+    expect(prompt).toContain("new topic");
+    expect(adapter.calls[0]!.tools).not.toContain("read_chat");
+    // All of it counts as seen.
+    expect(getChat(db, chat.id)!.cursorSeq).toBe(turn.toSeq);
+  });
+
+  test("in a clean conversation (/newclean) the count of older unread messages does not offer read_chat, which it lacks", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    for (let i = 1; i <= 14; i++) record(db, policy, groupUpdate(`chatter ${i}`, i % 2 ? ALICE : BOB));
+    record(db, policy, groupUpdate("@shuvi_test_bot settle this", OWNER));
+    db.$client.exec(`update chats set clean_since = 0 where id = ${groupChat(db).id}`);
+    const { adapter } = await run(db, policy, [{ token: "Done." }]);
+    const prompt = String(adapter.calls[0]!.prompt);
+    expect(prompt).toContain("(4 earlier messages since your last turn are not shown here.)");
+    expect(adapter.calls[0]!.tools).not.toContain("read_chat");
   });
 
   test("its first message replies to what woke it when someone spoke since; the turn records what woke it", async () => {
