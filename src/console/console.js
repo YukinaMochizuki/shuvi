@@ -1,6 +1,7 @@
 // The console's own script (same origin; the pages work without it, and without htmx). Copy buttons, j / k to
-// move through the turn list, a line when the console cannot be reached, and selecting messages to delete
-// (below: the "⋯" menu, the pill, the snackbar with its undo; pages.ts `pickable` / `deleteBar`, delete-write.ts).
+// move through the turn list, a line when the console cannot be reached, selecting messages to delete
+// (below: the "⋯" menu, the pill, the snackbar with its undo; pages.ts `pickable` / `deleteBar`, delete-write.ts),
+// and live pages (last: the stream from /live that keeps a chat's log, a segment, a turn and the list current; live.ts).
 // htmx (html.ts `page`) swaps pages in place, so nothing here holds on to an element of a page: clicks and keys
 // are handled on the document, and what a new page needs is done for each piece htmx puts in (`htmx.onLoad`), or
 // once without htmx.
@@ -12,6 +13,8 @@ document.documentElement.classList.add("js");
 /** What a page (or a piece swapped into one) needs once it is in: its copy buttons shown, the selected row in view. */
 function arrive(root) {
   for (const b of root.querySelectorAll("button.copy[data-copy][hidden]")) b.hidden = false;
+  // A whole page in (a load, a boosted swap): its live stream, or none.
+  if (root === document || root === document.body || root.querySelector?.("[data-live-page]")) startLive();
   // A select that acts on change (Home's profile switch and Preview chat): its button is for no script only.
   for (const b of root.querySelectorAll("[data-autosubmit-btn]")) b.hidden = true;
   const on = root.querySelector(".rows a.row.on");
@@ -329,8 +332,309 @@ function showSnack(detail, deleted, answer) {
   snacked.timer = setTimeout(() => hideSnack(snack, detail), answer.seconds * 1000);
 }
 
+// ---- live pages ------------------------------------------------------------------------------------------------
+// A page drawn with `data-live-page` (pages.ts `split`: a chat's log, a segment, a conversation, a turn) opens an
+// EventSource on /live for itself (live.ts). It says what it has: the name and hash of each part that may still change
+// (`.lb[data-live]`) and of every trace part after the first of those, and its trace's last part; it gets back the
+// parts that differ, drawn by the same code as the page. A part is put in place row by row: a row that did not change
+// stays as it is (with what the reader opened or selected in it), a changed row takes the place of the old one (a
+// details it had open stays open), new rows go in. A row holding a deleted bubble waiting for its undo (`.gone`) is
+// never taken out: the undo brings it back. After an error the stream is opened again from what the page has then (no
+// gap, nothing twice), unless the page is no longer live or the sign-in ended (asked with `probe=1`). The view
+// follows new rows only when the reader is at the bottom; else "↓ N new". Nothing live ever reloads a page by itself
+// while it holds an undo or a selection, or moves it: what needs a load (a newer segment on /turns, a deploy, a
+// stopped stream) is said in a quiet bar (`.livebar`) with the button that does it.
+
+const assetsOurs = document.querySelector('meta[name="assets"]')?.content ?? "";
+/** This tab, for as long as this script runs in it: its next page's stream replaces its last one (live.ts, the cap). */
+const tabId = Math.random().toString(36).slice(2, 12);
+const live = { es: null, page: "", timer: null, backoff: 1000, bye: false, fresh: 0 };
+/** A row → the HTML the server drew it with, before this script touched it (what the next frame is compared with). */
+const drawn = new WeakMap();
+
+/**
+ * A row's HTML as drawn, to compare with the next frame's: copy buttons hidden again (`arrive` shows them), and
+ * `<noscript>` emptied (a page htmx swapped in has it parsed as elements, one parsed here as text).
+ */
+function pristine(el) {
+  const c = el.cloneNode(true);
+  for (const b of c.querySelectorAll("button.copy[data-copy]")) b.hidden = true;
+  for (const n of c.querySelectorAll("noscript")) n.textContent = "";
+  return c.outerHTML;
+}
+
+function stopLive() {
+  clearTimeout(live.timer);
+  live.timer = null;
+  live.es?.close();
+  live.es = null;
+}
+
+/** The quiet bar: what the page cannot do by itself, and the button that does it (none: `text` alone). */
+function liveBar(text, label, act) {
+  for (const b of document.querySelectorAll(".livebar")) b.remove();
+  const detail = document.querySelector(".detail-pane .detail");
+  if (!detail) return;
+  const bar = document.createElement("div");
+  bar.className = "livebar";
+  bar.setAttribute("role", "status");
+  const t = document.createElement("span");
+  t.textContent = text;
+  bar.append(t);
+  if (label) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.onclick = () => {
+      bar.remove();
+      act();
+    };
+    bar.append(b);
+  }
+  detail.append(bar);
+}
+
+/** A page that may lose something to a load: a pending delete's Undo, a selection. */
+const holding = () => !!document.querySelector(".snack:not([hidden]), .detail.selecting");
+
+function startLive() {
+  stopLive();
+  const root = document.querySelector("[data-live-page]");
+  if (!root || !window.EventSource) return;
+  live.page = root.dataset.livePage;
+  live.bye = false;
+  live.backoff = 1000;
+  live.fresh = 0;
+  for (const part of document.querySelectorAll(".lb[data-k]")) for (const row of part.children) if (!drawn.has(row)) drawn.set(row, pristine(row));
+  connect();
+}
+
+/** What the page has (live.ts "the cursor is the page"): its live parts, and its trace from the first live one on. */
+function pageState() {
+  const have = [];
+  for (const p of document.querySelectorAll(".lb[data-k][data-live]")) if (!p.parentElement?.matches('[data-region="trace"]')) have.push(`${p.dataset.k}.${p.dataset.h}`);
+  const trace = [...document.querySelectorAll('[data-region="trace"] > .lb[data-k]')];
+  const from = trace.findIndex((p) => p.hasAttribute("data-live"));
+  if (from >= 0) for (const p of trace.slice(from)) have.push(`${p.dataset.k}.${p.dataset.h}`);
+  return { have: have.join(","), last: trace.length ? trace[trace.length - 1].dataset.k : "" };
+}
+
+function connect() {
+  const q = new URLSearchParams({ page: live.page, v: assetsOurs, tab: tabId, ...pageState() });
+  const es = new EventSource(`/live?${q}`);
+  live.es = es;
+  es.addEventListener("hello", (e) => {
+    live.backoff = 1000;
+    // This sign-in's CSRF token as the server now derives it: after a restart (a new secret), the page's deletes still pass.
+    const { csrf } = JSON.parse(e.data);
+    if (!csrf) return;
+    for (const d of document.querySelectorAll(".delui[data-csrf]")) d.dataset.csrf = csrf;
+    for (const i of document.querySelectorAll('input[name="csrf"]')) i.value = csrf;
+  });
+  es.addEventListener("ops", (e) => apply(JSON.parse(e.data)));
+  es.addEventListener("bye", () => {
+    // Too many pages of this sign-in open: this one rests until asked (which closes the oldest other).
+    live.bye = true;
+    stopLive();
+    liveBar("Live updates paused (too many pages open)", "Resume", () => {
+      live.bye = false;
+      connect();
+    });
+  });
+  es.addEventListener("reload", () => {
+    // A deploy since this page loaded (its stylesheet and scripts are old). Loaded again, once, unless that would
+    // cost an undo or a selection, or it was just tried: then the page says so and waits for the reader.
+    stopLive();
+    const last = Number(sessionStorage.getItem("shuvi.liveReload") ?? 0);
+    if (holding() || Date.now() - last < 15_000) return void liveBar("The console was updated: live updates stopped", "Reload", () => location.reload());
+    sessionStorage.setItem("shuvi.liveReload", String(Date.now()));
+    location.reload();
+  });
+  es.onerror = async () => {
+    // EventSource would reconnect by itself, but saying what the page had when it first connected: reconnect from now,
+    // unless the page is no longer live (204) or the sign-in ended (401, 403).
+    es.close();
+    if (live.es !== es) return;
+    live.es = null;
+    if (live.bye) return;
+    let status = 0;
+    try {
+      status = (await fetch(`/live?${new URLSearchParams({ page: live.page, probe: "1" })}`, { credentials: "same-origin" })).status;
+    } catch {}
+    if (live.es || live.bye || document.querySelector("[data-live-page]")?.dataset.livePage !== live.page) return;
+    if (status === 204 || status === 401 || status === 403) return void liveBar("Live updates stopped", "Reload", () => location.reload());
+    live.timer = setTimeout(connect, live.backoff);
+    live.backoff = Math.min(live.backoff * 2, 30_000);
+  };
+}
+
+/** What scrolls the detail: its pane when it scrolls (wide screens), else the page (narrow ones, or a short page). */
+function scroller() {
+  const pane = document.querySelector(".detail-pane");
+  return pane && /(auto|scroll)/.test(getComputedStyle(pane).overflowY) && pane.scrollHeight > pane.clientHeight + 1 ? pane : document.scrollingElement;
+}
+const atBottom = (sc) => sc.scrollHeight - sc.scrollTop - sc.clientHeight < 48;
+
+/** Open or selected state kept from the row a new one replaces. */
+function carry(old, row) {
+  // A list group keeps its fold even when its class changes (a failure marked, cleared).
+  if (old.tagName === "DETAILS" && row.tagName === "DETAILS" && old.classList[0] === row.classList[0]) row.open = old.open;
+  const sameStep = old.querySelector(":scope > .at")?.textContent === row.querySelector(":scope > .at")?.textContent;
+  const theirs = row.querySelectorAll("details");
+  old.querySelectorAll("details").forEach((d, i) => {
+    const m = d.id ? row.querySelector(`details#${CSS.escape(d.id)}`) : sameStep ? theirs[i] : null;
+    if (m && m.className === d.className) m.open = d.open;
+  });
+  for (const p of old.querySelectorAll(".pickable.on")) {
+    for (const q of row.querySelectorAll(`.pickable[data-seq="${p.dataset.seq}"]`)) {
+      q.classList.add("on");
+      q.querySelector(".dsel")?.setAttribute("aria-pressed", "true");
+    }
+  }
+}
+
+/** Bring `part`'s rows to `fresh`'s; how many rows it gained. */
+function morph(part, fresh) {
+  const olds = [...part.children];
+  const news = [...fresh.children];
+  let j = 0;
+  let added = 0;
+  const drop = (el) => {
+    // A deleted bubble waiting for its undo stays (hidden) where it was, for the undo to bring back.
+    if (el.matches(".gone") || el.querySelector(".gone")) return;
+    el.remove();
+    added--;
+  };
+  for (const row of news) {
+    const s = pristine(row);
+    let m = -1;
+    for (let x = j; x < olds.length; x++) {
+      if (drawn.get(olds[x]) === s) {
+        m = x;
+        break;
+      }
+    }
+    if (m >= 0) {
+      for (let x = j; x < m; x++) drop(olds[x]);
+      j = m + 1;
+      continue;
+    }
+    drawn.set(row, s);
+    if (olds[j]) carry(olds[j], row);
+    part.insertBefore(row, olds[j] ?? null);
+    added++;
+  }
+  for (let x = j; x < olds.length; x++) drop(olds[x]);
+  return Math.max(0, added);
+}
+
+/** A part's name, version and liveness as the stream says. */
+function mark(el, op) {
+  el.dataset.k = op.k;
+  el.dataset.h = op.h;
+  el.toggleAttribute("data-live", !!op.live);
+}
+
+/** One frame's ops (live.ts `Op`). */
+function apply(ops) {
+  // A stream for a page that is no longer the one shown (a swap it was not closed for): its ops are not this page's.
+  if (document.querySelector("[data-live-page]")?.dataset.livePage !== live.page) return void startLive();
+  const sc = scroller();
+  const bottom = atBottom(sc);
+  let added = 0;
+  for (const op of ops) {
+    if (op.newer) {
+      // On /turns, a newer segment is what a load would show now: offered, never loaded by itself.
+      liveBar("New activity", "Show", () => location.assign(live.page));
+      continue;
+    }
+    const region = op.in ? document.querySelector(`[data-region="${op.in}"]`) : null;
+    if (op.order) {
+      // The list's groups in the order of last activity (moved, not drawn again: a fold stays as it was).
+      const now = region ? [...region.children].filter((c) => c.matches(".lb")) : [];
+      if (now.map((c) => c.dataset.k).join() === op.order.join()) continue;
+      for (const k of op.order) {
+        const g = region.querySelector(`:scope > .lb[data-k="${k}"]`);
+        if (g) region.append(g);
+      }
+      continue;
+    }
+    const el = document.querySelector(`.lb[data-k="${op.k}"]`);
+    if (op.rm) {
+      if (el && !el.querySelector(".gone")) el.remove();
+      continue;
+    }
+    const tpl = document.createElement("template");
+    tpl.innerHTML = op.html;
+    if (el) {
+      const n = morph(el, tpl.content);
+      if (op.in === "trace") added += n;
+      mark(el, op);
+      settle(el);
+      continue;
+    }
+    if (!region) continue;
+    const part = document.createElement("div");
+    part.className = "lb";
+    mark(part, op);
+    for (const row of tpl.content.children) drawn.set(row, pristine(row));
+    part.append(tpl.content);
+    const after = op.after ? region.querySelector(`:scope > .lb[data-k="${op.after}"]`) : null;
+    if (after) after.after(part);
+    else if (op.after) region.append(part);
+    else region.prepend(part);
+    if (op.in === "trace") added += part.children.length;
+    settle(part);
+  }
+  const now = scroller();
+  if (bottom) now.scrollTop = now.scrollHeight;
+  else if (added) {
+    live.fresh += added;
+    newPill();
+  }
+}
+
+/** What a part put in needs: copy buttons shown, links and forms boosted. */
+function settle(el) {
+  for (const b of el.querySelectorAll("button.copy[data-copy][hidden]")) b.hidden = false;
+  window.htmx?.process(el);
+}
+
+/** "↓ N new" at the bottom of the detail while the reader is scrolled up. */
+function newPill() {
+  const detail = document.querySelector(".detail-pane .detail");
+  if (!detail) return;
+  let b = detail.querySelector(".livenew");
+  if (!b) {
+    b = document.createElement("button");
+    b.type = "button";
+    b.className = "livenew";
+    detail.append(b);
+  }
+  b.textContent = `↓ ${live.fresh} new`;
+  b.hidden = live.fresh === 0;
+}
+
+function clearNew() {
+  live.fresh = 0;
+  for (const b of document.querySelectorAll(".livenew")) b.hidden = true;
+}
+
+document.addEventListener("click", (e) => {
+  if (!(e.target instanceof Element) || !e.target.closest(".livenew")) return;
+  const sc = scroller();
+  sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" });
+  clearNew();
+});
+document.addEventListener("scroll", () => live.fresh && atBottom(scroller()) && clearNew(), { capture: true, passive: true });
+// Leaving the page (or into the back-forward cache): the stream ends; back from the cache, it opens again.
+window.addEventListener("pagehide", stopLive);
+window.addEventListener("pageshow", (e) => e.persisted && startLive());
+
 if (window.htmx) {
   window.htmx.onLoad(arrive);
+  // A boosted navigation swaps the body (htmx:load fires for what is in it, not for it): the new page's stream, or none.
+  document.addEventListener("htmx:afterSettle", (e) => e.detail.target === document.body && startLive());
   // A part of a page that fetches itself (settings.ts `polls`) takes only its own answer: an error or the sign-in
   // page is a whole page, which must not land inside it. It is left as it was and asks again next time.
   document.addEventListener("htmx:beforeSwap", (e) => {
@@ -340,7 +644,7 @@ if (window.htmx) {
   // stylesheet and scripts. When a whole page's `<meta name="assets">` (html.ts `page`, assets.ts) differs from
   // ours, load it in full instead. Only for a GET, which can be asked again; a write's answer is swapped in as it
   // is, and the next navigation loads in full.
-  const ours = document.querySelector('meta[name="assets"]')?.content;
+  const ours = assetsOurs;
   document.addEventListener("htmx:beforeSwap", (e) => {
     const d = e.detail;
     if (!ours || !d.boosted || d.requestConfig?.verb !== "get") return;

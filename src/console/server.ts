@@ -25,6 +25,7 @@ import { CAPABILITIES } from "../capabilities/index.ts";
 import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
 import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
 import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } from "./delete-write.ts";
+import { openLive, type LiveHub } from "./live.ts";
 
 /**
  * The console's HTTP side: who may look, and which page answers which URL.
@@ -88,6 +89,12 @@ import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } 
  * under an address carrying its content's hash, cached for good only there (assets.ts). Every page works without them; with them, links and forms swap the page in place (html.ts), and
  * Settings swaps only what changed and fetches a pending probe's row or listing (`/settings/model?id=`,
  * `/settings/listing`, read routes answering a part of the page) until it is done (settings.ts).
+ * LIVE PAGES: `GET /live?page=<a page's path>` is an event stream (Server-Sent Events) that keeps that page current
+ * (a chat's log, a segment, a conversation, a turn, the chats list): HTML parts drawn by the page's own functions,
+ * from one poll of the store shared by every open stream (live.ts). It is a read like any page: the same Host check
+ * and sign-in, its own session's streams capped, nothing written. EventSource is a same-origin request, so the CSP
+ * needs nothing beyond `connect-src 'self'`. Bun's idle timeout is lifted for it (`serveConsole`); its heartbeat
+ * keeps a proxy from cutting it.
  */
 
 export interface ConsoleDeps {
@@ -120,6 +127,8 @@ export interface ConsoleDeps {
    */
   computer?: ComputerConfig | null;
   now?: () => number;
+  /** The live streams' hub (live.ts). Default: the one of `db`. */
+  liveHub?: LiveHub;
 }
 
 export const LOGIN_HEADER = "tailscale-user-login";
@@ -355,6 +364,12 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     }
     if (path === "/" || path === "/login") return respond(null, 302, "text/plain", { location: "/turns" });
     if (path === "/media") return media(deps, url.searchParams.get("ref"));
+    if (path === "/live") {
+      // The assets' version is known only once the editor is built (assets.ts): a page reconnecting just after a restart
+      // must not be told its assets changed while the build is still under way.
+      await warmAssets().catch(() => {});
+      return openLive({ db: deps.db, ctx, now: deps.now ?? Date.now, session: auth.session, url, signal: req.signal, ...(deps.liveHub ? { hub: deps.liveHub } : {}) }, SECURITY_HEADERS);
+    }
     // Chats and turns are one navigation now (the list groups turns by chat); the old address leads there.
     if (path === "/chats") return respond(null, 302, "text/plain", { location: "/turns" });
     if (path === "/turns") return htmlResponse(turnsPage(ctx, url.searchParams)!);
@@ -432,7 +447,15 @@ export function serveConsole(
   signal: AbortSignal,
 ): ReturnType<typeof Bun.serve> {
   let allowed: { hosts: ReadonlySet<string>; origins: ReadonlySet<string> } = { hosts: new Set(), origins: new Set() };
-  const server = Bun.serve({ ...parseConsoleListen(listen), maxRequestBodySize: MAX_BODY, fetch: (req) => handleConsole({ ...deps, allowedHosts: allowed.hosts, allowedOrigins: allowed.origins }, req) });
+  const server = Bun.serve({
+    ...parseConsoleListen(listen),
+    maxRequestBodySize: MAX_BODY,
+    fetch: (req, srv) => {
+      // A live page's stream stays open while the page does (live.ts): no idle timeout; its heartbeat keeps it busy.
+      if (new URL(req.url).pathname === "/live") srv.timeout(req, 0);
+      return handleConsole({ ...deps, allowedHosts: allowed.hosts, allowedOrigins: allowed.origins }, req);
+    },
+  });
   allowed = where(server.port!);
   // Build the editor now, so the first Home page does not wait for it and names its version (a failure is retried on request).
   void warmAssets().catch((e) => console.error("console: ", e instanceof Error ? e.message : e));
