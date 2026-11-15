@@ -182,18 +182,26 @@ tg.updates.push(dmUpdate(1, "Can you check tomorrow's weather"));
 await until("the first two messages to reach Telegram", () => texts().length >= 2);
 check(texts().join("|") === "On it, let me look|Halfway there, here is the gist", `text before a tool call and a say() arrive in order (${texts().join("|")})`);
 await until("the slow model step to start", () => slowStepStarted);
+const db = openDb(join(dataDir, "shuvi.db"));
+const outboundPending = () =>
+  (db.$client.query("select payload from chat_events where kind = 'bot_message' and status = 'pending' order by seq").all() as { payload: string }[]).map(
+    (r) => (JSON.parse(r.payload) as { text: string }).text,
+  );
+// The fake has received both messages, but the server records each as sent only once Telegram's answer is back.
+// Kill it before that and the row stays pending (or is sent again: the window the sender's header owns), which
+// is not what this section is about. So the kill waits until both are recorded; the slow step is still running.
+await until("the first two messages to be recorded as sent", () => outboundPending().length === 0);
 
 process.kill(-server!.pid, "SIGKILL"); // the whole group, no drain: only a detached child survives this
 await server!.exited;
 log("server's process group killed mid-turn");
-const db = openDb(join(dataDir, "shuvi.db"));
 const running = db.$client.query("select id, pid from turns where status = 'running'").all() as { id: number; pid: number }[];
 check(running.length === 1, "the turn is still running with no server");
 
 await until("the turn to finish on its own", () => (db.$client.query("select status from turns where id = ?").get(running[0]!.id) as { status: string }).status !== "running", 30_000);
 check(texts().length === 2, "nothing was sent while no server was up");
-const pending = db.$client.query("select count(*) as n from chat_events where status = 'pending'").get() as { n: number };
-check(pending.n === 1, "the turn's last message waits, queued");
+const pending = outboundPending();
+check(pending.join("|") === "All done.", `the turn's last message waits, queued (${pending.join("|")})`);
 
 startServer();
 await until("the queued message to be delivered", () => texts().length >= 3);
