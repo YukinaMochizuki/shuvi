@@ -893,13 +893,13 @@ export const stickerLibrary = sqliteTable(
 );
 
 /**
- * Prewarms (src/capabilities/media/): a link to a known video host in an OWNER's message, probed through
- * porchkit as soon as the message is recorded, alongside the turn being spawned. One row per link of a
- * message (`seq`, `n`); the row keeps the link's hash (`url_hash`, the key a `video_probe` call joins by) and
- * host, not the URL. `result` is the probe's answer as video_probe shows it (title, uploader, length,
- * chapters, subtitle languages; media/text.ts `storedProbe`, no URL), kept FOR AN HOUR so a `video_probe` of
- * the same link needs no second request; media's prune then drops it and the accounting stays. `used_turn_id`:
- * the first turn that called `video_probe` with the link (the console's "prewarmed: used / unused").
+ * Prewarms (src/capabilities/media/prewarm.ts): each link of a message that starts a turn (and of the message
+ * it replies to), read through porchkit's `/read` as soon as the message is recorded, alongside the turn being
+ * spawned. One row per link of a message (`seq`, `n`); the row keeps the link's hash (`url_hash`, the key a
+ * `read_link` call joins by) and host, not the URL. `result` is only the kind porchkit answered
+ * (`{kind: "post"}`), kept FOR AN HOUR; media's prune then drops it and the accounting stays. Older `probe` rows
+ * hold the probe's answer as video_probe shows it (no URL), which video_probe still joins. `used_turn_id`: the
+ * first turn that called the endpoint's tool with the link (the console's "prewarmed: used / unused").
  */
 export const mediaPrewarms = sqliteTable(
   "media_prewarms",
@@ -915,8 +915,8 @@ export const mediaPrewarms = sqliteTable(
     /** The link's host, for the console (`youtu.be`). */
     host: text("host").notNull(),
     /**
-     * The porchkit call it went to: `probe` (a video host: `/media/probe`, joined by video_probe) or `read`
-     * (a post host: `/read`, joined by read_link). Each tool joins only its own.
+     * The porchkit call it went to: `read` (`/read`, joined by read_link: every new row) or `probe` (older rows: a
+     * video host's link went to `/media/probe`, joined by video_probe). Each tool joins only its own.
      */
     endpoint: text("endpoint").notNull().default("probe"),
     startedAt: text("started_at").notNull(),

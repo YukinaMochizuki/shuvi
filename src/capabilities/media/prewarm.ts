@@ -1,34 +1,42 @@
 import { and, desc, eq, gt, isNotNull, isNull, lt } from "drizzle-orm";
-import { describe, describeRead, PorchkitError, type Porchkit, type Probe, type ReadAnswer, type ReadRequest } from "../../porchkit/client.ts";
+import { botIdentity, isTrigger } from "../../agent/triggers.ts";
+import type { ChatPolicy } from "../../policy/policy.ts";
+import { describeRead, PorchkitError, type Porchkit, type Probe, type ReadAnswer, type ReadRequest } from "../../porchkit/client.ts";
 import type { Db } from "../../store/db.ts";
 import type { ChatEvent, MessagePayload } from "../../store/events.ts";
 import { mediaPrewarms } from "../../store/schema.ts";
 import { prewarmLinks, urlKey, type PrewarmEndpoint } from "./links.ts";
-import { storedProbe } from "./text.ts";
 
 /**
- * PREWARM (docs: media/index.ts): an owner's message with a link to a known host is looked up through
- * porchkit the moment it is recorded (`speculative: true`, so porchkit refuses it when the site's budget is
- * more than half used), while the waker spawns the turn. Which call depends on the host (links.ts
- * `prewarmLinks`): a POST host's link, or a short link, goes to `POST /read` (porchkit decides what a speculative read does:
- * the post, a video's probe and poster, never a transcript, a sheet or a download), a VIDEO host's to
- * `/media/probe`. Never a fetch; best effort: a failure is logged (never the URL) and forgotten.
+ * PREWARM (docs: media/index.ts): the links of a message that STARTS A TURN are read through porchkit's
+ * `POST /read` the moment it is recorded (`speculative: true`, so porchkit refuses it when the site's budget
+ * is more than half used), while the waker spawns the turn.
  *
- * WHAT IS KEPT: a row per link with the link's hash (no URL), its host and the call it went to (`endpoint`),
- * and for an hour:
- *   - a probe's answer as `probeText` reads it (`storedProbe`: title, description, uploader, length, chapters,
- *     subtitle languages; no URL), so a joined `video_probe` needs no second request;
- *   - for a read, only the kind porchkit answered (`{kind: "post"}`): a joined `read_link` asks porchkit
- *     again, which answers from its cache at no cost to the site's budget, and adds there what a
- *     speculative read left out (the transcript, the sheet). Nothing of the post is kept here.
- * After that `media-prune` drops the answer and only the accounting stays. (The link itself is in the
- * message, in `chat_events`, like everything said.)
+ *   WHICH MESSAGES  anyone's, when it starts a turn: the waker's own decision, `isTrigger` (agent/triggers.ts)
+ *                   with the chat's policy, asked here at recording time. In the owner's DM that is every
+ *                   message (`trigger: all`); in a group a mention, a reply to her, a follow-up (another bot:
+ *                   a mention only). A chat whose policy leaves media out never gets here. Nothing but a
+ *                   `message` event is prewarmed.
+ *   WHICH LINKS     every http(s) link (links.ts `prewarmLinks`), no host list: the message's own, then those
+ *                   of the message it replies to (`replyTo.text`: "@shuvi what is this" under a link), at most
+ *                   `MAX_PREWARM_LINKS` in all.
+ *   WHICH CALL      always `/read`: porchkit decides what a speculative read does (a post, a page, a video
+ *                   site's probe and poster, which shares `/media/probe`'s cache; never a transcript, a sheet or a
+ *                   download). Best effort: a failure is logged (never the URL) and forgotten.
+ *
+ * WHAT IS KEPT: a row per link with the link's hash (no URL), its host and the call it went to (`endpoint`,
+ * `read`), and for an hour only the kind porchkit answered (`{kind: "post"}`): a joined `read_link` asks
+ * porchkit again, which answers from its cache at no cost to the site's budget, and adds there what a
+ * speculative read left out (the transcript, the sheet). Nothing of the post is kept here. After that
+ * `media-prune` drops the answer and only the accounting stays. (The link itself is in the message, in
+ * `chat_events`, like everything said.) Older rows may say `probe`, with the probe's answer as `probeText`
+ * reads it (no URL); `video_probe` still joins those (`joinedProbe`), and nothing new writes one.
  *
  * Every row is written BEFORE the request goes out, synchronously in the server's inbound hook, so a turn
- * whose input is rendered after that sees it (the "(Prepared: …)" line, `preparedLines`), and a
- * `video_probe` (`joinedProbe`) or `read_link` (`joinedRead`) of the same link joins it instead of asking
- * porchkit while it is still on its way: the server and the runner child are different processes, so they
- * meet in the store. Each tool joins only the rows of its own endpoint.
+ * whose input is rendered after that sees it (the "(Prepared: …)" line, `preparedLines`), and a `read_link`
+ * (`joinedRead`) of the same link joins it instead of asking porchkit while it is still on its way: the
+ * server and the runner child are different processes, so they meet in the store. Each tool joins only the
+ * rows of its own endpoint.
  */
 
 export type Prewarm = typeof mediaPrewarms.$inferSelect;
@@ -50,16 +58,18 @@ export const JOIN_WAIT_MS = 15_000;
 const iso = (ms: number) => new Date(ms).toISOString();
 
 /**
- * Start the prewarms of `event`, if it is the owner's message and has links to known hosts. The rows are
- * written now; the requests are left running (their promise is returned for tests). The requests never
- * throw; the synchronous insert can (a busy store), and the caller (capabilityInbound) logs that.
+ * Start the prewarms of `event`, if it is a message that starts a turn in a chat with policy `chatPolicy`, and
+ * has links. The rows are written now; the requests are left running (their promise is returned for tests).
+ * The requests never throw; the synchronous insert can (a busy store), and the caller (capabilityInbound) logs
+ * that.
  */
-export function startPrewarms(db: Db, porch: Porchkit, event: ChatEvent, ownerId: number, now = Date.now()): Promise<void> {
+export function startPrewarms(db: Db, porch: Porchkit, event: ChatEvent, chatPolicy: ChatPolicy, now = Date.now()): Promise<void> {
   if (event.kind !== "message") return Promise.resolve();
   const p = event.payload as unknown as MessagePayload;
-  if (p.from?.id !== ownerId || !p.text) return Promise.resolve();
+  const links = prewarmLinks([p.text, p.replyTo?.text]);
+  if (!links.length || !isTrigger(db, event, chatPolicy, botIdentity(db))) return Promise.resolve();
   const flights: Promise<void>[] = [];
-  prewarmLinks(p.text).forEach((link, i) => {
+  links.forEach((link, i) => {
     const row = db
       .insert(mediaPrewarms)
       .values({ chatId: event.chatId, seq: event.seq, n: i + 1, urlHash: urlKey(link.url), host: link.host, endpoint: link.endpoint, startedAt: iso(now) })
@@ -67,18 +77,13 @@ export function startPrewarms(db: Db, porch: Porchkit, event: ChatEvent, ownerId
       .returning()
       .get();
     if (!row) return; // already started (the hook ran twice)
-    const ask: Promise<Record<string, unknown>> =
-      link.endpoint === "read"
-        ? porch.read({ url: link.url, speculative: true }).then((a) => ({ kind: a.kind }))
-        : porch.probe(link.url, true).then((probe) => storedProbe(probe) as unknown as Record<string, unknown>);
     flights.push(
-      ask.then(
-        (result) => finishPrewarm(db, row.id, "ok", result),
+      porch.read({ url: link.url, speculative: true }).then(
+        (a) => finishPrewarm(db, row.id, "ok", { kind: a.kind }),
         (e: unknown) => {
           const code = e instanceof PorchkitError ? e.code : "failed";
           finishPrewarm(db, row.id, code, null);
-          const why = link.endpoint === "read" ? describeRead(e) : describe(e);
-          console.log(`media: prewarm (${link.endpoint}) of #${event.seq}'s link ${i + 1} (${link.host}) failed: ${code}${e instanceof PorchkitError ? "" : ` (${why})`}`);
+          console.log(`media: prewarm (read) of #${event.seq}'s link ${i + 1} (${link.host}) failed: ${code}${e instanceof PorchkitError ? "" : ` (${describeRead(e)})`}`);
         },
       ),
     );

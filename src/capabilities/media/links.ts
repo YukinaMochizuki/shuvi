@@ -1,71 +1,15 @@
 import { createHash } from "node:crypto";
 
 /**
- * Which links are videos worth looking up ahead of time, and the key a link is known by.
+ * Which links of a message a prewarm reads ahead of time, and the key a link is known by.
  *
- * THE HOSTS a prewarm probes (media/index.ts), in one place: the video and social sites, and the short-link
- * services porchkit resolves (its media/canon.py `SHORTENERS`). A site matches with any subdomain
- * (`m.youtube.com`, `vm.tiktok.com`); a short-link service only as itself (or `www.`), as porchkit has it.
+ * EVERY http(s) link, through porchkit's `/read` (prewarm.ts): there is no list of hosts. `/read` reads any
+ * link (a post, a page, raw text, a short link resolved), and for a video site it probes the video itself,
+ * sharing `/media/probe`'s cache, so one call covers them all. At most `MAX_PREWARM_LINKS` per message.
  */
-export const VIDEO_HOSTS = [
-  "youtube.com",
-  "youtu.be",
-  "x.com",
-  "twitter.com",
-  "threads.net",
-  "threads.com",
-  "instagram.com",
-  "tiktok.com",
-  "vimeo.com",
-  "bilibili.com",
-  "b23.tv",
-] as const;
-
-export const SHORTENER_HOSTS = [
-  "t.co",
-  "bit.ly",
-  "tinyurl.com",
-  "goo.gl",
-  "ow.ly",
-  "buff.ly",
-  "is.gd",
-  "lnkd.in",
-  "rebrand.ly",
-  "cutt.ly",
-  "shorturl.at",
-  "t.ly",
-  "dlvr.it",
-  "fb.me",
-  "tiny.cc",
-  "rb.gy",
-  "s.id",
-  "v.gd",
-] as const;
-
-/**
- * The hosts whose links are POSTS (a social post: text, images, videos), prewarmed through porchkit's
- * `POST /read` rather than `/media/probe`: a post is not a video, and most of them have none. Matched with
- * any subdomain, like `VIDEO_HOSTS`; checked first, so x.com and the others here leave the video list's
- * probe. A short link (`SHORTENER_HOSTS`) is read too: `/read` resolves it and answers whatever is behind
- * it (a post, a video site's post, a page), where a probe would fail on anything but a video.
- */
-export const POST_HOSTS = ["x.com", "twitter.com", "threads.net", "threads.com", "instagram.com", "facebook.com", "reddit.com", "bsky.app"] as const;
-
-/** Is `host` (lower case) one whose links a prewarm reads as a post? */
-export function isPostHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/\.$/, "");
-  return POST_HOSTS.some((v) => h === v || h.endsWith(`.${v}`));
-}
 
 /** The most links of one message prewarmed: a message full of links is not a reason to spend the budget. */
 export const MAX_PREWARM_LINKS = 3;
-
-/** Is `host` (lower case) one a prewarm probes? */
-export function isVideoHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/\.$/, "");
-  if ((SHORTENER_HOSTS as readonly string[]).includes(h.replace(/^www\./, ""))) return true;
-  return VIDEO_HOSTS.some((v) => h === v || h.endsWith(`.${v}`));
-}
 
 /** Punctuation that ends a sentence around a link rather than belonging to it. */
 const TRAILING = /[.,;:!?)\]}>'"*_~]+$/;
@@ -98,38 +42,36 @@ export function linksIn(text: string): string[] {
   return out;
 }
 
-/** The links of `text` a prewarm probes (known hosts), at most `MAX_PREWARM_LINKS`. */
-export function videoLinks(text: string): { url: string; host: string }[] {
-  return linksIn(text)
-    .map((url) => ({ url, host: new URL(url).hostname.toLowerCase() }))
-    .filter((l) => isVideoHost(l.host))
-    .slice(0, MAX_PREWARM_LINKS);
-}
-
-/** Is `host` (lower case) a short-link service (itself or `www.`, as porchkit has it)? */
-export function isShortener(host: string): boolean {
-  return (SHORTENER_HOSTS as readonly string[]).includes(host.toLowerCase().replace(/\.$/, "").replace(/^www\./, ""));
-}
-
-/** Which porchkit call prewarms a link: `read` for a post host or a short link, `probe` for a video host. */
+/**
+ * Which porchkit call a prewarm went to. A new one is always `read`; `probe` is what older rows say (a video
+ * host's link was probed then), and `video_probe` still joins those (prewarm.ts `joinedProbe`).
+ */
 export type PrewarmEndpoint = "read" | "probe";
 
 /**
- * The links of `text` a prewarm looks up, with the call each goes to: a post host's or a short link's to
- * `/read`, a video host's to `/media/probe`; at most `MAX_PREWARM_LINKS` in all, in the order sent.
+ * The links a prewarm reads, from `texts` in order (the message's own text, then the text it replies to): every
+ * http(s) link, the first occurrence of each (by `urlKey`) kept, at most `MAX_PREWARM_LINKS` in all.
  */
-export function prewarmLinks(text: string): { url: string; host: string; endpoint: PrewarmEndpoint }[] {
-  return linksIn(text)
-    .map((url) => ({ url, host: new URL(url).hostname.toLowerCase() }))
-    .flatMap((l): { url: string; host: string; endpoint: PrewarmEndpoint }[] => (isPostHost(l.host) || isShortener(l.host) ? [{ ...l, endpoint: "read" }] : isVideoHost(l.host) ? [{ ...l, endpoint: "probe" }] : []))
-    .slice(0, MAX_PREWARM_LINKS);
+export function prewarmLinks(texts: readonly (string | null | undefined)[]): { url: string; host: string; endpoint: "read" }[] {
+  const out: { url: string; host: string; endpoint: "read" }[] = [];
+  const seen = new Set<string>();
+  for (const text of texts) {
+    for (const url of text ? linksIn(text) : []) {
+      if (out.length >= MAX_PREWARM_LINKS) return out;
+      const key = urlKey(url);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ url, host: new URL(url).hostname.toLowerCase(), endpoint: "read" });
+    }
+  }
+  return out;
 }
 
 /**
- * The key a link is known by (a prewarm and a later `video_probe` of it meet on this): the URL with its
+ * The key a link is known by (a prewarm and a later `read_link` of it meet on this): the URL with its
  * scheme taken as https, its host in lower case without `www.`, and no fragment; a link written without a
  * scheme counts as https. Then hashed: a prewarm's row keeps this hash, not the URL (what else it keeps for
- * an hour, the probe's answer, is said in prewarm.ts).
+ * an hour is said in prewarm.ts).
  */
 export function urlKey(raw: string): string {
   let s = raw.trim();

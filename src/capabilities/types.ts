@@ -124,6 +124,12 @@ export interface InboundHookContext {
   ownerId: number;
 }
 
+/** What a capability's `inbound` hook gets for one event: the server's context, and the event's chat policy. */
+export interface InboundEventContext extends InboundHookContext {
+  /** The event's chat's policy, resolved (policy.ts `resolveChat`): e.g. to ask `isTrigger` what the waker will. */
+  chatPolicy: ChatPolicy;
+}
+
 /**
  * A loop the server runs alongside its own (server/loop.ts): `run` every `everyMs`. `run` may return a
  * longer wait in ms. A throw is logged and backed off; it never stops the server.
@@ -205,7 +211,7 @@ export interface Capability<C = unknown> {
    * so a turn rendered after it sees them) and start async work, which it must not await: it returns at
    * once. A throw is logged and ignored.
    */
-  inbound?(event: ChatEvent, ctx: InboundHookContext, config: C): void;
+  inbound?(event: ChatEvent, ctx: InboundEventContext, config: C): void;
   /**
    * Credentials this capability holds (a service token), by a label: redacted from turn transcripts as
    * `[REDACTED:<label>]`, like the secret profiles' values.
@@ -362,7 +368,8 @@ export function withCapabilitySecrets(redact: (s: string) => string, enabled: re
 
 /**
  * The server's inbound hooks for newly recorded events: each event goes to the `inbound` of every capability
- * its chat's policy enables (a chat policy no longer lists: none). A hook that throws is logged; the rest run.
+ * its chat's policy enables (a chat policy no longer lists: none), with that policy (`InboundEventContext`). A
+ * hook that throws is logged; the rest run.
  */
 export function capabilityInbound(enabled: readonly EnabledCapability[], events: readonly ChatEvent[], policy: Policy, ctx: InboundHookContext): void {
   if (!enabled.some(({ capability }) => capability.inbound)) return;
@@ -370,10 +377,11 @@ export function capabilityInbound(enabled: readonly EnabledCapability[], events:
     const chat = getChat(ctx.db, event.chatId);
     const chatPolicy = chat ? resolveChat(policy, chat, ctx.ownerId) : null;
     if (!chatPolicy) continue;
+    const eventCtx: InboundEventContext = { ...ctx, chatPolicy };
     for (const { capability, config } of chatCapabilities(enabled, chatPolicy.tools)) {
       if (!capability.inbound) continue;
       try {
-        capability.inbound(event, ctx, config);
+        capability.inbound(event, eventCtx, config);
       } catch (e) {
         console.error(`${capability.id}: inbound hook failed on #${event.seq}: ${e instanceof Error ? e.message : String(e)}`);
       }

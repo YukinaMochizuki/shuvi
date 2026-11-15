@@ -50,35 +50,6 @@ export function probeText(p: Probe): string {
   return lines.join("\n");
 }
 
-/**
- * What a prewarm keeps of a probe (media_prewarms.result, for an hour): exactly what `probeText` reads, and
- * so no URL of the video (not `canonical_url`, not porchkit's `id`). The title, description, uploader and
- * chapters stay (links the description itself carries are the site's text, not the link sent), which is what
- * a joined `video_probe` answers with.
- */
-export function storedProbe(p: Probe): Probe {
-  return {
-    id: "",
-    ...(p.title != null ? { title: p.title } : {}),
-    ...(p.description != null ? { description: p.description } : {}),
-    ...(p.uploader != null ? { uploader: p.uploader } : {}),
-    ...(p.uploader_id != null ? { uploader_id: p.uploader_id } : {}),
-    ...(p.upload_date != null ? { upload_date: p.upload_date } : {}),
-    ...(p.extractor ? { extractor: p.extractor } : {}),
-    ...(p.duration != null ? { duration: p.duration } : {}),
-    ...(p.width != null ? { width: p.width } : {}),
-    ...(p.height != null ? { height: p.height } : {}),
-    ...(p.language != null ? { language: p.language } : {}),
-    ...(p.live_status != null ? { live_status: p.live_status } : {}),
-    chapters: (p.chapters ?? []).map((c) => ({ start: c.start, title: c.title })),
-    subtitles: p.subtitles ?? [],
-    auto_captions: p.auto_captions ?? [],
-    auto_caption_translations: p.auto_caption_translations ?? 0,
-    storyboard: { available: !!p.storyboard?.available },
-    formats: { video_heights: p.formats?.video_heights ?? [], ...(p.formats?.audio !== undefined ? { audio: p.formats.audio } : {}) },
-  };
-}
-
 export type SubsPage = { ok: true; text: string } | { ok: false; error: string };
 
 /** The `[mm:ss]` / `[h:mm:ss]` time a subtitle line starts at, in seconds. */

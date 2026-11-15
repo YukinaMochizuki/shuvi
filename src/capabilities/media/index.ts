@@ -17,8 +17,8 @@ import { probeText, subsText } from "./text.ts";
  * budget, and refuses past it.
  *
  * WHY READING IS HERE (and not a capability of its own): reading a link and looking at a video are one
- * service, one token and one prewarm. The prewarm routes each link by its host (a post to `/read`, a video
- * to `/media/probe`) under one cap and one accounting table; a post's video goes on with the video tools;
+ * service, one token and one prewarm. The prewarm reads every link through `/read` (which probes a video
+ * site's video itself) under one cap and one accounting table; a post's video goes on with the video tools;
  * save_link reuses video_fetch's copy onto the computer. And a chat whose policy enables media gets both, so
  * no chat loses a way to read a link when web_fetch goes (web/index.ts).
  *
@@ -36,13 +36,15 @@ import { probeText, subsText } from "./text.ts";
  *             and so is a sheet of a file (`ownerOnlyWhen`). Their refusals say why and what to offer instead
  *             (`ownerOnlyNote`). video_fetch and a file's sheet are offered only where the chat has the
  *             computer capability too; a chat without media keeps the computer's own video_sheet (files).
- *   prewarm   `inbound`: an OWNER's message with a link to a known post host (links.ts `POST_HOSTS`) or a short
- *             link is read at once (`/read`), one to a known video host probed, both speculatively, while its turn is
- *             being spawned; never a download, best effort (prewarm.ts). A turn's input shows "(Prepared:
- *             #N's link — read_link | video_probe returns at once.)" after the message once that has started
- *             (`perceive`), and read_link / video_probe joins it rather than asking twice (single-flight,
- *             across the server and the runner child, through the store). Each is recorded with whether a
- *             turn then used it: the console's turn view shows "prewarmed: used / unused".
+ *   prewarm   `inbound`: a message that STARTS A TURN, from anyone (the waker's `isTrigger` with the chat's
+ *             policy: every message in the owner's DM, a mention, a reply to her or a follow-up in a group), has
+ *             every http(s) link in it, then in the message it replies to, read at once through `/read`,
+ *             speculatively, at most 3, while its turn is being spawned; no host list, never a download, best
+ *             effort (prewarm.ts, links.ts). A turn's input shows "(Prepared: #N's link — read_link returns at
+ *             once.)" after the message once that has started (`perceive`), and read_link joins it rather than
+ *             asking twice (single-flight, across the server and the runner child, through the store).
+ *             video_probe asks porchkit itself, whose probe cache the read filled. Each is recorded with
+ *             whether a turn then used it: the console's turn view shows "prewarmed: used / unused".
  *   jobs      `video_fetch`: porchkit's download, then a resumable copy onto the computer (fetch.ts).
  *   loops     `media-prune`: drop prewarm answers older than an hour (the accounting stays).
  *   secrets   the porchkit token is redacted from turn transcripts (`[REDACTED:porchkit]`), and never logged.
@@ -90,7 +92,7 @@ function videoSection(computer: boolean, delegated = false): string {
   if (computer && delegated) return videoSectionDelegated();
   return `## Videos
 
-Anyone here may ask you to look at a video, and you can, from its link. \`video_probe\` says what it is (title, length, chapters, which subtitles exist); \`video_subs\` gives what is said, with times; \`video_sheet\` with the \`url\` shows you frames from it, tiled in order with each one's time under it. Start with video_probe. When a message is followed by "(Prepared: …)", its link was looked up already and video_probe answers at once.
+Anyone here may ask you to look at a video, and you can, from its link. \`video_probe\` says what it is (title, length, chapters, which subtitles exist); \`video_subs\` gives what is said, with times; \`video_sheet\` with the \`url\` shows you frames from it, tiled in order with each one's time under it. Start with video_probe.
 
 Looking never needs a download: what a sheet needs is fetched by itself. ${
     computer
@@ -305,8 +307,8 @@ export const media = defineCapability<MediaConfig>({
   },
   section: (ctx, cfg) => mediaSection(!!cfg.computer && policyEnables(ctx.chatPolicy, "computer"), policyDelegates(ctx.chatPolicy, "media")),
   jobKinds: (cfg) => [fetchJobKind(porchkitOf(cfg), cfg.computer)],
-  inbound(event, { db, ownerId }, cfg) {
-    void startPrewarms(db, porchkitOf(cfg), event, ownerId);
+  inbound(event, { db, chatPolicy }, cfg) {
+    void startPrewarms(db, porchkitOf(cfg), event, chatPolicy);
   },
   perceive(event, _cfg, { db }): ToolContent[] {
     if (!db || event.kind !== "message") return [];
