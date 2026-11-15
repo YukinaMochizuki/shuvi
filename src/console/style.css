@@ -1679,8 +1679,11 @@ details.addp[open] > summary::before {
   min-width: 0;
   max-width: min(var(--measure), 82%);
 }
+/* The bubble takes the body's width limit (not its own again), and never more: a reply quote is one line
+   (nowrap, cut with an ellipsis), which would otherwise make the bubble as wide as the whole quote. */
 .pickable > .pbody > .bubble {
-  max-width: none;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .pickable > .pbody > .bubble.out,
 .pickable > .pbody > .pill {
