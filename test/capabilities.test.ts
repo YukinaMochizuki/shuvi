@@ -83,8 +83,9 @@ describe("the registry", () => {
   });
 
   test("web reads SHUVI_TAVILY_API_KEY: web_search only with a key", () => {
-    expect(enabledCapabilities({}).find((e) => e.capability.id === "web")!.config).toEqual({});
-    expect(enabledCapabilities({ SHUVI_TAVILY_API_KEY: "k" }).find((e) => e.capability.id === "web")!.config).toEqual({ tavilyApiKey: "k" });
+    expect(enabledCapabilities({}).find((e) => e.capability.id === "web")!.config).toEqual({ tools: {}, reader: false });
+    expect(enabledCapabilities({ SHUVI_TAVILY_API_KEY: "k" }).find((e) => e.capability.id === "web")!.config).toEqual({ tools: { tavilyApiKey: "k" }, reader: false });
+    expect(enabledCapabilities({ SHUVI_PORCHKIT_URL: "http://porchkit.example", SHUVI_PORCHKIT_TOKEN: "t" }).find((e) => e.capability.id === "web")!.config).toEqual({ tools: {}, reader: true });
   });
 });
 

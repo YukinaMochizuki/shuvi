@@ -1,26 +1,34 @@
 import { and, desc, eq, gt, isNotNull, isNull, lt } from "drizzle-orm";
-import { describe, PorchkitError, type Porchkit, type Probe } from "../../porchkit/client.ts";
+import { describe, describeRead, PorchkitError, type Porchkit, type Probe, type ReadAnswer, type ReadRequest } from "../../porchkit/client.ts";
 import type { Db } from "../../store/db.ts";
 import type { ChatEvent, MessagePayload } from "../../store/events.ts";
 import { mediaPrewarms } from "../../store/schema.ts";
-import { urlKey, videoLinks } from "./links.ts";
+import { prewarmLinks, urlKey, type PrewarmEndpoint } from "./links.ts";
 import { storedProbe } from "./text.ts";
 
 /**
- * PREWARM (docs: media/index.ts): an owner's message with a link to a known video host is probed through
+ * PREWARM (docs: media/index.ts): an owner's message with a link to a known host is looked up through
  * porchkit the moment it is recorded (`speculative: true`, so porchkit refuses it when the site's budget is
- * more than half used), while the waker spawns the turn. Probe only, never a fetch; best effort: a failure
- * is logged (never the URL) and forgotten.
+ * more than half used), while the waker spawns the turn. Which call depends on the host (links.ts
+ * `prewarmLinks`): a POST host's link, or a short link, goes to `POST /read` (porchkit decides what a speculative read does:
+ * the post, a video's probe and poster, never a transcript, a sheet or a download), a VIDEO host's to
+ * `/media/probe`. Never a fetch; best effort: a failure is logged (never the URL) and forgotten.
  *
- * WHAT IS KEPT: a row per link with the link's hash (no URL) and host, and for an hour the probe's answer as
- * `probeText` reads it (`storedProbe`: title, description, uploader, length, chapters, subtitle languages; no URL of the video), so a
- * joined `video_probe` needs no second request. After that `media-prune` drops the answer and only the
- * accounting stays. (The link itself is in the message, in `chat_events`, like everything said.)
+ * WHAT IS KEPT: a row per link with the link's hash (no URL), its host and the call it went to (`endpoint`),
+ * and for an hour:
+ *   - a probe's answer as `probeText` reads it (`storedProbe`: title, description, uploader, length, chapters,
+ *     subtitle languages; no URL), so a joined `video_probe` needs no second request;
+ *   - for a read, only the kind porchkit answered (`{kind: "post"}`): a joined `read_link` asks porchkit
+ *     again, which answers from its cache at no cost to the site's budget, and adds there what a
+ *     speculative read left out (the transcript, the sheet). Nothing of the post is kept here.
+ * After that `media-prune` drops the answer and only the accounting stays. (The link itself is in the
+ * message, in `chat_events`, like everything said.)
  *
  * Every row is written BEFORE the request goes out, synchronously in the server's inbound hook, so a turn
  * whose input is rendered after that sees it (the "(Prepared: …)" line, `preparedLines`), and a
- * `video_probe` of the same link joins it (`joinedProbe`) instead of asking porchkit a second time: the
- * server and the runner child are different processes, so they meet in the store.
+ * `video_probe` (`joinedProbe`) or `read_link` (`joinedRead`) of the same link joins it instead of asking
+ * porchkit while it is still on its way: the server and the runner child are different processes, so they
+ * meet in the store. Each tool joins only the rows of its own endpoint.
  */
 
 export type Prewarm = typeof mediaPrewarms.$inferSelect;
@@ -51,21 +59,26 @@ export function startPrewarms(db: Db, porch: Porchkit, event: ChatEvent, ownerId
   const p = event.payload as unknown as MessagePayload;
   if (p.from?.id !== ownerId || !p.text) return Promise.resolve();
   const flights: Promise<void>[] = [];
-  videoLinks(p.text).forEach((link, i) => {
+  prewarmLinks(p.text).forEach((link, i) => {
     const row = db
       .insert(mediaPrewarms)
-      .values({ chatId: event.chatId, seq: event.seq, n: i + 1, urlHash: urlKey(link.url), host: link.host, startedAt: iso(now) })
+      .values({ chatId: event.chatId, seq: event.seq, n: i + 1, urlHash: urlKey(link.url), host: link.host, endpoint: link.endpoint, startedAt: iso(now) })
       .onConflictDoNothing()
       .returning()
       .get();
     if (!row) return; // already started (the hook ran twice)
+    const ask: Promise<Record<string, unknown>> =
+      link.endpoint === "read"
+        ? porch.read({ url: link.url, speculative: true }).then((a) => ({ kind: a.kind }))
+        : porch.probe(link.url, true).then((probe) => storedProbe(probe) as unknown as Record<string, unknown>);
     flights.push(
-      porch.probe(link.url, true).then(
-        (probe) => finishPrewarm(db, row.id, "ok", storedProbe(probe) as unknown as Record<string, unknown>),
+      ask.then(
+        (result) => finishPrewarm(db, row.id, "ok", result),
         (e: unknown) => {
           const code = e instanceof PorchkitError ? e.code : "failed";
           finishPrewarm(db, row.id, code, null);
-          console.log(`media: prewarm of #${event.seq}'s link ${i + 1} (${link.host}) failed: ${code}${e instanceof PorchkitError ? "" : ` (${describe(e)})`}`);
+          const why = link.endpoint === "read" ? describeRead(e) : describe(e);
+          console.log(`media: prewarm (${link.endpoint}) of #${event.seq}'s link ${i + 1} (${link.host}) failed: ${code}${e instanceof PorchkitError ? "" : ` (${why})`}`);
         },
       ),
     );
@@ -97,28 +110,40 @@ export function preparedLines(db: Db, event: ChatEvent, now = Date.now()): strin
   const all = every.length;
   const name = (r: Prewarm) => (all > 1 ? `#${event.seq}'s link ${r.n} (${r.host})` : `#${event.seq}'s link`);
   return rows.flatMap((r) => {
-    if (r.outcome === "ok") return [`(Prepared: ${name(r)} — video_probe returns at once.)`];
-    if (inFlight(r, now)) return [`(Preparing: ${name(r)} — video_probe joins it.)`];
+    const tool = r.endpoint === "read" ? "read_link" : "video_probe";
+    if (r.outcome === "ok") return [`(Prepared: ${name(r)} — ${tool} returns at once.)`];
+    if (inFlight(r, now)) return [`(Preparing: ${name(r)} — ${tool} joins it.)`];
     return [];
   });
 }
 
-/** Mark the chat's recent prewarms of `hash` as used by `turnId` (the first turn to ask counts). */
-export function markUsed(db: Db, chatId: number, hash: string, turnId: number, now = Date.now()): void {
+/** Mark the chat's recent prewarms of `hash` (by `endpoint`) as used by `turnId` (the first turn to ask counts). */
+export function markUsed(db: Db, chatId: number, hash: string, turnId: number, now = Date.now(), endpoint: PrewarmEndpoint = "probe"): void {
   db.update(mediaPrewarms)
     .set({ usedTurnId: turnId, usedAt: iso(now) })
-    .where(and(eq(mediaPrewarms.chatId, chatId), eq(mediaPrewarms.urlHash, hash), isNull(mediaPrewarms.usedTurnId), gt(mediaPrewarms.startedAt, iso(now - PREWARM_FRESH_MS))))
+    .where(and(eq(mediaPrewarms.chatId, chatId), eq(mediaPrewarms.urlHash, hash), eq(mediaPrewarms.endpoint, endpoint), isNull(mediaPrewarms.usedTurnId), gt(mediaPrewarms.startedAt, iso(now - PREWARM_FRESH_MS))))
     .run();
 }
 
-/** The chat's newest fresh prewarm of `hash`. */
-function latest(db: Db, chatId: number, hash: string, now: number): Prewarm | undefined {
+/** The chat's newest fresh prewarm of `hash` through `endpoint`. */
+function latest(db: Db, chatId: number, hash: string, now: number, endpoint: PrewarmEndpoint): Prewarm | undefined {
   return db
     .select()
     .from(mediaPrewarms)
-    .where(and(eq(mediaPrewarms.chatId, chatId), eq(mediaPrewarms.urlHash, hash), gt(mediaPrewarms.startedAt, iso(now - PREWARM_FRESH_MS))))
+    .where(and(eq(mediaPrewarms.chatId, chatId), eq(mediaPrewarms.urlHash, hash), eq(mediaPrewarms.endpoint, endpoint), gt(mediaPrewarms.startedAt, iso(now - PREWARM_FRESH_MS))))
     .orderBy(desc(mediaPrewarms.id))
     .get();
+}
+
+/** Wait (polling the store, up to `waitMs`) while the chat's prewarm of `hash` is in flight. */
+async function waitInFlight(db: Db, chatId: number, hash: string, endpoint: PrewarmEndpoint, opts: { pollMs?: number; waitMs?: number }): Promise<Prewarm | undefined> {
+  const end = Date.now() + (opts.waitMs ?? JOIN_WAIT_MS);
+  let row = latest(db, chatId, hash, Date.now(), endpoint);
+  while (row && inFlight(row, Date.now()) && Date.now() < end) {
+    await Bun.sleep(opts.pollMs ?? 100);
+    row = db.select().from(mediaPrewarms).where(eq(mediaPrewarms.id, row.id)).get();
+  }
+  return row;
 }
 
 /** In this process, the probes in flight by link key: two `video_probe` calls of one link share one request. */
@@ -133,18 +158,34 @@ const flights = new Map<string, Promise<Probe>>();
 export async function joinedProbe(db: Db, porch: Porchkit, chatId: number, turnId: number, url: string, opts: { pollMs?: number; waitMs?: number } = {}): Promise<{ probe: Probe; joined: "prewarm" | "flight" | null }> {
   const hash = urlKey(url);
   markUsed(db, chatId, hash, turnId);
-  const end = Date.now() + (opts.waitMs ?? JOIN_WAIT_MS);
-  let row = latest(db, chatId, hash, Date.now());
-  while (row && inFlight(row, Date.now()) && Date.now() < end) {
-    await Bun.sleep(opts.pollMs ?? 100);
-    row = db.select().from(mediaPrewarms).where(eq(mediaPrewarms.id, row.id)).get();
-  }
+  const row = await waitInFlight(db, chatId, hash, "probe", opts);
   if (row?.outcome === "ok" && row.result) return { probe: row.result as unknown as Probe, joined: "prewarm" };
   const shared = flights.get(hash);
   if (shared) return { probe: await shared, joined: "flight" };
   const p = porch.probe(url).finally(() => flights.delete(hash));
   flights.set(hash, p);
   return { probe: await p, joined: null };
+}
+
+/** In this process, the reads in flight by link key and request: two identical read_link calls share one. */
+const readFlights = new Map<string, Promise<ReadAnswer>>();
+
+/**
+ * `read_link`'s request: a prewarm (`/read`, speculative) of the same link in this chat still in flight is
+ * waited for first, so the read below finds porchkit's cache filled rather than asking the site twice; then
+ * porchkit is asked (normally, never speculative), once per link and request however many calls ask at
+ * once. The prewarm, if any, is marked used by `turnId`.
+ */
+export async function joinedRead(db: Db, porch: Porchkit, chatId: number, turnId: number, req: ReadRequest, opts: { pollMs?: number; waitMs?: number } = {}): Promise<{ answer: ReadAnswer; joined: "prewarm" | "flight" | null }> {
+  const hash = urlKey(req.url);
+  markUsed(db, chatId, hash, turnId, Date.now(), "read");
+  const row = await waitInFlight(db, chatId, hash, "read", opts);
+  const key = `${hash}|${req.comments ?? 0}|${req.video ?? "auto"}|${req.offset ?? 0}`;
+  const shared = readFlights.get(key);
+  if (shared) return { answer: await shared, joined: "flight" };
+  const p = porch.read(req).finally(() => readFlights.delete(key));
+  readFlights.set(key, p);
+  return { answer: await p, joined: row?.outcome === "ok" ? "prewarm" : null };
 }
 
 /** Drop the answers of prewarms older than `PREWARM_FRESH_MS` (the accounting stays). Returns how many. */

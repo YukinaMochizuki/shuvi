@@ -881,6 +881,11 @@ export const mediaPrewarms = sqliteTable(
     urlHash: text("url_hash").notNull(),
     /** The link's host, for the console (`youtu.be`). */
     host: text("host").notNull(),
+    /**
+     * The porchkit call it went to: `probe` (a video host: `/media/probe`, joined by video_probe) or `read`
+     * (a post host: `/read`, joined by read_link). Each tool joins only its own.
+     */
+    endpoint: text("endpoint").notNull().default("probe"),
     startedAt: text("started_at").notNull(),
     finishedAt: text("finished_at"),
     /** ok, or porchkit's error code (`rate_limited`, `unavailable`, …), `unreachable`, `timeout`. Null while in flight. */
