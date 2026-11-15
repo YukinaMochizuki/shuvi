@@ -1664,7 +1664,8 @@ details.addp[open] > summary::before {
 }
 
 /* ---- deleting messages (pages.ts `pickable`, `deleteBar`; console.js) ---------------------------------- */
-/* A deletable bubble: a round checkbox on its left (on hover, always while selecting), a "⋯" menu at its top right. */
+/* A deletable bubble. Idle nothing shows; on hover (or focus) a faint "⋯" at its top right; while selecting, a
+   round check on its left, in a slot kept for it so nothing moves. */
 .pickable {
   display: flex;
   align-items: flex-start;
@@ -1678,49 +1679,65 @@ details.addp[open] > summary::before {
   min-width: 0;
   max-width: min(var(--measure), 82%);
 }
+/* The bubble takes the body's width limit (not its own again), and never more: a reply quote is one line
+   (nowrap, cut with an ellipsis), which would otherwise make the bubble as wide as the whole quote. */
 .pickable > .pbody > .bubble {
-  max-width: none;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .pickable > .pbody > .bubble.out,
 .pickable > .pbody > .pill {
   margin-left: 0;
 }
-.pick {
+.dslot {
   flex: none;
-  user-select: none;
   display: grid;
   place-items: center;
   width: 24px;
   height: 24px;
   margin-top: var(--s1);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.1s;
 }
-.pick input {
-  position: absolute;
-  opacity: 0;
-  width: 1px;
-  height: 1px;
-  margin: 0;
+.dslot > * {
+  grid-area: 1 / 1;
 }
-.pick .ring {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  border: 1.5px solid var(--ink-faint);
+.dsel {
   display: grid;
   place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.15s;
 }
-.pick:hover .ring {
-  border-color: var(--ink-dim);
-}
-.pick input:checked + .ring {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.pick input:checked + .ring::after {
+.dsel::before,
+.dsel::after {
   content: "";
+  grid-area: 1 / 1;
+}
+.dsel::before {
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--line);
+  border-radius: 50%;
+}
+.selecting .dsel {
+  visibility: visible;
+  opacity: 1;
+}
+.selecting .pickable:hover .dsel::before {
+  border-color: var(--ink-faint);
+}
+.pickable.on .dsel::before {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.pickable.on .dsel::after {
   width: 4px;
   height: 8px;
   margin-top: -2px;
@@ -1728,48 +1745,58 @@ details.addp[open] > summary::before {
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
-.pick input:focus-visible + .ring {
+.dsel:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.pickable:hover > .pick,
-.pick:has(input:focus-visible),
-.selecting .pick {
-  opacity: 1;
+  outline-offset: 0;
 }
 .selecting .pickable {
   cursor: pointer;
+  user-select: none;
 }
 .pickable.on .bubble,
 .pickable.on .pill {
   box-shadow: 0 0 0 2px var(--accent);
 }
-/* The "⋯" menu: a small round button on the bubble's corner, a menu under it. */
+/* Without script (inside <noscript>): a plain checkbox in the slot, and one button at the end of the page. */
+.nspick {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+}
+.nspick input {
+  margin: 0;
+}
+.nsdel {
+  margin-top: var(--s5);
+}
+/* The "⋯" menu: a small faint round button on the bubble's corner, a menu under it. Script only. */
 .bmenu {
   position: absolute;
-  top: calc(-1 * var(--s2));
-  right: calc(-1 * var(--s2));
+  top: calc(-1 * var(--s1));
+  right: calc(-1 * var(--s1));
   opacity: 0;
-  transition: opacity 0.1s;
+  transition: opacity 0.15s;
+}
+html:not(.js) .bmenu,
+.selecting .bmenu {
+  display: none;
 }
 .pickable:hover .bmenu,
 .bmenu[open],
 .bmenu:focus-within {
   opacity: 1;
 }
-.selecting .bmenu {
-  display: none;
-}
 .bmenu > summary {
   list-style: none;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
   display: grid;
   place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
   background: var(--surface-3);
-  color: var(--ink-dim);
-  font-size: var(--t-small);
+  color: var(--ink-faint);
+  font-size: var(--t-meta);
   line-height: 1;
   cursor: pointer;
   box-shadow: 0 0 0 2px var(--surface);
@@ -1782,105 +1809,243 @@ details.addp[open] > summary::before {
   color: var(--ink);
   background: var(--line);
 }
+.bmenu > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .bmenu .menu {
   position: absolute;
   right: 0;
   top: calc(100% + var(--s1));
   z-index: 5;
-  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+  min-width: 132px;
   padding: var(--s1);
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-3);
   box-shadow: 0 6px 24px rgb(0 0 0 / 0.4);
-  display: flex;
-  flex-direction: column;
 }
 .bmenu .menu button {
-  text-align: left;
+  padding: var(--s1) var(--s2);
   border: 0;
+  border-radius: 6px;
   background: none;
   color: var(--ink);
   font: inherit;
   font-size: var(--t-ui);
-  padding: var(--s1) var(--s2);
-  border-radius: 6px;
+  text-align: left;
   white-space: nowrap;
   cursor: pointer;
 }
-.bmenu .menu button:hover {
+.bmenu .menu button:hover,
+.bmenu .menu button:focus-visible {
   background: var(--line);
 }
-.bmenu .menu button.danger {
+.bmenu .menu button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+/* Delete is red only when it is the one about to be pressed. */
+.bmenu .menu .dm-del:hover,
+.bmenu .menu .dm-del:focus-visible {
   color: var(--failed);
 }
-/* Deleted, waiting for the undo to run out (console.js): gone from the page. */
+/* Deleted, waiting for the undo to run out (console.js): gone from the page, its trace row too (no gap). */
 .pickable.gone,
-.pill.gone {
+.pill.gone,
+.tr:has(> .body > .pickable.gone):not(:has(> .body > .pickable:not(.gone))) {
   display: none;
 }
 
-/* The bar: what is selected, and Delete / Cancel. Sticky at the bottom of the detail pane. */
-.selbar {
-  position: sticky;
-  bottom: var(--s4);
-  z-index: 6;
-  display: none;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--s2) var(--s3);
-  margin-top: var(--s5);
-  padding: var(--s2) var(--s2) var(--s2) var(--s4);
-  border-radius: 10px;
-  background: var(--surface-3);
-  box-shadow: 0 6px 24px rgb(0 0 0 / 0.45);
-  font-size: var(--t-ui);
+/* A long press on a touch screen (console.js): the page dims, the bubble lifts, its menu opens under it. */
+.pickable.lp {
+  position: relative;
+  z-index: 31;
 }
-.selecting .selbar {
-  display: flex;
+.pickable.lp .bmenu {
+  display: block;
+  opacity: 1;
+  top: 100%;
+  right: 0;
 }
-.selbar .selcount {
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
+.pickable.lp .bmenu > summary {
+  visibility: hidden;
+  height: 0;
 }
-.selbar .selwhy {
-  color: var(--refused);
-  font-size: var(--t-small);
+.pickable.lp .bmenu .menu {
+  top: var(--s2);
+  min-width: 180px;
 }
-.selbar .selwhy:empty {
-  display: none;
+.pickable.lp .bmenu .menu button {
+  padding: var(--s2) var(--s3);
+  font-size: var(--t-prose);
 }
-.selbar.refused {
-  box-shadow: inset 3px 0 0 var(--refused), 0 6px 24px rgb(0 0 0 / 0.45);
+.pickable.lp .bubble,
+.pickable.lp .pill {
+  transform: scale(1.02);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 0.5);
 }
-.selbar .acts {
-  display: flex;
-  gap: var(--s2);
-  margin-left: auto;
-}
-/* After a delete: "Deleted 3 · Undo (10)", counting down; fixed at the bottom centre. */
-.toast {
+.lpscrim {
   position: fixed;
-  /* Centred on the detail pane (the list pane is 360px). */
-  left: calc(180px + 50%);
+  inset: 0;
+  z-index: 30;
+  background: rgb(0 0 0 / 0.55);
+}
+/* No hover on a touch screen: no "⋯"; the long press is the way in. (`pointer: coarse` too: a browser with no
+   pointer at all, headless, also says `hover: none`.) */
+@media (hover: none) and (pointer: coarse) {
+  .pickable:not(.lp) .bmenu {
+    display: none;
+  }
+  .pickable {
+    -webkit-touch-callout: none;
+  }
+}
+
+/* Room under the last bubble, so it can scroll above the pill or the snackbar. */
+.detail.selecting,
+.detail.snacking {
+  padding-bottom: 96px;
+}
+/* The pill, while anything is selected: "3 selected · Delete · ✕", bottom centre of the detail pane (the list
+   pane is 360px); a refusal's reason on a line under it. */
+.selpill {
+  position: fixed;
+  left: 360px;
+  right: 0;
   bottom: var(--s5);
   z-index: 20;
-  transform: translateX(-50%);
+  width: fit-content;
+  margin: 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--s3);
-  padding: var(--s2) var(--s2) var(--s2) var(--s4);
-  border-radius: 10px;
+  gap: 0 var(--s2);
+  min-height: 40px;
+  max-width: min(460px, calc(100vw - 2 * var(--s3)));
+  padding: 0 var(--s1) 0 var(--s4);
+  border: 1px solid var(--line);
+  border-radius: 20px;
   background: var(--surface-3);
-  box-shadow: 0 6px 24px rgb(0 0 0 / 0.5);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 0.5);
   font-size: var(--t-ui);
   white-space: nowrap;
 }
-.toast[hidden] {
+.selpill[hidden],
+.snack[hidden] {
   display: none;
 }
-.toast .undo {
-  color: var(--accent);
+.selpill .pn {
   font-variant-numeric: tabular-nums;
+}
+.selpill .psep {
+  width: 1px;
+  height: 16px;
+  background: var(--line);
+}
+.selpill .pdel,
+.selpill .px,
+.snack .sundo {
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+.selpill .pdel {
+  height: 30px;
+  padding: 0 var(--s3);
+  border-radius: 15px;
+  color: var(--failed);
+}
+.selpill .pdel:hover {
+  background: rgb(255 138 139 / 0.12);
+}
+.selpill .px {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--ink-faint);
+}
+.selpill .px:hover {
+  background: var(--line);
+  color: var(--ink);
+}
+.selpill button:focus-visible,
+.snack .sundo:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+.selpill.refused {
+  border-radius: 14px;
+}
+.selpill .pwhy {
+  flex-basis: 100%;
+  padding: 0 var(--s2) var(--s2) 0;
+  color: var(--refused);
+  font-size: var(--t-small);
+  white-space: normal;
+}
+.selpill .pwhy:empty {
+  display: none;
+}
+/* After a delete: "Deleted 3 · Undo", bottom left of the detail pane, a thin line running out with the 10 s. */
+.snack {
+  position: fixed;
+  left: calc(360px + var(--s5));
+  bottom: var(--s5);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  min-height: 40px;
+  max-width: min(480px, calc(100vw - 2 * var(--s3)));
+  padding: var(--s1) var(--s2) var(--s1) var(--s4);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-3);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 0.5);
+  font-size: var(--t-ui);
+  transition: opacity 0.3s;
+}
+.snack.fading {
+  opacity: 0;
+}
+.snack.refused .swhat {
+  color: var(--refused);
+  font-size: var(--t-small);
+}
+.snack .sundo {
+  height: 28px;
+  padding: 0 var(--s2);
+  border-radius: 6px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.snack .sundo:hover {
+  background: rgb(122 162 247 / 0.12);
+}
+.snack .sundo[hidden] {
+  display: none;
+}
+.sline {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 0;
+  height: 2px;
+  background: var(--ink-faint);
+  opacity: 0.6;
+}
+@keyframes snack-down {
+  from {
+    width: 100%;
+  }
+  to {
+    width: 0;
+  }
 }
 /* Without script: the delete's result at the top of the page, with its Undo. */
 .notice form.inline {
@@ -2997,24 +3162,22 @@ a.hfile.hidden-pb .hpath {
   .pickable > .pbody {
     max-width: 88%;
   }
-  /* No hover on a phone: the "⋯" stays in sight (its "Select" starts selecting), the checkbox only while selecting. */
-  .bmenu {
-    opacity: 0.7;
-  }
-  .detail:not(.selecting) .pick {
+  /* Narrow: the check's slot only while selecting (without script, for its checkbox). */
+  html.js .detail:not(.selecting) .dslot {
     display: none;
   }
-  /* The page scrolls as a whole here (the detail pane does not), so the bar is fixed to the screen. */
-  .selbar {
-    position: fixed;
-    left: var(--s2);
-    right: var(--s2);
-    bottom: var(--s2);
-    margin: 0;
-  }
-  .toast {
-    left: 50%;
+  /* The page scrolls as a whole here (the detail pane does not); the pill and the snackbar are fixed to the
+     screen, the snackbar above the pill when both are up. */
+  .selpill {
+    left: 0;
     bottom: var(--s4);
+  }
+  .snack {
+    left: var(--s3);
+    bottom: var(--s4);
+  }
+  .detail.selecting .snack {
+    bottom: 72px;
   }
   .head .title .nav {
     display: none;

@@ -141,30 +141,42 @@ boundary is in server.ts's header.
 ## Deleting messages
 
 ```
-  ◯ ┌ Owner 19:31 #1 ────────────────────┐ (⋯)   hover: the checkbox, the ⋯
+    ┌ Owner 19:31 #1 ────────────────────┐(⋯)   hover: only a faint ⋯ fades in
     │ good morning! anything on today?   │
     └────────────────────────────────────┘
-               ◉ ┌ 19:31 #2 ✓ delivered ───────┐   selected: filled, accent ring
-                 │ Morning! Nothing until 5.   │
-                 └─────────────────────────────┘
- ┌─────────────────────────────────────────────────────────────────┐
- │ 3 selected (you 2, her 1) · why, if refused · [Delete] Cancel   │   the bar
- └─────────────────────────────────────────────────────────────────┘
+                                 Select       its menu; Delete red only on hover
+                                 Delete
+
+  ◯ ┌ Owner 19:31 #1 ────────────────────┐      selecting: faint rings on the others,
+    └────────────────────────────────────┘
+               ◉ ┏ 19:31 #2 ✓ delivered ━━━━━━┓   the selected: filled, accent ring
+                 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                  ( 2 selected │ Delete  ✕ )      the pill, bottom centre, only then
+
+  [ Deleted 2   Undo ]                            after: the snackbar, bottom left,
+   ▔▔▔▔▔▔▔▔▔▔                                     a thin line running out with the 10 s
 ```
 
-- A deletable bubble (`pickable`: a person's message, hers, her sticker or file) has a round checkbox on its
-  left, shown on hover and always while selecting, and a "⋯" menu on its top-right corner: Select, Delete.
-  Incoming bubbles are indented by the checkbox's width for it. Under 760px there is no hover: the ⋯ is always
-  shown and its Select starts selecting; checkboxes show only then, and the bar is fixed to the screen.
-- Selecting: click a checkbox (or, while selecting, a bubble); Shift-click selects the range; `Esc` or Cancel
-  stops. The bar counts by side: you (the owner), her, others (anyone else in a group).
-- Delete: no confirmation. The bubbles (and her reactions to them) leave at once and a toast at the bottom
-  centre of the detail pane counts down "Deleted 3 · Undo (10)"; Undo puts them back. A delete while it is up
-  joins it (the server's open deletion): the count grows, the countdown starts again, one Undo for all. A
-  refusal brings them back still selected, and the bar takes a pink edge with the reason; a refused undo says
-  why in the toast.
-- Without script: every checkbox is shown, the bar is always there as a plain form, and the page comes back
-  with a Notice at its top ("Deleted 3 messages. You can undo it for 9 seconds. [Undo]"), shown once.
+- Idle, nothing about deleting shows on any page with bubbles: no bar, no checkboxes. A deletable bubble
+  (`pickable`: a person's message, hers, her sticker or file) fades in a faint "⋯" at its top right on hover or
+  keyboard focus; its menu: Select, Delete (red only when hovered or focused). On a touch screen
+  (`hover: none` and `pointer: coarse`) there is no ⋯: a long press dims the page, lifts the bubble and opens
+  the same menu under it.
+- Selecting: Select (or `x` with the pointer over a bubble) starts it. The selected bubble takes the accent ring
+  and a filled check on its left; every other one a faint ring in the same slot (kept empty when idle, so nothing
+  moves; under 760px the slot shows only while selecting). A click toggles, Shift-click selects the range,
+  `Esc` or ✕ stops, and it stops by itself when nothing is left selected.
+- The pill floats at the bottom centre of the detail pane only while something is selected: "N selected · Delete
+  · ✕"; the `Delete` key does the same. The page gets room at its foot so the last bubble scrolls above it.
+- Delete: no confirmation. The bubbles (her reactions to them, and their trace rows: no gap) leave at once and
+  the snackbar shows "Deleted N · Undo" with a thin line counting down 10 s, then fades. A delete while it is up
+  joins it (the server's open deletion): the count grows, the line starts again, one Undo for all. A refusal
+  brings them back still selected, its reason in small pink under the pill; a refused undo says why in the
+  snackbar.
+- Without script: only what `<noscript>` holds, a checkbox in each bubble's slot and one "Delete the ticked
+  messages" button at the end; the page comes back with a Notice at its top ("Deleted 3 messages. You can undo
+  it for 9 seconds. [Undo]"), shown once. No `<style>` in a `<noscript>`: htmx parses the pages it swaps in
+  with scripting off, so the style would apply with script on.
 
 ## Home
 
@@ -263,9 +275,9 @@ are GitHub's, as in the diff.
 | Confirm | red-tinted panel across a row: the question, what it affects, the button, Cancel |
 | Notice | a write's result: on its row, or at the top; ok / refused / failed tones |
 | Listing | a provider's `/models`: state line, then rows (model, context window, Add or ✓) |
-| Pickable | a deletable bubble: its checkbox (left), the bubble, its ⋯ menu (top right) |
-| SelBar | the delete form: what is selected, the reason of a refusal, Delete, Cancel; sticky at the bottom |
-| Toast | after a delete: "Deleted 3 · Undo (8)", fixed at the bottom centre, counting down |
+| Pickable | a deletable bubble: its check slot (left, while selecting), the bubble, its ⋯ menu (top right, on hover) |
+| SelPill | while selecting: "3 selected · Delete · ✕", a refusal under it; fixed at the bottom centre |
+| Snackbar | after a delete: "Deleted 3 · Undo", a thin line running out with the 10 s; fixed at the bottom left |
 | FileRow | Home: path · when · who-dot, who and a hint; selected like a list row |
 | WhoDot | 7px: her (accent), you (amber), anyone else (grey) |
 | HistEntry | Home: who-dot · who · where (chat · #turn) · when, the message, the date and +/− |
@@ -291,5 +303,5 @@ works without them, the Settings page's forms included.
   Back as for a load. A 2px bar under the top bar shows while a request is out (after 150 ms, so a quick one
   does not flash it). Settings swaps only its `<main>`, and pending parts fetch themselves (above).
 - **`/console.js`**: copy buttons, j / k to move through the list's rows (segments), a line in the top bar
-  when a request got no answer at all (the server restarting), and selecting and deleting messages (the bar,
-  the ⋯ menu, the toast; a delete is posted with `fetch` and answered in JSON).
+  when a request got no answer at all (the server restarting), and selecting and deleting messages (the ⋯
+  menu and its long press, the pill, the snackbar; a delete is posted with `fetch` and answered in JSON).

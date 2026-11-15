@@ -12,7 +12,7 @@ import { html, type Raw } from "./html.ts";
  *   POST /messages/undo     id (the deletion), back
  *
  * With script (console.js, `Accept: application/json`) the answer is JSON: `{id, count, seconds}` for a delete,
- * `{count}` for an undo, or 409 `{refused}` with the reason the bar or the toast shows. Without script it is a
+ * `{count}` for an undo, or 409 `{refused}` with the reason the pill or the snackbar shows. Without script it is a
  * 303 back to the page it came from (`back`, a path on this console) carrying a FLASH (`?n=<id>`, as Settings
  * does: kept in memory, read once): the notice at the top of that page, with an Undo button while the deletion
  * can still be undone.
