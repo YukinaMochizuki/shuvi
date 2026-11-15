@@ -336,6 +336,19 @@ if (window.htmx) {
   document.addEventListener("htmx:beforeSwap", (e) => {
     if (e.detail.xhr.status >= 300 && e.detail.target instanceof Element && e.detail.target.hasAttribute("data-poll")) e.detail.shouldSwap = false;
   });
+  // A deploy since this page loaded: a boosted swap keeps this head, so the new page would run against the old
+  // stylesheet and scripts. When a whole page's `<meta name="assets">` (html.ts `page`, assets.ts) differs from
+  // ours, load it in full instead. Only for a GET, which can be asked again; a write's answer is swapped in as it
+  // is, and the next navigation loads in full.
+  const ours = document.querySelector('meta[name="assets"]')?.content;
+  document.addEventListener("htmx:beforeSwap", (e) => {
+    const d = e.detail;
+    if (!ours || !d.boosted || d.requestConfig?.verb !== "get") return;
+    const theirs = /<meta name="assets" content="([0-9a-f]+)">/.exec(d.xhr.responseText)?.[1];
+    if (!theirs || theirs === ours) return;
+    d.shouldSwap = false;
+    location.assign(d.xhr.responseURL || d.pathInfo?.finalRequestPath || location.href);
+  });
   // A request that got no answer at all (the server restarting, the tailnet down): say so, until one does.
   const offline = (on) => document.body.classList.toggle("offline", on);
   document.addEventListener("htmx:sendError", () => offline(true));

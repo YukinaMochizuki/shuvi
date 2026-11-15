@@ -83,7 +83,7 @@ describe("the shell", () => {
     const csp = res.headers.get("content-security-policy")!;
     expect(csp).toBe("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     const html = await res.text();
-    expect(html).toContain(`<script src="/htmx.min.js" defer></script>`);
+    expect(html).toMatch(/<script src="\/htmx\.min\.js\?v=[0-9a-f]{12}" defer><\/script>/);
     expect(html).toContain(`<body hx-boost="true" hx-indicator="#progress">`);
     const config = JSON.parse(/<meta name="htmx-config" content="([^"]+)">/.exec(html)![1]!.replace(/&quot;/g, '"'));
     expect(config).toMatchObject({ allowEval: false, allowScriptTags: false, historyCacheSize: 0, selfRequestsOnly: true, includeIndicatorStyles: false });

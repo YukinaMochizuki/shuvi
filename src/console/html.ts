@@ -5,6 +5,8 @@
  * in one place.
  */
 
+import { assetUrl, assetsVersion, type Asset } from "./assets.ts";
+
 export class Raw {
   constructor(readonly s: string) {}
   toString(): string {
@@ -67,7 +69,11 @@ const HTMX_CONFIG = JSON.stringify({
  * keeping the stylesheet and scripts, with the URL and Back as for a load; the bar under the top bar
  * (`#progress`) shows while a request is out. Without script, they are plain links and forms.
  *
- * `scripts`: same-origin scripts only this page needs (the Home editor's `/editor.js`), loaded after the shared
+ * ASSETS: the stylesheet and scripts are written at their versioned addresses, and `<meta name="assets">` says which
+ * versions this page was drawn with; a boosted navigation to a page with other versions (a deploy since) is a full
+ * load instead (assets.ts, console.js).
+ *
+ * `scripts`: same-origin scripts only this page needs (the Home editor, `"editor"`), loaded after the shared
  * two. A boosted navigation keeps the head it started with, so such a page is reached with a full load: its
  * links into it carry `hx-boost="false"` (home.ts), and it upgrades what a later swap brings itself.
  *
@@ -75,7 +81,7 @@ const HTMX_CONFIG = JSON.stringify({
  * keyboard shrinks the page (`interactive-widget=resizes-content`) instead of covering its bottom, so a pane sized in
  * `dvh` ends on the keyboard. Other pages keep the browser's default (the keyboard overlays the page).
  */
-export function page(title: string, body: Raw, who?: string, here?: "turns" | "home" | "settings", scripts: readonly string[] = [], keyboard?: "resizes"): string {
+export function page(title: string, body: Raw, who?: string, here?: "turns" | "home" | "settings", scripts: readonly Asset[] = [], keyboard?: "resizes"): string {
   return `<!doctype html>${html`<html lang="en">
 <head>
 <meta charset="utf-8">
@@ -83,10 +89,11 @@ export function page(title: string, body: Raw, who?: string, here?: "turns" | "h
 <meta name="robots" content="noindex">
 <title>${title} · shuvi</title>
 <meta name="htmx-config" content="${HTMX_CONFIG}">
-<link rel="stylesheet" href="/style.css">
-<script src="/htmx.min.js" defer></script>
-<script src="/console.js" defer></script>
-${scripts.map((s) => html`<script src="${s}" defer></script>
+<meta name="assets" content="${assetsVersion()}">
+<link rel="stylesheet" href="${assetUrl("style")}">
+<script src="${assetUrl("htmx")}" defer></script>
+<script src="${assetUrl("console")}" defer></script>
+${scripts.map((s) => html`<script src="${assetUrl(s)}" defer></script>
 `)}</head>
 <body hx-boost="true" hx-indicator="#progress">
 <div id="progress" class="progress" aria-hidden="true"></div>
