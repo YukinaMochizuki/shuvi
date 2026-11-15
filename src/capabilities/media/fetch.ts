@@ -121,7 +121,18 @@ export function fetchJobKind(porch: Porchkit, computer: ComputerConfig | null): 
   };
 }
 
-type Runner = { run(container: string, req: { command: string[]; workingDir?: string; stdin?: Uint8Array }): Promise<{ code: number; stdout: Uint8Array; stderr: string }> };
+export type Runner = { run(container: string, req: { command: string[]; workingDir?: string; stdin?: Uint8Array }): Promise<{ code: number; stdout: Uint8Array; stderr: string }> };
+
+/** A bash script run in the computer's home, its stdout back (trimmed); a non-zero exit throws. */
+export type HomeRun = (script: string, stdin?: Uint8Array) => Promise<string>;
+
+export function homeRun(hangar: Runner, container: string): HomeRun {
+  return async (script, stdin) => {
+    const r = await hangar.run(container, { command: ["bash", "-c", script], workingDir: HOME_DIR, ...(stdin ? { stdin } : {}) });
+    if (r.code !== 0) throw new Error(`the copy onto the computer failed (exit ${r.code}): ${r.stderr.trim().slice(0, 300)}`);
+    return Buffer.from(r.stdout).toString("utf8").trim();
+  };
+}
 
 /**
  * Copy ranges into this job's own `.part-<job id>` for up to `COPY_SLICE_MS`; rename it into place once
@@ -129,11 +140,7 @@ type Runner = { run(container: string, req: { command: string[]; workingDir?: st
  * `startFetch` avoids, but a race between two turns could still make) never append to the same file.
  */
 export async function copySlice(db: Db, job: Job, spec: FetchSpec, porch: Porchkit, hangar: Runner, container: string, signal?: AbortSignal, sliceMs = COPY_SLICE_MS): Promise<JobPoll> {
-  const run = async (script: string, stdin?: Uint8Array) => {
-    const r = await hangar.run(container, { command: ["bash", "-c", script], workingDir: HOME_DIR, ...(stdin ? { stdin } : {}) });
-    if (r.code !== 0) throw new Error(`the copy onto the computer failed (exit ${r.code}): ${r.stderr.trim().slice(0, 300)}`);
-    return Buffer.from(r.stdout).toString("utf8").trim();
-  };
+  const run = homeRun(hangar, container);
   let path = spec.path;
   let total = spec.total;
   if (!FETCH_KEY.test(spec.key)) return { state: "failed", result: "The download's key is not the media service's; nothing was copied." };
@@ -146,8 +153,19 @@ export async function copySlice(db: Db, job: Job, spec: FetchSpec, porch: Porchk
     if (total === undefined) throw new Error("the media service did not say how large the file is");
     updateJobSpec(db, job.id, { path, total });
   }
-  const done = () => ({ state: "done" as const, result: `Saved on your computer as ~/${path} (${mb(total!)}).` });
-  const part = `${path}.part-${job.id}`;
+  const r = await copyInto(porch, run, { key: spec.key, path, part: `${path}.part-${job.id}`, total }, signal, sliceMs);
+  if (!r.done) return { state: "running", note: `copying to the computer: ${mb(r.offset)} of ${mb(total)}` };
+  return { state: "done", result: `Saved on your computer as ~/${path} (${mb(total)}).` };
+}
+
+/**
+ * The resumable copy itself (steps 2 to 4 above), for any file in porchkit's file cache: ranges of `key`
+ * appended to `part` (from the home directory) for up to `sliceMs`, from the size `part` already has; once
+ * complete, renamed to `path` and its size checked. A `path` already there at `total` bytes is done at once.
+ * video_fetch's job and save_link both copy through it.
+ */
+export async function copyInto(porch: Porchkit, run: HomeRun, f: { key: string; path: string; part: string; total: number }, signal?: AbortSignal, sliceMs = COPY_SLICE_MS): Promise<{ done: true } | { done: false; offset: number }> {
+  const { key, path, part, total } = f;
   // The file in place already, at its full size (another job of it finished): done. At another size: not
   // to be trusted, so it is replaced.
   const there = await run(
@@ -157,7 +175,7 @@ export async function copySlice(db: Db, job: Job, spec: FetchSpec, porch: Porchk
   const final = lines[0]!.startsWith("final ") ? Number(lines.shift()!.slice(6)) : undefined;
   if (final === total) {
     await run(`rm -f -- ${shq(part)}`);
-    return done();
+    return { done: true };
   }
   let offset = Number(lines[0]) || 0;
   if (offset > total) {
@@ -169,17 +187,17 @@ export async function copySlice(db: Db, job: Job, spec: FetchSpec, porch: Porchk
   while (offset < total && Date.now() < end) {
     signal?.throwIfAborted();
     const last = Math.min(offset + CHUNK, total) - 1;
-    const r = await porch.fileRange(spec.key, offset, last, signal);
+    const r = await porch.fileRange(key, offset, last, signal);
     if (!r.bytes.length) throw new Error("the media service sent an empty range");
     await run(`set -e; cd ~; cat >> ${shq(part)}`, r.bytes);
     offset += r.bytes.length;
   }
-  if (offset < total) return { state: "running", note: `copying to the computer: ${mb(offset)} of ${mb(total)}` };
+  if (offset < total) return { done: false, offset };
   const landed = Number(await run(`set -e; cd ~; mv -f -- ${shq(part)} ${shq(path)}; stat -c %s -- ${shq(path)}`));
   if (landed !== total) {
     // Not what was sent: drop it, and the next poll copies it again from the start.
     await run(`rm -f -- ${shq(path)}`);
     throw new Error(`the copy came out at ${landed} bytes, not ${total}; it is copied again`);
   }
-  return done();
+  return { done: true };
 }

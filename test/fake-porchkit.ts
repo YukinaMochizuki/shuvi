@@ -10,6 +10,13 @@ import { createHash } from "node:crypto";
  *                       file is not fetched yet, 409 needs_file, starting its fetch
  *   POST /media/fetch   a download that advances one state per status read (queued → downloading → done)
  *   GET  /media/fetch/<key>, GET /files/<key> (with Range)
+ *   POST /read          as porchkit's docs/decisions/read.md: an X post (`X_POST`: text, 2 images, a short
+ *                       video with poster, probe, transcript and sheet, a quoted post), a Reddit post with
+ *                       replies (`REDDIT_POST`), a long page cut at `pageMaxChars` with `full` and
+ *                       `original` (`LONG_PAGE`), a short page read whole (`SHORT_PAGE`), raw JSON
+ *                       (`RAW_JSON`); a `.pdf` is 415 unsupported_type; anything else 404. A speculative read
+ *                       leaves a video's transcript and sheet out, as porchkit does. Its files (images,
+ *                       posters, the page's whole text and original) are served by GET /files/<key>.
  *
  * Errors by URL (any endpoint): one containing `private` is 422 unavailable, `busy` 429 (Retry-After 180),
  * `internal.example` 403 egress_refused, `broken` 502, `slow` 504. `failNext(path, …)` queues one answer for
@@ -23,6 +30,16 @@ export const TINY_JPEG = Buffer.from(
 );
 
 export const FAKE_TOKEN = "pk-fake-token-0123456789abcdef";
+
+export const X_POST = "https://x.com/example/status/1234567890";
+export const REDDIT_POST = "https://www.reddit.com/r/example/comments/abc123/an_example_thread/";
+export const LONG_PAGE = "https://news.example.com/long-article";
+export const SHORT_PAGE = "https://news.example.com/short-note";
+export const RAW_JSON = "https://api.example.com/data.json";
+
+/** The long page's whole markdown: numbered paragraphs, well over `pageMaxChars`. */
+export const LONG_MARKDOWN = `# An example article\n\n${Array.from({ length: 400 }, (_, i) => `Paragraph ${i + 1} of the example article, made up for tests and saying nothing at all.`).join("\n\n")}\n`;
+export const LONG_HTML = `<!doctype html><html><head><title>An example article</title></head><body><nav>menu</nav><article>${LONG_MARKDOWN.replace(/\n/g, "<br>")}</article></body></html>`;
 
 export interface FakeVideo {
   title: string;
@@ -55,6 +72,12 @@ export class FakePorchkit {
   fileBytes: Uint8Array = new Uint8Array(3 * 1024 * 1024 + 123).map((_, i) => (i * 31) & 0xff);
   /** Range requests to refuse (with 502) before serving again: a dropped copy. */
   failRanges = 0;
+  /** `/read`: the most characters of a page (or raw text) answered from `offset`. */
+  pageMaxChars = 20_000;
+  /** `/read`: how long each read takes. */
+  readDelayMs = 0;
+  /** `/read`'s files, by key: images, posters, a page's whole text and original. */
+  readonly readFiles = new Map<string, { bytes: Uint8Array; type: string }>();
   private readonly fetches = new Map<string, { url: string; reads: number; state: string }>();
   private readonly queued = new Map<string, { status: number; body: Record<string, unknown>; headers?: Record<string, string> }[]>();
   private server: ReturnType<typeof Bun.serve>;
@@ -125,6 +148,10 @@ export class FakePorchkit {
       if (url.includes("slow")) return Response.json({ error: "upstream_timeout", detail: "no answer within 90s." }, { status: 504 });
     }
 
+    if (req.method === "POST" && u.pathname === "/read") {
+      if (this.readDelayMs) await Bun.sleep(this.readDelayMs);
+      return this.read(body);
+    }
     if (req.method === "POST" && u.pathname === "/media/probe") {
       if (this.probeDelayMs) await Bun.sleep(this.probeDelayMs);
       const found = this.video(url);
@@ -196,6 +223,15 @@ export class FakePorchkit {
       return Response.json(this.status(st[1]!, f, true));
     }
     const file = u.pathname.match(/^\/files\/([0-9a-f]{32})$/);
+    const readFile = file ? this.readFiles.get(file[1]!) : undefined;
+    if (req.method === "GET" && readFile) {
+      const all = readFile.bytes;
+      const r = req.headers.get("range")?.match(/^bytes=(\d+)-(\d*)$/);
+      if (!r) return new Response(all, { headers: { "content-type": readFile.type } });
+      const start = Number(r[1]);
+      const end = Math.min(r[2] ? Number(r[2]) : all.length - 1, all.length - 1);
+      return new Response(all.subarray(start, end + 1), { status: 206, headers: { "content-type": readFile.type, "content-range": `bytes ${start}-${end}/${all.length}` } });
+    }
     if (req.method === "GET" && file) {
       if (this.fetches.get(file[1]!)?.state !== "done") return Response.json({ error: "not_found", detail: "no such file (or it has expired); fetch it again" }, { status: 404 });
       if (this.failRanges > 0) {
@@ -210,6 +246,124 @@ export class FakePorchkit {
       return new Response(all.subarray(start, end + 1), { status: 206, headers: { "content-type": "video/mp4", "content-range": `bytes ${start}-${end}/${all.length}` } });
     }
     return Response.json({ error: "not_found", detail: `no route ${req.method} ${u.pathname}` }, { status: 404 });
+  }
+
+  /** A file of `/read`'s answers, kept for GET /files/<key>; returns its key. */
+  private keep(name: string, bytes: Uint8Array | string, type: string): string {
+    const key = hex(`read|${name}`);
+    this.readFiles.set(key, { bytes: typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes, type });
+    return key;
+  }
+
+  private read(body: Record<string, unknown>): Response {
+    const url = String(body.url ?? "");
+    const speculative = body.speculative === true;
+    const comments = Number(body.comments ?? 0);
+    const video = (body.video as string) ?? "auto";
+    const offset = Number(body.offset ?? 0);
+    const base = { cached: false };
+    if (/\.pdf(\?|$)/i.test(url)) return Response.json({ error: "unsupported_type", content_type: "application/pdf", detail: "application/pdf is not read by /read" }, { status: 415 });
+
+    const xId = url.match(/^https:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/)?.[1];
+    if (xId === "1234567890") {
+      const v: Record<string, unknown> = { type: "video", duration: 42.5, width: 1280, height: 720, media_url: `${X_POST}/video/1` };
+      if (video === "auto") {
+        v.poster = { key: this.keep("poster", TINY_JPEG, "image/jpeg"), width: 1280, height: 720 };
+        v.probe = { id: "x:1234567890", extractor: "twitter", title: "Example Person - a short clip", uploader: "Example Person", uploader_id: "example", upload_date: "20261114", duration: 42.5, width: 1280, height: 720, chapters: [], subtitles: ["en"], auto_captions: [], formats: { video_heights: [360, 720], audio: true } };
+        if (!speculative) {
+          v.transcript = { lang: "en", kind: "manual", text: "[00:01] Hello from the example clip.\n[00:05] This is the second line.\n", truncated: false };
+          const id = hex("x-sheet");
+          v.sheet = { id, index: "video: a short clip · 00:42 (42.5s) · 1280x720\n9 frame(s), spread evenly, on 1 sheet(s) of 3x3", sheets: [{ url: `/media/sheets/${id}/1.jpg`, labels: ["00:03", "00:08", "00:13"] }] };
+        }
+      }
+      const media = [
+        { type: "image", key: this.keep("img1", TINY_JPEG, "image/jpeg"), width: 1200, height: 800, alt: "A chart" },
+        { type: "image", key: this.keep("img2", TINY_JPEG, "image/jpeg"), width: 800, height: 800, alt: null },
+        v,
+      ];
+      return Response.json({
+        kind: "post",
+        source: "x",
+        via: "syndication",
+        canonical_url: X_POST,
+        id: "x:1234567890",
+        author: { name: "Example Person", handle: "@example", url: "https://x.com/example" },
+        created_at: "2026-11-14T09:30:00Z",
+        text: "The full text of the post, links expanded: https://example.com/article",
+        lang: "en",
+        metrics: { likes: 120, reposts: 14, replies: 9, views: 5300 },
+        media,
+        quoted: { kind: "post", source: "x", canonical_url: "https://x.com/other/status/1234567000", id: "x:1234567000", author: { name: "Other Example", handle: "@other" }, created_at: "2026-11-13T08:00:00Z", text: "The quoted post's text.", metrics: { likes: 3 }, media: [], links: [] },
+        reply_to: null,
+        comments: [],
+        links: ["https://example.com/article"],
+        notes: comments ? ["replies need a login on X; none included"] : [],
+        ...base,
+      });
+    }
+    if (url.startsWith("https://www.reddit.com/r/example/comments/abc123/")) {
+      const all = [
+        { kind: "post", source: "reddit", id: "reddit:c1", author: { name: "u/first_example", handle: null }, created_at: "2026-11-14T10:00:00Z", text: "The first reply.", metrics: { score: 12 }, media: [], reply_to: { id: "reddit:abc123", url: REDDIT_POST }, links: [] },
+        { kind: "post", source: "reddit", id: "reddit:c2", author: { name: "u/second_example", handle: null }, created_at: "2026-11-14T10:05:00Z", text: "A reply to the first reply,\nover two lines.", metrics: { score: 4 }, media: [{ type: "image", key: null }], reply_to: { id: "reddit:c1", url: null }, links: [] },
+        { kind: "post", source: "reddit", id: "reddit:c3", author: { name: "u/third_example", handle: null }, created_at: "2026-11-14T11:00:00Z", text: "The third reply.", metrics: { score: 1 }, media: [], reply_to: { id: "reddit:abc123", url: REDDIT_POST }, links: [] },
+      ];
+      return Response.json({
+        kind: "post",
+        source: "reddit",
+        via: "json",
+        canonical_url: REDDIT_POST,
+        id: "reddit:abc123",
+        author: { name: "u/example_poster", handle: null, url: "https://www.reddit.com/user/example_poster" },
+        created_at: "2026-11-14T09:00:00Z",
+        text: "An example thread\n\nThe body of the example thread, made up.",
+        lang: null,
+        metrics: { score: 321, comments: 3 },
+        media: [],
+        quoted: null,
+        reply_to: null,
+        comments: all.slice(0, comments),
+        links: [],
+        notes: [],
+        ...base,
+      });
+    }
+    if (url === LONG_PAGE || url === SHORT_PAGE) {
+      const long = url === LONG_PAGE;
+      const md = long ? LONG_MARKDOWN : "# A short note\n\nA short note, read whole.\n";
+      const part = md.slice(offset, offset + this.pageMaxChars);
+      const truncated = offset + part.length < md.length;
+      return Response.json({
+        kind: "page",
+        source: "generic",
+        via: "http",
+        canonical_url: url,
+        title: long ? "An example article" : "A short note",
+        byline: long ? "Example Writer" : null,
+        published: long ? "2026-11-01" : null,
+        site_name: "Example News",
+        lang: "en",
+        markdown: part,
+        truncated,
+        offset,
+        next_offset: truncated ? offset + part.length : null,
+        total_chars: md.length,
+        ...(long
+          ? {
+              full: { key: this.keep("long-full", md, "text/markdown"), bytes: md.length, type: "text/markdown" },
+              original: { key: this.keep("long-original", LONG_HTML, "text/html"), bytes: LONG_HTML.length, type: "text/html" },
+              videos: [{ media_url: "https://www.youtube.com/watch?v=abc123def45" }],
+              images: [{ url: "https://news.example.com/a.jpg", alt: "An example picture" }],
+              links: ["https://news.example.com/next"],
+            }
+          : { full: null, original: null, videos: [], images: [], links: [] }),
+        notes: [],
+        ...base,
+      });
+    }
+    if (url === RAW_JSON) {
+      return Response.json({ kind: "raw", source: "generic", via: "http", canonical_url: url, content_type: "application/json", text: '{"example": true, "items": [1, 2, 3]}', truncated: false, offset: 0, notes: [], ...base });
+    }
+    return Response.json({ error: "not_found", detail: "nothing at that URL" }, { status: 404 });
   }
 
   private startFetch(key: string, url: string) {

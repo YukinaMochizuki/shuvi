@@ -1,0 +1,1 @@
+ALTER TABLE `media_prewarms` ADD `endpoint` text DEFAULT 'probe' NOT NULL;

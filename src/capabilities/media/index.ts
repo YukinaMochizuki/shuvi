@@ -8,13 +8,25 @@ import { actingFor, authorisation } from "../../agent/acting.ts";
 import { defineCapability, policyDelegates, policyEnables } from "../types.ts";
 import { FETCH_JOB_KIND, fetchJobKind, startFetch } from "./fetch.ts";
 import { JOIN_WAIT_MS, joinedProbe, preparedLines, pruneResults, startPrewarms } from "./prewarm.ts";
+import { readTools, SAVE_NOTE } from "./read.ts";
 import { probeText, subsText } from "./text.ts";
 
 /**
- * Media: videos from their links, through porchkit (src/porchkit/client.ts), the platform's relay on the
- * owner's home connection. Always anonymous; porchkit keeps each site's request budget, and refuses past it.
+ * Media: links and videos, through porchkit (src/porchkit/client.ts), the platform's relay on the owner's
+ * home connection and its main way out for reading. Always anonymous; porchkit keeps each site's request
+ * budget, and refuses past it.
  *
- *   tools     video_probe(url): what a video is, as a few lines; video_subs(url, lang?, from?, to?): its
+ * WHY READING IS HERE (and not a capability of its own): reading a link and looking at a video are one
+ * service, one token and one prewarm. The prewarm routes each link by its host (a post to `/read`, a video
+ * to `/media/probe`) under one cap and one accounting table; a post's video goes on with the video tools;
+ * save_link reuses video_fetch's copy onto the computer. And a chat whose policy enables media gets both, so
+ * no chat loses a way to read a link when web_fetch goes (web/index.ts).
+ *
+ *   tools     read_link(url, comments?, offset?, video?): any link read through porchkit's `/read` (a post,
+ *             a page, raw text), as text with the post's images as images (read.ts); save_link(url, what?):
+ *             a page's whole text or the page as received into ~/inbox/ on the computer (read.ts; owner-only,
+ *             as video_fetch, and offered only where the chat has the computer).
+ *             video_probe(url): what a video is, as a few lines; video_subs(url, lang?, from?, to?): its
  *             subtitles as `[mm:ss] line` text, in pages; video_sheet(url | path, …): contact sheets, from
  *             porchkit for a link (images fetched here with the token, never shown as URLs), or on the
  *             chat's computer for a file (computer's `localSheet`, as before); video_fetch(url, quality?):
@@ -24,10 +36,11 @@ import { probeText, subsText } from "./text.ts";
  *             and so is a sheet of a file (`ownerOnlyWhen`). Their refusals say why and what to offer instead
  *             (`ownerOnlyNote`). video_fetch and a file's sheet are offered only where the chat has the
  *             computer capability too; a chat without media keeps the computer's own video_sheet (files).
- *   prewarm   `inbound`: an OWNER's message with a link to a known video host (links.ts) is probed at once,
- *             speculatively, while its turn is being spawned; probe only, best effort (prewarm.ts). A turn's
- *             input shows "(Prepared: #N's link — video_probe returns at once.)" after the message once that
- *             has started (`perceive`), and video_probe joins it rather than asking twice (single-flight,
+ *   prewarm   `inbound`: an OWNER's message with a link to a known post host (links.ts `POST_HOSTS`) or a short
+ *             link is read at once (`/read`), one to a known video host probed, both speculatively, while its turn is
+ *             being spawned; never a download, best effort (prewarm.ts). A turn's input shows "(Prepared:
+ *             #N's link — read_link | video_probe returns at once.)" after the message once that has started
+ *             (`perceive`), and read_link / video_probe joins it rather than asking twice (single-flight,
  *             across the server and the runner child, through the store). Each is recorded with whether a
  *             turn then used it: the console's turn view shows "prewarmed: used / unused".
  *   jobs      `video_fetch`: porchkit's download, then a resumable copy onto the computer (fetch.ts).
@@ -56,9 +69,25 @@ export interface MediaConfig {
 export const FETCH_NOTE =
   "Tell them plainly that you can't download a video for them without the owner's say-so: it puts the whole file on the owner's computer and uses the home connection's download budget. Offer what you can do instead: look at it (video_probe, video_subs, video_sheet with the link) and tell them what is in it.";
 
-/** The capability's prompt section; `computer`: the chat has a computer (video_fetch, sheets of files). */
+/** The reading part of the section; `computer`: save_link is there. */
+export function readSection(computer: boolean, delegated = false): string {
+  const who = delegated ? "the owner or this group's operators" : "the owner";
+  return `## Reading links
+
+To read any link, use \`read_link\`: a social post comes whole (its full text, who posted it and when, the post it quotes, and its pictures shown to you), an article or other page as markdown, JSON and plain text as they are. A post's video comes with what it is, what is said in it and a few frames when it is short; the video tools below go further with its link. \`comments\` adds a post's replies. A long page is cut: call read_link again with the \`offset\` it gives to read on${
+    computer ? `, or have the whole text put on your computer with \`save_link\` (only ${who} can ask for that)` : ""
+  }. When a message is followed by "(Prepared: … read_link …)", its link was read already and read_link answers at once.
+
+Links are read through the owner's home connection, anonymously: nothing behind a login is ever read. Say so when that is what stops a link, rather than guessing at what it says.`;
+}
+
+/** The capability's prompt section; `computer`: the chat has a computer (video_fetch, save_link, sheets of files). */
 export function mediaSection(computer: boolean, delegated = false): string {
-  if (computer && delegated) return mediaSectionDelegated();
+  return `${readSection(computer, computer && delegated)}\n\n${videoSection(computer, delegated)}`;
+}
+
+function videoSection(computer: boolean, delegated = false): string {
+  if (computer && delegated) return videoSectionDelegated();
   return `## Videos
 
 Anyone here may ask you to look at a video, and you can, from its link. \`video_probe\` says what it is (title, length, chapters, which subtitles exist); \`video_subs\` gives what is said, with times; \`video_sheet\` with the \`url\` shows you frames from it, tiled in order with each one's time under it. Start with video_probe. When a message is followed by "(Prepared: …)", its link was looked up already and video_probe answers at once.
@@ -73,8 +102,8 @@ Videos come through the owner's home connection, which has a request budget for 
 }
 
 /** The section in a group whose operators may ask for video_fetch too (policy `delegate: [media]`). */
-function mediaSectionDelegated(): string {
-  return mediaSection(true)
+function videoSectionDelegated(): string {
+  return videoSection(true)
     .replace("and only the owner can ask for it. ", "and here the owner or this group's operators can ask for it. ")
     .replace(
       "When someone else asks you to download a video, tell them plainly you can't do that for them without the owner's say-so, and offer to look at it and tell them what's in it instead.",
@@ -172,13 +201,13 @@ type SheetInput = SheetArgs & { url?: string; path?: string; source?: "auto" | "
 
 export const media = defineCapability<MediaConfig>({
   id: "media",
-  label: "videos from links",
-  gives: "looking at videos from their links (what it is, its subtitles, contact sheets) through the home relay; downloading one onto the computer for the owner only.",
+  label: "reading links and videos",
+  gives: "reading any link through the home relay (posts with their pictures and videos, pages, raw text) and looking at videos (what it is, its subtitles, contact sheets); saving a page or downloading a video onto the computer for the owner only.",
   enable: mediaConfig,
-  ownerOnly: ["video_fetch"],
+  ownerOnly: ["video_fetch", "save_link"],
   ownerOnlyWhen: { video_sheet: sheetActsForOwner },
-  delegable: ["video_fetch", "video_sheet"],
-  ownerOnlyNote: { video_fetch: FETCH_NOTE, video_sheet: SHEET_FILE_NOTE },
+  delegable: ["video_fetch", "video_sheet", "save_link"],
+  ownerOnlyNote: { video_fetch: FETCH_NOTE, video_sheet: SHEET_FILE_NOTE, save_link: SAVE_NOTE },
   tools({ db, chat, turnId, state: s, chatPolicy }, cfg) {
     const porch = porchkitOf(cfg);
     const computer = cfg.computer && policyEnables(chatPolicy, "computer") ? cfg.computer : null;
@@ -271,7 +300,8 @@ export const media = defineCapability<MediaConfig>({
       },
     };
 
-    return [{ serverName: "shuvi", tools: [probe, subs, sheet, ...(computer ? [fetchTool] : [])] as ToolDef[] }];
+    const reading = readTools({ db, chat, turnId, porch, computer, joinWaitMs: cfg.joinWaitMs });
+    return [{ serverName: "shuvi", tools: [...reading, probe, subs, sheet, ...(computer ? [fetchTool] : [])] as ToolDef[] }];
   },
   section: (ctx, cfg) => mediaSection(!!cfg.computer && policyEnables(ctx.chatPolicy, "computer"), policyDelegates(ctx.chatPolicy, "media")),
   jobKinds: (cfg) => [fetchJobKind(porchkitOf(cfg), cfg.computer)],

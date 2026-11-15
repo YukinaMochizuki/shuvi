@@ -42,6 +42,21 @@ export const SHORTENER_HOSTS = [
   "v.gd",
 ] as const;
 
+/**
+ * The hosts whose links are POSTS (a social post: text, images, videos), prewarmed through porchkit's
+ * `POST /read` rather than `/media/probe`: a post is not a video, and most of them have none. Matched with
+ * any subdomain, like `VIDEO_HOSTS`; checked first, so x.com and the others here leave the video list's
+ * probe. A short link (`SHORTENER_HOSTS`) is read too: `/read` resolves it and answers whatever is behind
+ * it (a post, a video site's post, a page), where a probe would fail on anything but a video.
+ */
+export const POST_HOSTS = ["x.com", "twitter.com", "threads.net", "threads.com", "instagram.com", "facebook.com", "reddit.com", "bsky.app"] as const;
+
+/** Is `host` (lower case) one whose links a prewarm reads as a post? */
+export function isPostHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/\.$/, "");
+  return POST_HOSTS.some((v) => h === v || h.endsWith(`.${v}`));
+}
+
 /** The most links of one message prewarmed: a message full of links is not a reason to spend the budget. */
 export const MAX_PREWARM_LINKS = 3;
 
@@ -88,6 +103,25 @@ export function videoLinks(text: string): { url: string; host: string }[] {
   return linksIn(text)
     .map((url) => ({ url, host: new URL(url).hostname.toLowerCase() }))
     .filter((l) => isVideoHost(l.host))
+    .slice(0, MAX_PREWARM_LINKS);
+}
+
+/** Is `host` (lower case) a short-link service (itself or `www.`, as porchkit has it)? */
+export function isShortener(host: string): boolean {
+  return (SHORTENER_HOSTS as readonly string[]).includes(host.toLowerCase().replace(/\.$/, "").replace(/^www\./, ""));
+}
+
+/** Which porchkit call prewarms a link: `read` for a post host or a short link, `probe` for a video host. */
+export type PrewarmEndpoint = "read" | "probe";
+
+/**
+ * The links of `text` a prewarm looks up, with the call each goes to: a post host's or a short link's to
+ * `/read`, a video host's to `/media/probe`; at most `MAX_PREWARM_LINKS` in all, in the order sent.
+ */
+export function prewarmLinks(text: string): { url: string; host: string; endpoint: PrewarmEndpoint }[] {
+  return linksIn(text)
+    .map((url) => ({ url, host: new URL(url).hostname.toLowerCase() }))
+    .flatMap((l): { url: string; host: string; endpoint: PrewarmEndpoint }[] => (isPostHost(l.host) || isShortener(l.host) ? [{ ...l, endpoint: "read" }] : isVideoHost(l.host) ? [{ ...l, endpoint: "probe" }] : []))
     .slice(0, MAX_PREWARM_LINKS);
 }
 
