@@ -92,8 +92,12 @@ Everything is in one SQLite file (WAL mode).
   conversation per MODEL: the active one on `chats` (`conversation_model` says whose), the others parked in
   `chat_conversations`. On every switch, between any two models, the owner chooses between lossless (what
   the active conversation gained since it was entered, which is what the target's lacks, is appended to the
-  target's; a target with none gets a copy of all of it) and lossy (nothing is: the target's conversation
-  resumes as it was left, or a fresh one opens with the last 10 messages). A LANE is only where a
+  target's; a target with none gets a copy of all of it), lossy (nothing is: the target's conversation
+  resumes as it was left, or a fresh one opens with the last 10 messages) and clean start (nothing is, and the
+  target's own conversation is dropped: a brand-new one opens with the next turn's input only, not even the
+  last messages; her persona, rules, memory and notes are in the system prompt as always, and `read_chat`
+  reaches the history). The same clean opening without changing model is the console's "Start clean" (`/new`
+  whose next turn opens with its input only). A LANE is only where a
   conversation is stored, and so which converter carries it: a Claude login's session files, or the
   OpenAI-compatible tables; within one Claude login a copy is the session itself, forked. A chat that
   follows the default moves lossy to the new default's conversation at its next turn. A switch asked for
@@ -453,7 +457,7 @@ stickers:
   - `/stop <chat>`: stop that chat's turn, with the same semantics as `/stop` in the chat.
   - `/turn <id>`: one paragraph on a turn, and its link in the console.
   - `/model <chat>`: a card to switch that chat's model (below); `/model <chat> <provider>/<model>
-    lossless|lossy` switches with no card and replies with the result.
+    lossless|lossy|clean` switches with no card and replies with the result.
   - `/profile <chat>`: a card to switch which profile (§3) that chat uses: Base and every profile, the
     current one ✓; a press switches it, from the chat's next turn, and the card says so.
   - `/models`: the catalog as a card: each model's id, label, default ★, context window, vision and probe
@@ -469,8 +473,9 @@ stickers:
   `/model` in the main chat (acknowledged there with 👌 only) or by `/model <chat>` here. First the model:
   the catalog, 6 a page, the chat's model ✓ and a model whose last probe got no tool call ⚠ (still
   selectable: without tools she cannot speak). Then the mode, always offered, between any two models:
-  Lossless and Lossy, each with a line on what it would do in this chat now ("carries 14 new messages into
-  X's conversation", "resumes X's conversation from 3 days ago", …), and the running turn it will stop.
+  Lossless, Lossy and Clean start, each with a line on what it would do in this chat now ("carries 14 new
+  messages into X's conversation", "resumes X's conversation from 3 days ago", "starts X fresh, with no
+  messages", …), and the running turn it will stop.
   The press asks for the switch (agent/switch.ts `requestSwitch`): the server stops a running turn, then
   switches, and the card goes from "switching…" to the result with no buttons. A card's state is a
   `control_cards` row and a press is recorded in the control batch's transaction, so a restart between

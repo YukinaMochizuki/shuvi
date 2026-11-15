@@ -148,7 +148,7 @@ export const modelSwitchRequests = sqliteTable(
       .notNull()
       .references(() => chats.id),
     toModel: text("to_model").notNull(),
-    mode: text("mode", { enum: ["lossless", "lossy"] }).notNull(),
+    mode: text("mode", { enum: ["lossless", "lossy", "clean"] }).notNull(),
     status: text("status", { enum: ["pending", "done", "failed"] }).notNull().default("pending"),
     stoppedTurnId: integer("stopped_turn_id"),
     result: text("result", { mode: "json" }).$type<Record<string, unknown>>(),
@@ -161,7 +161,8 @@ export const modelSwitchRequests = sqliteTable(
 
 /**
  * Each move of a chat from one model's conversation to another's (agent/switch.ts), carrying what the
- * other lacks (`lossless`, `carried` messages) or nothing (`lossy`). `native` (a switch within a lane that
+ * other lacks (`lossless`, `carried` messages) or nothing (`lossy`), or starting the target over with nothing
+ * (`clean`: its own conversation dropped, the next turn opens with its input only). `native` (a switch within a lane that
  * kept the conversation) is no longer written, and is only read in rows from before a conversation per model.
  * `turn_id` is the first turn after it, which records it.
  */
@@ -174,7 +175,7 @@ export const modelSwitches = sqliteTable(
       .references(() => chats.id),
     fromModel: text("from_model"),
     toModel: text("to_model").notNull(),
-    mode: text("mode", { enum: ["native", "lossless", "lossy"] }).notNull(),
+    mode: text("mode", { enum: ["native", "lossless", "lossy", "clean"] }).notNull(),
     fromSessionId: text("from_session_id"),
     toSessionId: text("to_session_id"),
     carried: integer("carried").notNull().default(0),

@@ -20,11 +20,13 @@ import { computerSection, schedulesSection, secretsSection, type ComputerView, t
  * page still reads without its stylesheet.
  *
  *   Model         the catalog as a radio list, by provider. A row is a link (`?to=<model>#model`, a read): the
- *                 page comes back with Lossless / Lossy under it, each with what it would do in this chat now
+ *                 page comes back with Lossless / Lossy / Clean start under it, each with what it would do in this chat now
  *                 (the control bot's switch card's lines), and the running turn it would stop.
  *   Profile       Base and every profile; a row is a button that switches.
  *   Conversation  when it began, its segments and context; Stop the turn (only while one runs); New
- *                 conversation, which asks first (`?confirm=new#conversation`).
+ *                 conversation, which asks first (`?confirm=new#conversation`); Start clean, as New
+ *                 conversation but opening with no messages (agent/switch.ts `startClean`), which asks first too
+ *                 (`?confirm=clean`).
  *   Permissions   the chat's entry as a form; "Review changes" comes back with the diff to policy.yaml, then
  *                 "Save" writes it; a form the parser refuses comes back as it was typed, with its reason.
  *   Schedules, Secrets, Computer   chat-extras.ts.
@@ -50,6 +52,7 @@ export interface Picked {
   id: string;
   lossless?: string;
   lossy?: string;
+  clean?: string;
   /** "turn 24 is running and will be stopped". */
   running?: string | null;
   /** Switching to it would do nothing ("already on …"), or it could not be previewed (why). */
@@ -128,7 +131,7 @@ export interface ChatSettingsView {
   /** Drawn once per page load: a switch posted twice from it (a double submit) is asked for once (model-cards.ts `consoleSwitch`). */
   pageKey: string;
   profile: { current: string | null; gone: boolean; rows: ProfileRow[]; flash?: Flash };
-  conversation: { began: string | null; how?: string; segments: number; contextTokens: number | null; running?: RunningTurn; confirmNew: boolean; flash?: Flash };
+  conversation: { began: string | null; how?: string; segments: number; contextTokens: number | null; running?: RunningTurn; confirmNew: boolean; confirmClean?: boolean; flash?: Flash };
   permissions: PermissionsView;
   /** Loaded for the Automation & machine page only. */
   schedules?: SchedulesView;
@@ -160,11 +163,11 @@ function modelRow(v: ChatSettingsView, m: ModelRow): Raw {
 function switchBox(v: ChatSettingsView, p: Picked): Raw {
   const cancel = html`<a class="btn ghost" href="${base(v)}#model">Cancel</a>`;
   if (p.error || p.noop) return html`<div class="switchbox"><div class="swfoot"><span class="${p.error ? "c-failed" : "faint"}">${p.error ?? p.noop}</span> ${cancel}</div></div>`;
-  const mode = (m: "lossless" | "lossy", name: string, line: string) => html`<form method="post" action="${base(v)}/switch" class="modef">${csrfField(v)}<input type="hidden" name="to" value="${p.id}"><input type="hidden" name="mode" value="${m}"><input type="hidden" name="key" value="${v.pageKey}">
+  const mode = (m: "lossless" | "lossy" | "clean", name: string, line: string) => html`<form method="post" action="${base(v)}/switch" class="modef">${csrfField(v)}<input type="hidden" name="to" value="${p.id}"><input type="hidden" name="mode" value="${m}"><input type="hidden" name="key" value="${v.pageKey}">
 <button type="submit" class="mode"><span class="mname">${name}</span> <span class="mline">${line}</span></button></form>`;
   return html`<div class="switchbox" id="switchbox"><div class="swhead">Switch from <span class="mono">${v.model.current ?? "none"}</span> to <span class="mono">${p.id}</span>. How?</div>
-<div class="modes compact">${mode("lossless", "Lossless", p.lossless ?? "")}${mode("lossy", "Lossy", p.lossy ?? "")}</div>
-<div class="swfoot"><span class="faint">Either way her files and notes stay.${p.running ? ` ${p.running[0]!.toUpperCase()}${p.running.slice(1)}.` : ""}</span> ${cancel}</div></div>`;
+<div class="modes compact">${mode("lossless", "Lossless", p.lossless ?? "")} ${mode("lossy", "Lossy", p.lossy ?? "")} ${mode("clean", "Clean start", p.clean ?? "")}</div>
+<div class="swfoot"><span class="faint">Whichever way, her files and notes stay.${p.running ? ` ${p.running[0]!.toUpperCase()}${p.running.slice(1)}.` : ""}</span> ${cancel}</div></div>`;
 }
 
 /**
@@ -225,7 +228,14 @@ function conversationSection(v: ChatSettingsView): Raw {
       } Her files and notes stay.</p>
 <form method="post" action="${base(v)}/new">${csrfField(v)}<button type="submit" class="btn danger solid">New conversation</button> <a class="btn ghost" href="${base(v)}#conversation">Cancel</a></form></div>`
     : html`<div class="crow"><div class="stext"><b>New conversation</b> <span>As <span class="mono">/new</span> does: her next turn starts fresh, opened with the chat's last 10 messages. Her files and notes stay.</span></div><a class="btn" href="${href(base(v), { confirm: "new" })}#conversation">New conversation</a></div>`;
-  return html`<section class="cs" id="conversation"><div class="cshd"><h2>Conversation</h2> <a class="right" href="/chats/${v.chat.id}">The chat's log →</a></div>${flashLine(c.flash)}${facts}${stop}${fresh}</section>`;
+  // As New conversation, but her next turn opens with no messages at all: a clean start of the model it runs on.
+  const clean = c.confirmClean
+    ? html`<div class="confirm" role="alertdialog" aria-label="Start clean"><p><b>Start clean?</b> Every conversation of this chat is forgotten, on every model; her next turn starts fresh with its new messages only, not the chat's last 10.${
+        c.running ? ` Turn ${c.running.id} is running and will be stopped.` : ""
+      } Her files and notes stay, and she can still read the chat's history.</p>
+<form method="post" action="${base(v)}/clean">${csrfField(v)}<button type="submit" class="btn danger solid">Start clean</button> <a class="btn ghost" href="${base(v)}#conversation">Cancel</a></form></div>`
+    : html`<div class="crow"><div class="stext"><b>Start clean</b> <span>As New conversation, but her next turn opens with no earlier messages at all, only the new ones. Her files and notes stay.</span></div><a class="btn" href="${href(base(v), { confirm: "clean" })}#conversation">Start clean</a></div>`;
+  return html`<section class="cs" id="conversation"><div class="cshd"><h2>Conversation</h2> <a class="right" href="/chats/${v.chat.id}">The chat's log →</a></div>${flashLine(c.flash)}${facts}${stop}${fresh}${clean}</section>`;
 }
 
 // ---- permissions -------------------------------------------------------------------------------------------

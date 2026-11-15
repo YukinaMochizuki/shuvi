@@ -159,8 +159,8 @@ profile, how old its conversation is, a link to its log), then three tabs, each 
 Every button comes back to the tab it is on, with its result shown once.
 
 - **Model**: the catalog as a radio list by provider: the chat's model marked current, ★ the default, ⚠ a model
-  whose last probe got no tool call, each one's context window. Picking another opens **Lossless** / **Lossy**
-  under it, each with what it would do in this chat now, and the running turn it would stop: the control bot's
+  whose last probe got no tool call, each one's context window. Picking another opens **Lossless** / **Lossy** /
+  **Clean start** under it, each with what it would do in this chat now, and the running turn it would stop: the control bot's
   `/model` card's own lines. Pressing one asks for the switch through the same code as the card
   (`src/control/model-cards.ts` `consoleSwitch`, `src/agent/switch.ts` `requestSwitch`): the server stops a running
   turn, then switches, and the chat's open `/model` cards in the control bot are closed as superseded. The page
@@ -171,7 +171,9 @@ Every button comes back to the tab it is on, with its result shown once.
 - **Conversation**: when the current one began, its segments and its context. **Stop the turn** (only while one
   runs) does what `/stop` does. **New conversation** does what `/new` does, after asking: a running turn is
   stopped, every model's conversation of the chat is forgotten, and her next turn opens with the chat's last 10
-  messages. Her files and notes stay either way.
+  messages. **Start clean** is the same, after asking too, but her next turn opens with its new messages only, not
+  the last 10: the opening of a model switch's Clean start, for the model the chat is on (picking that model in
+  the list does nothing). Her files and notes stay either way, and she can still read the chat's history.
 - **Permissions**: the chat's entry in `home/policy.yaml` as a form: what wakes her (every message, or mentions,
   replies and follow-ups within some minutes), what she sees (the private persona and memory are offered only for
   your DM, as the policy parser requires), each capability on or off with its parameters (a workstream's
@@ -236,7 +238,7 @@ the turn goes on.
 Each turn also records which backend session it ran in and how that session came to be (`turns.opening`: the
 chat's first, a fresh one after `/new`, a restart after it was lost, another model's after a model switch, or
 resumed), which is what groups turns into conversations. The first turn after a model switch notes it in its
-transcript: from what to what, and lossless (how many messages were carried) or lossy. A successful compaction is a
+transcript: from what to what, and lossless (how many messages were carried), lossy or a clean start. A successful compaction is a
 `compaction` step with its trigger and the tokens before and after (recorded when the agent-runtime in use
 reports compactions through its `onCompaction` run option); a compaction summary failure or rejection is
 recorded as a generic transcript note. Turns from before these were recorded have their conversation inferred

@@ -10,6 +10,7 @@ import type { SignalTurn } from "../server/spawn.ts";
 import type { Db } from "../store/db.ts";
 import { forgetConversations } from "../store/events.ts";
 import { HISTORY_ON_NEW } from "../agent/turn.ts";
+import { startClean } from "../agent/switch.ts";
 import { revokeGrant } from "../capabilities/computer/secrets.ts";
 import { cancelSchedule, getSchedule, pauseSchedule, resumeSchedule } from "../store/schedules.ts";
 import { whenDay } from "./chat-extras.ts";
@@ -28,7 +29,7 @@ import { chatById } from "./queries.ts";
  * console's write boundary (server.ts: POST only, the Origin, the CSRF token), answered with a 303 back to the
  * category page the write came from (chat-settings.ts `CATEGORIES`) and its result kept in memory, read once (`?r=<id>`, at most KEEP_MAX for KEEP_MS, as Home's results):
  *
- *   switch   asks for the switch exactly as the control bot's mode step does (control/model-cards.ts
+ *   switch   asks for the switch (lossless, lossy or clean) exactly as the control bot's mode step does (control/model-cards.ts
  *            `consoleSwitch`: a switch card with no message, the same `requestSwitch`, finished by the same
  *            `switchCardPass`; the chat's open bot cards are closed as superseded). The server stops a running
  *            turn, then switches; the page follows the request (`/chats/<id>/settings/switching?req=`, a read)
@@ -39,6 +40,8 @@ import { chatById } from "./queries.ts";
  *            different one running by then is not stopped.
  *   new      as `/new`: a running turn is stopped, then every conversation of the chat is forgotten
  *            (`forgetConversations`); the next turn opens with the last HISTORY_ON_NEW messages.
+ *   clean    "Start clean": as `new`, but the next turn opens with its new messages only, not the last
+ *            HISTORY_ON_NEW (agent/switch.ts `startClean`, the opening of a clean start).
  *   policy   the chat's entry in policy.yaml, from the Permissions form (policy-form.ts). `action=review` checks it
  *            with the policy parser and answers the diff; `action=save` writes it, as ONE commit in home/ authored
  *            as the owner from the console (`commitHomeEdit`, `by.console`, `expect`: the text it was decided on),
@@ -54,7 +57,7 @@ import { chatById } from "./queries.ts";
  *            (computer/secrets.ts `revokeGrant`): the card is answered and edited to say so.
  */
 
-export const CHAT_SETTINGS_WRITE = /^\/chats\/(\d+)\/settings\/(switch|profile|stop|new|policy|schedule-cancel|schedule-pause|schedule-resume|revoke)$/;
+export const CHAT_SETTINGS_WRITE = /^\/chats\/(\d+)\/settings\/(switch|profile|stop|new|policy|clean|schedule-cancel|schedule-pause|schedule-resume|revoke)$/;
 
 const KEEP_MS = 10 * 60_000;
 const KEEP_MAX = 20;
@@ -111,7 +114,7 @@ export function chatSettingsWrite(deps: ChatSettingsWriteDeps, chatId: number, v
     case "switch": {
       const to = text(form, "to");
       const mode = text(form, "mode");
-      if (mode !== "lossless" && mode !== "lossy") return back({ section: "model", flash: { tone: "refused", text: "Pick Lossless or Lossy." } });
+      if (mode !== "lossless" && mode !== "lossy" && mode !== "clean") return back({ section: "model", flash: { tone: "refused", text: "Pick Lossless, Lossy or Clean start." } });
       // The page's key (chat-settings.ts `pageKey`): posted twice, the switch is asked for once.
       const key = /^[\w-]{8,40}$/.test(text(form, "key")) ? text(form, "key") : randomBytes(9).toString("base64url");
       const r = consoleSwitch(db, chatId, to, mode, key);
@@ -135,6 +138,18 @@ export function chatSettingsWrite(deps: ChatSettingsWriteDeps, chatId: number, v
       return back({
         section: "conversation",
         flash: { tone: "ok", text: `${stopped ? `Stopped turn ${stopped.id}; ` : ""}${label} starts a new conversation: her next turn here opens with the chat's last ${HISTORY_ON_NEW} messages.` },
+      });
+    }
+    case "clean": {
+      const stopped = stopTurn(db, chatId, lastSeq(db, chatId), deps.signal);
+      try {
+        startClean(db, chatId);
+      } catch (e) {
+        return back({ section: "conversation", flash: { tone: "refused", text: `Not started clean: ${e instanceof Error ? e.message : String(e)}` } });
+      }
+      return back({
+        section: "conversation",
+        flash: { tone: "ok", text: `${stopped ? `Stopped turn ${stopped.id}; ` : ""}${label} starts clean: her next turn here opens with its new messages only, no earlier ones.` },
       });
     }
     case "policy":

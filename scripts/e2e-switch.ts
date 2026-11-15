@@ -27,6 +27,9 @@
  *   → lossy    → T14 on sonnet, switched FROM THE CONSOLE: the chat's settings page (console/chat-settings*.ts),
  *                signed in as a tailnet user, its Origin and CSRF token, posts the switch; the page follows the
  *                request to its result, the bot's own words; T14 then runs on sonnet, its own session resumed
+ *   → clean    → T15 on the endpoint's first model, which has a conversation (T1 to T13): a CLEAN START drops
+ *                it, and T15's request is a new conversation holding T15's prompt and nothing earlier, not even
+ *                the chat's last messages
  *
  * What each model was sent is checked on the wire, and that nothing in it says a switch happened.
  *
@@ -327,9 +330,25 @@ try {
   check(claudeSeen.length > claudeBefore && r14.includes("T14-PROMPT") && !JSON.stringify(openaiSeen.at(-1)).includes("T14-PROMPT"), "T14 ran on sonnet, not on the endpoint");
   check(inOrder(r14, ["T12-PROMPT", "T12-ANSWER", "T14-PROMPT"]).length === 0 && !r14.includes("T13-ANSWER"), "T14's request is sonnet's own conversation (T12), without what the endpoint said in T13");
 
+  // → clean → T15 on the endpoint's first model: its conversation (T1 to T13) dropped, nothing carried.
+  check(store.$client.query("select 1 from chat_conversations where model = 'fake/fake-model'").get() !== null, "the endpoint model has a parked conversation");
+  const cleanReq = requestSwitch(store, chat().id, "fake/fake-model", "clean");
+  await until("the clean start to be applied", () => (store.$client.query("select status from model_switch_requests where id = ?").get(cleanReq.id) as { status: string }).status !== "pending");
+  check(chat().owner === "fake/fake-model" && chat().session === null, "a clean start: the endpoint model has no conversation now");
+  check(store.$client.query("select 1 from chat_conversations where model = 'fake/fake-model'").get() === null, "its parked conversation is dropped");
+  check(store.$client.query("select 1 from chat_conversations where model = 'claude/claude-sonnet-4-5'").get() !== null, "sonnet's conversation, the one left, is parked");
+  const openaiBefore = openaiSeen.length;
+  await turn(15);
+  const r15 = openaiSeen.at(-1)!;
+  const w15 = JSON.stringify(r15);
+  check(openaiSeen.length > openaiBefore && w15.includes("T15-PROMPT"), "T15 ran on the endpoint");
+  check(r15.filter((m) => m.role !== "system").length === 1, "T15's request is a new conversation: one user message");
+  check(!/T([1-9]|1[0-4])-(PROMPT|ANSWER|SAY)/.test(w15), "and it carries none of the earlier messages, not even the chat's last ones");
+  check(lastOpening() === "switched" && !!chat().session, "T15 opened the endpoint model's new conversation");
+
   const said = [...claudeSeen, ...openaiSeen].map((m) => JSON.stringify(m)).join("");
-  check(!/switch(ed)? (from|to)|lossless|lossy/i.test(said), "nothing any model was sent says a switch happened");
-  check((store.$client.query("select count(*) as n from model_switches where turn_id is not null").get() as { n: number }).n === 13, "every switch was recorded by the turn after it");
+  check(!/switch(ed)? (from|to)|lossless|lossy|clean start/i.test(said), "nothing any model was sent says a switch happened");
+  check((store.$client.query("select count(*) as n from model_switches where turn_id is not null").get() as { n: number }).n === 14, "every switch was recorded by the turn after it");
   log("PASS");
 } finally {
   cleanup();

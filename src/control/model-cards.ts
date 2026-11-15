@@ -34,7 +34,7 @@ import { chatLabel, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
  *   switch           opened by `/model` in the main chat (server/commands.ts) or `/model <chat>` here.
  *                    1. the model step: the catalog, 6 a page with ‹ ›; the model the chat runs on is marked
  *                       ✓, one whose last probe got no tool call ⚠; Cancel closes the card.
- *                    2. the mode step, once a model is pressed: Lossless, Lossy and ‹ Back, each with a line on
+ *                    2. the mode step, once a model is pressed: Lossless, Lossy, Clean start and ‹ Back, each with a line on
  *                       what it would do in this chat now (agent/switch.ts `previewSwitch`, which writes
  *                       nothing), and the running turn it would stop. The mode is offered for every target.
  *                    3. a mode pressed: a switch request (agent/switch.ts `requestSwitch`; the server stops a
@@ -42,7 +42,7 @@ import { chatLabel, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
  *                       `switchCardPass` sees the request done or failed and edits it to the result.
  *                    The model the chat is already on, pressed, is "already on X" when switching to it would
  *                    do nothing; otherwise (it would take up a parked conversation) it goes on to the mode.
- *                    `/model <chat> <provider>/<model> lossless|lossy` asks for the switch with no card: the
+ *                    `/model <chat> <provider>/<model> lossless|lossy|clean` asks for the switch with no card: the
  *                    result is a reply, sent by the same pass.
  *   models           `/models`: every model with its label, ★ default, context window, vision and probe
  *                    state, 6 a page; per model Make default, Re-probe (an OpenAI-compatible one) and Remove,
@@ -322,8 +322,8 @@ function runsOn(db: Db, chat: Chat): string | null {
   return chat.model ?? defaultModel(db)?.id ?? null;
 }
 
-/** The mode step's two lines, as `previewSwitch` computed them. */
-export function modeLines(p: SwitchPreview, now = Date.now()): { lossless: string; lossy: string; running: string | null } {
+/** The mode step's lines, one per mode, as `previewSwitch` computed them. */
+export function modeLines(p: SwitchPreview, now = Date.now()): { lossless: string; lossy: string; clean: string; running: string | null } {
   const x = p.to;
   const lossless = p.lossless.kind === "carry" ? `carries ${plural(p.lossless.messages, "new message")} into ${x}'s conversation` : `copies the whole conversation (${plural(p.lossless.messages, "message")}) to ${x}`;
   let lossy: string;
@@ -337,7 +337,10 @@ export function modeLines(p: SwitchPreview, now = Date.now()): { lossless: strin
     default:
       lossy = exhausted(p.lossy, "lossy preview");
   }
-  return { lossless, lossy, running: p.running ? `turn ${p.running} is running and will be stopped` : null };
+  const clean = `starts ${x} fresh, with no messages${
+    p.clean.drops ? (p.clean.since ? ` (its conversation from ${relativeTime(p.clean.since, now)} is dropped)` : ` (its current conversation is dropped)`) : ""
+  }`;
+  return { lossless, lossy, clean, running: p.running ? `turn ${p.running} is running and will be stopped` : null };
 }
 
 function renderSwitch(db: Db, card: Card, state: State, cb: (a: string) => string): { text: string; keyboard: Keyboard } {
@@ -365,11 +368,11 @@ function renderSwitch(db: Db, card: Card, state: State, cb: (a: string) => strin
         return { text: `${label} → ${state.model}: ${e instanceof Error ? e.message : String(e)}`, keyboard: back };
       }
       const l = modeLines(preview);
-      const lines = [`Switch ${label} to ${state.model}:`, `Lossless: ${l.lossless}`, `Lossy: ${l.lossy}`];
+      const lines = [`Switch ${label} to ${state.model}:`, `Lossless: ${l.lossless}`, `Lossy: ${l.lossy}`, `Clean start: ${l.clean}`];
       if (l.running) lines.push(l.running);
       return {
         text: lines.join("\n"),
-        keyboard: [[{ text: "Lossless", callback_data: cb("L") }, { text: "Lossy", callback_data: cb("Y") }], ...back],
+        keyboard: [[{ text: "Lossless", callback_data: cb("L") }, { text: "Lossy", callback_data: cb("Y") }], [{ text: "Clean start", callback_data: cb("C") }], ...back],
       };
     }
     case "switching":
@@ -493,12 +496,12 @@ export function openSwitchCard(db: Db, chatId: number, idemKey: string): Card | 
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-const MODEL_USAGE = "Usage: /model <chat> [<provider>/<model> lossless|lossy]";
+const MODEL_USAGE = "Usage: /model <chat> [<provider>/<model> lossless|lossy|clean]";
 const MODELS_USAGE = "Usage: /models, or /models add <provider>/<model> [<context_window>]";
 const PROVIDER_USAGE = "Usage: /provider add <name> <base_url> [<profile>.<VAR>], /provider add <name> claude [<config_dir>], or /provider remove <name>";
 
 /**
- * `/model <chat>` (a card) and `/model <chat> <provider>/<model> lossless|lossy` (no card: a switch request,
+ * `/model <chat>` (a card) and `/model <chat> <provider>/<model> lossless|lossy|clean` (no card: a switch request,
  * and a reply with its result). `chat` resolves `<chat>` as `/stop <chat>` does.
  */
 export function modelCommand(db: Db, key: string, arg: string, chat: (arg: string) => Chat | undefined): void {
@@ -507,7 +510,7 @@ export function modelCommand(db: Db, key: string, arg: string, chat: (arg: strin
   const c = chat(which);
   if (!c) return queueReply(db, key, `No chat ${which}. Use its number from /status, or its Telegram id.`);
   if (!to) return void openSwitchCard(db, c.id, key);
-  if (mode !== "lossless" && mode !== "lossy") return queueReply(db, key, MODEL_USAGE);
+  if (mode !== "lossless" && mode !== "lossy" && mode !== "clean") return queueReply(db, key, MODEL_USAGE);
   if (!findModel(db, to)) return queueReply(db, key, `There is no model ${to} in the catalog. /models lists them.`);
   let noop: boolean;
   try {
@@ -623,8 +626,8 @@ function pressSwitch(db: Db, card: Card, state: State, action: string, n: number
     if (preview.noop) return void close(db, card, `${chatLabel(chat)}: already on ${m.id}`), "";
     return void setState(db, card, { step: "mode", page: state.page, model: m.id, running: preview.running }, { step: true }), "";
   }
-  if ((action === "L" || action === "Y") && state.step === "mode") {
-    const mode: SwitchMode = action === "L" ? "lossless" : "lossy";
+  if ((action === "L" || action === "Y" || action === "C") && state.step === "mode") {
+    const mode: SwitchMode = action === "L" ? "lossless" : action === "Y" ? "lossy" : "clean";
     let req: SwitchRequest;
     try {
       req = requestSwitch(db, chat.id, state.model, mode);
@@ -733,7 +736,8 @@ export function switchResultText(chat: Chat, req: SwitchRequest): string {
   const r = req.result as unknown as SwitchResult;
   if (!r.changed) return `${label}: already on ${r.to}${stopped}`;
   let what: string;
-  if (r.from === null || r.from === r.to) what = r.resumed ? "took up its own conversation" : "no conversation to carry";
+  if (r.mode === "clean") what = "clean start, a new conversation with no messages";
+  else if (r.from === null || r.from === r.to) what = r.resumed ? "took up its own conversation" : "no conversation to carry";
   else {
     switch (r.mode) {
       case "lossless":

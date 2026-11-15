@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { enterChatModel, getSwitchRequest, requestSwitch } from "../src/agent/switch.ts";
+import { enterChatModel, getSwitchRequest, opensClean, requestSwitch } from "../src/agent/switch.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { allowedHosts, allowedOrigins } from "../src/console/index.ts";
 import { csrfToken, handleConsole, LOGIN_HEADER, type ConsoleDeps } from "../src/console/server.ts";
@@ -241,6 +241,24 @@ describe("model", () => {
     expect((await act(w, w.dm, "switch", { to: "vllm/llama", mode: "lossy" })).html).toContain("already on vllm/llama");
     expect((await act(w, w.dm, "switch", { to: "nope/none", mode: "lossy" })).html).toContain("There is no model nope/none in the catalog.");
   });
+
+  test("Clean start is the third mode: its preview line, the request, the result in the bot's words", async () => {
+    const w = world();
+    const picked = await page(w, `/chats/${w.dm}/settings?to=vllm/llama`);
+    expect(picked).toContain('<input type="hidden" name="mode" value="clean">');
+    expect(picked).toContain('<span class="mname">Clean start</span> <span class="mline">starts vllm/llama fresh, with no messages</span>');
+    await act(w, w.dm, "switch", { to: "vllm/llama", mode: "clean" });
+    const req = w.db.$client.query("select id, mode from model_switch_requests").get() as { id: number; mode: string };
+    expect(req.mode).toBe("clean");
+    switchRequestPass(w.db, () => {});
+    switchCardPass(w.db);
+    const to = (await get(w, `/chats/${w.dm}/settings/switching?req=${req.id}`)).headers.get("hx-redirect")!;
+    expect(await page(w, to)).toContain(" → vllm/llama (clean start, a new conversation with no messages)</p>");
+    expect(getChat(w.db, w.dm)!.backendSessionId).toBeNull();
+    // Back to qwen: its conversation (parked by the switch) would be dropped, and the preview says so.
+    expect(await page(w, `/chats/${w.dm}/settings?to=vllm/qwen`)).toMatch(/starts vllm\/qwen fresh, with no messages \(its conversation from [^)]+ is dropped\)/);
+    expect((await act(w, w.dm, "switch", { to: "vllm/llama", mode: "sideways" })).html).toContain("Pick Lossless, Lossy or Clean start.");
+  });
 });
 
 describe("profile", () => {
@@ -285,6 +303,40 @@ describe("conversation", () => {
     expect(w.signals).toEqual([4343]);
     expect(getChat(w.db, w.dm)!.backendSessionId).toBeNull();
     expect(w.db.$client.query("select count(*) as n from chat_conversations where chat_id = ?").get(w.dm)).toEqual({ n: 0 });
+  });
+});
+
+describe("Start clean", () => {
+  test("beside New conversation: one line, asks first; then as /new, but the next turn opens with no messages", async () => {
+    const w = world();
+    const s = await page(w, `/chats/${w.dm}/settings`);
+    expect(s).toContain("<b>Start clean</b> <span>As New conversation, but her next turn opens with no earlier messages at all, only the new ones.");
+    expect(s).toContain(`href="/chats/${w.dm}/settings?confirm=clean#conversation"`);
+    expect(s).not.toContain(`action="/chats/${w.dm}/settings/clean"`);
+    const asking = await page(w, `/chats/${w.dm}/settings?confirm=clean`);
+    expect(asking).toContain("<b>Start clean?</b>");
+    expect(asking).toContain(`action="/chats/${w.dm}/settings/clean"`);
+    expect(getChat(w.db, w.dm)!.backendSessionId).toBe("oa-1");
+    expect((await get(w, `/chats/${w.dm}/settings/clean`)).status).toBe(405);
+    expect((await post(w, `/chats/${w.dm}/settings/clean`, {}, { origin: null })).status).toBe(403);
+    expect(getChat(w.db, w.dm)!.backendSessionId).toBe("oa-1");
+    const { html } = await act(w, w.dm, "clean", {});
+    expect(html).toContain("DM · Owner starts clean: her next turn here opens with its new messages only, no earlier ones.");
+    expect(getChat(w.db, w.dm)!.backendSessionId).toBeNull();
+    const row = w.db.$client.query("select mode, from_model as f, to_model as t from model_switches order by id desc limit 1").get();
+    expect(row).toEqual({ mode: "clean", f: "vllm/qwen", t: "vllm/qwen" });
+    expect(opensClean(w.db, getChat(w.db, w.dm)!, [])).toBe(true);
+  });
+
+  test("a running turn is stopped first, as for New conversation", async () => {
+    const w = world();
+    ownerSays(w.db, "go");
+    const turn = claimTurn(w.db, w.dm)!;
+    setTurnPid(w.db, turn.id, 4242);
+    expect((await page(w, `/chats/${w.dm}/settings?confirm=clean`))).toContain(`Turn ${turn.id} is running and will be stopped.`);
+    const { html } = await act(w, w.dm, "clean", {});
+    expect(html).toContain(`Stopped turn ${turn.id};`);
+    expect(w.signals).toEqual([4242]);
   });
 });
 

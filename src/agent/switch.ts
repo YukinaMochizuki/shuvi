@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, isNull } from "drizzle-orm";
 import type { ModelMessage } from "agent-runtime/openai-compat";
 import { appendToClaudeSession, claudeSessionMessages, findClaudeSession, forkClaudeSession, readClaudeSession } from "agent-runtime/convert";
 import { conversationEnd, conversationExists, conversationSince, insertMessages } from "../store/conversations.ts";
@@ -36,7 +36,14 @@ type Reader = Pick<Db, "select">;
  *   - `lossy`: nothing is carried. B's conversation resumes as it was left, without what was said on A
  *     meanwhile; B with none starts fresh at the next turn, with the chat's last few messages, like after
  *     `/new`.
- * Either way `entered_at` becomes where B's conversation ends now, so the next switch away carries only what
+ *   - `clean`: a clean start. Nothing is carried, and B's own conversation, parked or active, is dropped (as
+ *     `/new` drops a chat's, for B only; A's is parked as in the other modes): B starts a brand-new
+ *     conversation at the next turn, which opens with its new input ONLY, not even the chat's last few
+ *     messages (`opensClean`, read by agent/turn.ts). Her persona, rules, memory and notes are in the system
+ *     prompt as always, and `read_chat` reaches the history. Unlike the other modes, it is not a no-op when B's
+ *     conversation is the active one only because the chat's model moved without a switch: that one is
+ *     dropped too.
+ * Whichever the mode, `entered_at` becomes where B's conversation ends now, so the next switch away carries only what
  * is said from here on. Nothing is added to a conversation to say a switch happened: the model is never told.
  * The `model_switches` row records it, and the next turn's transcript notes it (agent/turn.ts) for the console.
  * Choosing the model the chat is already on, its conversation already that model's, is a no-op that says so
@@ -83,7 +90,7 @@ type Reader = Pick<Db, "select">;
  * (server/spawn.ts starts the runner child in the server's).
  */
 
-export type SwitchMode = "lossless" | "lossy";
+export type SwitchMode = "lossless" | "lossy" | "clean";
 
 export interface SwitchResult {
   mode: SwitchMode;
@@ -125,6 +132,8 @@ export function switchModel(db: Db, chatId: number, to: string, mode: SwitchMode
   if (runsOn(db, chat) === target.id && (active === null || active === target.id)) {
     return { mode, changed: false, from: active, to: target.id, carried: 0, compacted: false, resumed: false };
   }
+  // A clean start drops the target's conversation even when it is the active one (see the header).
+  if (mode === "clean" && active === target.id) return moveChat(db, chat, null, target, mode, opts);
   if (active === target.id) {
     // Its conversation is already the target's (the chat's model was moved without a switch): only the model.
     db.transaction((tx) => {
@@ -152,6 +161,11 @@ export interface SwitchPreview {
   lossless: { kind: "carry" | "copy"; messages: number };
   /** lossy: the target's conversation `resume`s as it was left (`since`: when, null: it is the active one already), or it starts `fresh`. */
   lossy: { kind: "resume"; since: string | null } | { kind: "fresh" };
+  /**
+   * clean: a new conversation with no messages; `drops` the target's own conversation, last written `since`
+   * (null: it is the active one), or none to drop.
+   */
+  clean: { drops: false } | { drops: true; since: string | null };
   /** The turn running in the chat, which a switch request stops first (null: none). */
   running: number | null;
 }
@@ -166,7 +180,9 @@ export function previewSwitch(db: Db, chatId: number, to: string): SwitchPreview
   // As in switchModel: with no active conversation the target's parked one is resumed.
   const resume = !chat.backendSessionId && hasParked(db, chat.id, target.id);
   const noop = !resume && runsOn(db, chat) === target.id && (active === null || active === target.id);
-  if (!resume && active === target.id) return { to: target.id, noop, lossless: { kind: "carry", messages: 0 }, lossy: { kind: "resume", since: null }, running };
+  if (!resume && active === target.id)
+    // A no-op drops nothing either (a clean start of the current model is the Conversation's "Start clean": `startClean`).
+    return { to: target.id, noop, lossless: { kind: "carry", messages: 0 }, lossy: { kind: "resume", since: null }, clean: !noop && chat.backendSessionId ? { drops: true, since: null } : { drops: false }, running };
   const from = resume && active === target.id ? null : active;
   const parked = parkedConversation(db, chat.id, target.id);
   const hadTarget = !!parked && laneHas(db, laneOf(target.provider), parked.backendSessionId);
@@ -182,9 +198,55 @@ export function previewSwitch(db: Db, chatId: number, to: string): SwitchPreview
     noop,
     lossless: { kind: hadTarget ? "carry" : "copy", messages },
     lossy: hadTarget ? { kind: "resume", since: parked!.parkedAt } : { kind: "fresh" },
+    clean: hadTarget ? { drops: true, since: parked!.parkedAt } : { drops: false },
     running,
   };
 }
+
+/**
+ * Whether this turn's conversation opens with its new input only, not the chat's last messages: the chat has no
+ * conversation, and the last switch is a clean start (or a `startClean`) after which no turn has opened a
+ * conversation. `switches` are the ones this turn claimed (`claimSwitches`); with none, the chat's last switch
+ * counts while no turn from the one that claimed it on has opened a conversation (`turns.backend_session_id`):
+ * the claiming turn failed or was stopped before it did, a turn with nothing to answer closed `done` without one,
+ * and this turn answers the input again. Once a turn has opened one, a chat with no conversation is one that
+ * `/new` (or a lost conversation) left: that opens with the chat's last messages, as ever.
+ */
+export function opensClean(db: Db, chat: Chat, switches: readonly Switch[]): boolean {
+  if (chat.backendSessionId) return false;
+  const last = switches.at(-1) ?? db.select().from(modelSwitches).where(eq(modelSwitches.chatId, chat.id)).orderBy(desc(modelSwitches.id)).limit(1).get();
+  if (!last || last.mode !== "clean") return false;
+  if (switches.length || last.turnId === null) return true;
+  const opened = db
+    .select({ id: turns.id })
+    .from(turns)
+    .where(and(eq(turns.chatId, chat.id), gte(turns.id, last.turnId), isNotNull(turns.backendSessionId)))
+    .limit(1)
+    .get();
+  return !opened;
+}
+
+/**
+ * "Start clean" (the console's Conversation section): `/new` with a clean start's opening. Every conversation of the
+ * chat is forgotten, as `/new` forgets them (store/events.ts `forgetConversations`), and the next turn opens with its
+ * input only, not the chat's last messages: a clean start of the model the chat runs on, recorded as one (a
+ * `model_switches` row of mode `clean` from that model to itself, `isStartClean`), which `opensClean` reads as it
+ * reads a clean switch. The caller stops a running turn first, as for `/new`.
+ */
+export function startClean(db: Db, chatId: number): void {
+  const chat = getChat(db, chatId);
+  if (!chat) throw new Error(`there is no chat ${chatId}`);
+  const model = runsOn(db, chat) ?? activeModel(db, chat);
+  if (!model) throw new Error("the chat has no model: add one to the catalog first");
+  db.transaction((tx) => {
+    tx.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null, conversationModel: model }).where(eq(chats.id, chatId)).run();
+    tx.delete(chatConversations).where(eq(chatConversations.chatId, chatId)).run();
+    tx.insert(modelSwitches).values({ chatId, fromModel: model, toModel: model, mode: "clean", fromSessionId: chat.backendSessionId, toSessionId: null, carried: 0, compacted: false }).run();
+  }, IMMEDIATE);
+}
+
+/** A `startClean` (the current model started clean), not a switch between two models. */
+export const isStartClean = (s: Pick<Switch, "mode" | "fromModel" | "toModel">) => s.mode === "clean" && s.fromModel === s.toModel;
 
 /**
  * Before a turn: the chat's active conversation is that of the model it runs on. A chat whose model changed
@@ -222,6 +284,7 @@ type Switch = typeof modelSwitches.$inferSelect;
 
 /** What a turn's transcript says of a switch it records (for the console: the model never sees it). */
 export function switchNote(s: Pick<Switch, "fromModel" | "toModel" | "mode" | "carried" | "compacted" | "toSessionId">): string {
+  if (isStartClean(s)) return `Started clean on ${s.toModel}: every conversation of the chat forgotten, and this turn opens with its input only (not the chat's last messages).`;
   const head = s.fromModel
     ? `Model switched from ${s.fromModel} to ${s.toModel}`
     : `The chat moved to ${s.toModel} without a switch (its default changed, or it took up that model's parked conversation)`;
@@ -236,6 +299,8 @@ export function switchNote(s: Pick<Switch, "fromModel" | "toModel" | "mode" | "c
       return s.toSessionId
         ? `${head}, lossy: its own conversation resumed as it was left, without what was said on the other model.`
         : `${head}, lossy: it had no conversation, so a fresh one opens with the chat's last messages.`;
+    case "clean":
+      return `${head}, clean start: a new conversation with nothing carried, opening with this turn's input only (not the chat's last messages).`;
     default:
       throw new Error(`unknown switch mode "${String(s.mode satisfies never)}"`);
   }
@@ -387,7 +452,8 @@ function moveChat(db: Db, chat: Chat, from: string | null, target: CatalogModel,
   const source = from && chat.backendSessionId ? { model: from, session: chat.backendSessionId, lane: laneOfModel(db, from) } : null;
   const toLane = laneOf(target.provider);
   const parked = parkedConversation(db, chat.id, target.id);
-  let session = parked && laneHas(db, toLane, parked.backendSessionId) ? parked.backendSessionId : null;
+  // A clean start takes up nothing of the target's: its parked conversation is dropped below.
+  let session = mode !== "clean" && parked && laneHas(db, toLane, parked.backendSessionId) ? parked.backendSessionId : null;
   const resumed = !!session;
   let contextTokens = session ? (parked?.contextTokens ?? null) : null;
   let carried = 0;

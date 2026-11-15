@@ -12,7 +12,7 @@ bun run typecheck
 bun test                    # fresh in-memory DB per test
 bun scripts/e2e-fake.ts     # server + runner child + real Claude Code CLI, fake Telegram and Anthropic
 bun scripts/e2e-openai-compat.ts # the same on an OpenAI-compatible model, against a fake Chat Completions endpoint
-bun scripts/e2e-switch.ts   # one chat switched between Claude and an endpoint, lossless and lossy, on the wire
+bun scripts/e2e-switch.ts   # one chat switched between Claude and an endpoint, lossless, lossy and clean, on the wire
 bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
 bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
@@ -35,7 +35,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | a capability's hook on each new inbound message, a tool owner-only in some calls, a capability's own credential | `src/capabilities/types.ts` (`inbound`, `ownerOnlyWhen` / `ownerOnlyNote`, `secrets`) |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
 | which models exist, which one a chat runs on, the driver a turn runs on | `src/store/models.ts`, `src/agent/backend.ts` |
-| switching a chat's model: a conversation per model, lossless and lossy, what is carried, switch requests | `src/agent/switch.ts` (the conversion: agent-runtime/convert) |
+| switching a chat's model: a conversation per model, lossless, lossy and clean start, what is carried, switch requests | `src/agent/switch.ts` (the conversion: agent-runtime/convert; a clean start's first turn: `opensClean`) |
 | an OpenAI-compatible conversation: its rows, positions, retention | `src/store/conversations.ts` |
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |

@@ -172,7 +172,7 @@ markup, so a page still reads when its stylesheet does not load.
 │   │ Either way her files stay. Turn 24 will be stopped. Cancel│     │
 │   └───────────────────────────────────────────────────────────┘     │
 │ PROFILE ──────────────────────────────────── Profiles in Home →     │
-│ CONVERSATION  facts · [Stop the turn] · [New conversation]          │
+│ CONVERSATION  facts · [Stop the turn] · [New conv.] · [Start clean] │
 │ (Permissions:)                                                      │
 │ PERMISSIONS  policy.yaml, listed as "-100123" ──────────────────    │
 │ Wakes her  ○ every message ◉ only: ☑ mention ☑ reply ☐ follow-up 3  │
@@ -204,7 +204,7 @@ markup, so a page still reads when its stylesheet does not load.
   is pending the rows are inert and a blue Notice with a spinner fetches itself every second.
 - **Profile rows** are radio-looking buttons of one form.
 - **Conversation**: a facts line; a row per action (what it does in a line, the button on the right; below it under
-  760px); New conversation opens a Confirm in place (`?confirm=new`).
+  760px); New conversation opens a Confirm in place (`?confirm=new`), and so does Start clean (`?confirm=clean`).
 - **Permissions**: label column (140px) and controls; capabilities as rows (a CSS switch made of a checkbox, the
   label, what it gives, "not set up here"), a capability's parameters under it while it is on; the always-on ones
   as one line under the list. A refused form comes back with a pink Notice and the field it is about marked with a
@@ -362,7 +362,7 @@ are GitHub's, as in the diff.
 | Pickable | a deletable bubble: its check slot (left, while selecting), the bubble, its ⋯ menu (top right, on hover) |
 | SelPill | while selecting: "3 selected · Delete · ✕", a refusal under it; fixed at the bottom centre |
 | Snackbar | after a delete: "Deleted 3 · Undo", a thin line running out with the 10 s; fixed at the bottom left |
-| SwitchBox | a chat's settings: the mode step under the model picked (Lossless / Lossy cards, the note, Cancel) |
+| SwitchBox | a chat's settings: the mode step under the model picked (Lossless / Lossy / Clean start cards, the note, Cancel) |
 | CapRow | a chat's settings: a capability as a switch, its label and what it gives, its parameters under it while on |
 | FileRow | Home: path · when · who-dot, who and a hint; selected like a list row |
 | WhoDot | 7px: her (accent), you (amber), anyone else (grey) |

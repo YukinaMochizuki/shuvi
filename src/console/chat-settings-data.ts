@@ -132,7 +132,7 @@ export function loadChatSettings(
       if (p.noop) picked = { id: to, noop: `${chatName(chat)} is already on ${to}.` };
       else {
         const l = modeLines(p, ctx.now);
-        picked = { id: to, lossless: l.lossless, lossy: l.lossy, running: l.running };
+        picked = { id: to, lossless: l.lossless, lossy: l.lossy, clean: l.clean, running: l.running };
       }
     } catch (e) {
       picked = { id: to, error: e instanceof Error ? e.message : String(e) };
@@ -187,6 +187,7 @@ export function loadChatSettings(
       contextTokens: chat.backendSessionId ? chat.contextTokens : null,
       ...(running ? { running: { id: running.id, startedAt: running.startedAt } } : {}),
       confirmNew: q.get("confirm") === "new",
+      confirmClean: q.get("confirm") === "clean",
       ...(flashFor("conversation") ? { flash: flashFor("conversation")! } : {}),
     },
     permissions: loadPermissions(deps, { kind: chat.kind as "private" | "group", tgChatId: chat.tgChatId }, result),
