@@ -6,7 +6,7 @@ import { isLoopback, parseLoopbackListen } from "../listen.ts";
 import { sameSecret } from "../secrets/compare.ts";
 import type { Db } from "../store/db.ts";
 import { sniffImage } from "../store/media.ts";
-import { editorBundle } from "./editor/bundle.ts";
+import { assetAt, serveAsset, warmAssets } from "./assets.ts";
 import { activityPage, changedBanner, homePage } from "./home.ts";
 import { allHistory, loadHome, watch, type PromptDeps } from "./home-data.ts";
 import { HOME_WRITES, homeSave, PROFILE_WRITES, profileWrite, takeResult } from "./home-write.ts";
@@ -80,7 +80,8 @@ import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } 
  * images and its scripts, and forms and background requests to this origin only. The scripts: htmx (the npm
  * package `htmx.org`, pinned, served from node_modules at `/htmx.min.js`; html.ts `page` sets its config: no
  * eval, no script from a response, no history kept in the browser's storage), console.js (copy buttons,
- * j / k), and on the Home page only, `/editor.js` (CodeMirror, pinned, bundled in the process: editor/bundle.ts). Every page works without them; with them, links and forms swap the page in place (html.ts), and
+ * j / k), and on the Home page only, `/editor.js` (CodeMirror, pinned, bundled in the process: editor/bundle.ts); each
+ * under an address carrying its content's hash, cached for good only there (assets.ts). Every page works without them; with them, links and forms swap the page in place (html.ts), and
  * Settings swaps only what changed and fetches a pending probe's row or listing (`/settings/model?id=`,
  * `/settings/listing`, read routes answering a part of the page) until it is done (settings.ts).
  */
@@ -124,11 +125,6 @@ export const MAX_SMALL_BODY = 16 * 1024;
 export const LARGE_BODY_WRITES: ReadonlySet<string> = new Set([...HOME_WRITES, "/messages/delete"]);
 export const SESSION_COOKIE = "shuvi_console";
 export const SESSION_MS = 7 * 24 * 3600_000;
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const CSS = readFileSync(join(HERE, "style.css"), "utf8");
-const JS = readFileSync(join(HERE, "console.js"), "utf8");
-const HTMX = readFileSync(fileURLToPath(import.meta.resolve("htmx.org/dist/htmx.min.js")), "utf8");
 
 const SECURITY_HEADERS: Record<string, string> = {
   // Inline style attributes only (a size bar's width, a speaker's colour); no inline script at all.
@@ -290,11 +286,12 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     return write ? respond("a write: POST only", 405, "text/plain", { allow: "POST" }) : respond("read only", 405, "text/plain", { allow: "GET, HEAD" });
   }
   // The stylesheet and the script are public: the sign-in, 403 and 404 pages need them before anyone is let in,
-  // and they hold nothing but this file's own code.
-  if (path === "/style.css") return respond(CSS, 200, "text/css; charset=utf-8", { "cache-control": "public, max-age=3600" });
-  if (path === "/console.js") return respond(JS, 200, "text/javascript; charset=utf-8", { "cache-control": "public, max-age=3600" });
-  if (path === "/htmx.min.js") return respond(HTMX, 200, "text/javascript; charset=utf-8", { "cache-control": "public, max-age=3600" });
-  if (path === "/editor.js") return respond(await editorBundle(), 200, "text/javascript; charset=utf-8", { "cache-control": "public, max-age=3600" });
+  // and they hold nothing but this file's own code. Cached for good only at their current version (assets.ts).
+  const asset = assetAt(path);
+  if (asset) {
+    const a = await serveAsset(asset, url.searchParams.get("v"));
+    return respond(a.body, 200, a.type, { "cache-control": a.cacheControl });
+  }
   try {
     const auth = await authenticate(deps, req, path);
     if (!auth.ok) return auth.response;
@@ -411,8 +408,8 @@ export function serveConsole(
   let allowed: { hosts: ReadonlySet<string>; origins: ReadonlySet<string> } = { hosts: new Set(), origins: new Set() };
   const server = Bun.serve({ ...parseConsoleListen(listen), maxRequestBodySize: MAX_BODY, fetch: (req) => handleConsole({ ...deps, allowedHosts: allowed.hosts, allowedOrigins: allowed.origins }, req) });
   allowed = where(server.port!);
-  // Build the editor now, so the first Home page does not wait for it (a failure is retried on request).
-  void editorBundle().catch((e) => console.error("console: ", e instanceof Error ? e.message : e));
+  // Build the editor now, so the first Home page does not wait for it and names its version (a failure is retried on request).
+  void warmAssets().catch((e) => console.error("console: ", e instanceof Error ? e.message : e));
   signal.addEventListener("abort", () => void server.stop(true), { once: true });
   console.log(`console: listening on ${server.hostname}:${server.port} (${deps.users ? `tailnet users: ${[...deps.users].join(", ")}` : "token sign-in"})`);
   return server;

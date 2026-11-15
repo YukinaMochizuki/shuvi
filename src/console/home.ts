@@ -596,7 +596,7 @@ ${main}
 ${v.historyOpen ? historyPane(v) : html`<a class="hhist-open" href="${vHref(v, { file: v.selected, hist: "1" })}" title="Show history">⟨ History</a>`}
 </main>`;
   // The editor script on every Home page: a boosted move between files keeps the head, so it must be there.
-  return page(v.selected ? `${v.selected} · Home` : "Home", body, v.who, "home", ["/editor.js"], "resizes");
+  return page(v.selected ? `${v.selected} · Home` : "Home", body, v.who, "home", ["editor"], "resizes");
 }
 
 /** `/home/history`: every file's changes, newest first. */
@@ -619,5 +619,5 @@ ${
 }
 ${v.more ? html`<a class="more-link" href="${href("/home/history", { before: v.more })}">Older changes →</a>` : ""}
 </main>`;
-  return page("All history · Home", body, v.who, "home", ["/editor.js"], "resizes");
+  return page("All history · Home", body, v.who, "home", ["editor"], "resizes");
 }

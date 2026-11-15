@@ -84,7 +84,7 @@ describe("who may look: the tailnet login", () => {
   test("no header gets 403, and a token is no way around it; the 403 is a styled page", async () => {
     const res = await handleConsole(await deps(), get("/turns", {}));
     expect(res.status).toBe(403);
-    expect(await res.text()).toContain('<link rel="stylesheet" href="/style.css">');
+    expect(await res.text()).toMatch(/<link rel="stylesheet" href="\/style\.css\?v=[0-9a-f]{12}">/);
     expect((await handleConsole(await deps({ users: new Set(["owner@example.com"]), token: TOKEN }), get("/turns", { authorization: `Bearer ${TOKEN}` }))).status).toBe(403);
     expect((await handleConsole(await deps(), get("/media?ref=media/example-photo", {}))).status).toBe(403);
   });

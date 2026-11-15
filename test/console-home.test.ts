@@ -400,7 +400,8 @@ describe("history, undo, restore", () => {
     expect(status).toBe(200);
     for (const p of ["persona/public.md", "directives.md", "memory/private.md", `chats/${OWNER}.md`, "playbooks/trip.md", "stickers/preferences.md"]) expect(text).toContain(p);
     expect(text).toContain("When booking a trip.");
-    expect(text).toContain('src="/editor.js"');
+    // Its bare path until the bundle is built (and its hash known), then the versioned address (assets.ts).
+    expect(text).toMatch(/src="\/editor\.js(\?v=[0-9a-f]{12})?"/);
   });
 
   test("a narrow screen's panes: ‹ Files shows the files even with a file selected", async () => {
