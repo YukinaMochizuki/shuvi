@@ -61,7 +61,7 @@ bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock 
 bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
 bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
 bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
-bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed probe, sheets of a link, a fetch into ~/inbox
+bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed read, a probe, sheets of a link, a fetch into ~/inbox
 bun scripts/e2e-drain.ts     # SIGTERM drains: a running turn finishes and is delivered, exit 0; the deadline stops and retries
 bun scripts/console-fixture.ts  # the console over made-up fixture data, on 127.0.0.1:8787, to look at
 ```
@@ -108,9 +108,9 @@ With `SHUVI_PORCHKIT_URL` (e.g. `https://porchkit.example.ts.net`) and `SHUVI_PO
 service on a home connection that probes, subtitles, sheets and downloads videos, always anonymously and
 within a request budget per site. In a chat whose policy enables `media`, anyone may have the assistant
 look at a video from its link (`video_probe`, `video_subs`, `video_sheet`); `video_fetch`, which puts the
-file in the computer's `~/inbox/`, is the owner's alone. A link to a known video site in the owner's
-message is probed as soon as it arrives (a prewarm), and the console's turn view says whether the turn then
-used it. The token is never logged and is redacted from turn transcripts.
+file in the computer's `~/inbox/`, is the owner's alone. Every link in a message that starts a turn (from
+anyone; and in the message it replies to), up to 3, is read as soon as it arrives (a prewarm), and the
+console's turn view says whether the turn then used it. The token is never logged and is redacted from turn transcripts.
 
 ## Each chat's computer
 

@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { textOf, type ToolResult } from "agent-runtime";
 import { runTurn } from "../src/agent/turn.ts";
-import { TriggerScan, type BotIdentity } from "../src/agent/triggers.ts";
+import { saveBotIdentity, TriggerScan, type BotIdentity } from "../src/agent/triggers.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { capabilityInbound, capabilityTools, withCapabilitySecrets } from "../src/capabilities/types.ts";
 import { FETCH_NOTE, mediaSection } from "../src/capabilities/media/index.ts";
-import { linksIn, urlKey, videoLinks } from "../src/capabilities/media/links.ts";
+import { linksIn, urlKey } from "../src/capabilities/media/links.ts";
 import { prewarmsOf } from "../src/capabilities/media/prewarm.ts";
 import { SUBS_MAX_CHARS } from "../src/capabilities/media/text.ts";
 import { jobWatchPass } from "../src/capabilities/jobs/watch.ts";
@@ -30,6 +30,8 @@ import { dmUpdate, groupUpdate, memDb, OWNER, ownerChatId, ownerSays, ScriptedAd
 
 const VIDEO = "https://www.youtube.com/watch?v=abc123def45";
 const SHORT = "https://youtu.be/abc123def45";
+const X_LINK = "https://x.com/example/status/1234567890";
+const NEWS = "https://news.example.com/short-note";
 const BOT: BotIdentity = { id: 1, username: "shuvi_test_bot" };
 const GROUP = -100888;
 const ALICE = 2001;
@@ -79,7 +81,7 @@ async function dmTurn(db: Db, env: Record<string, string>, script: Step[], polic
 
 const groupChat = (db: Db): Chat => allChats(db).find((c) => c.tgChatId === GROUP)!;
 let upd = 7000;
-const inGroup = (from: number, first: string, t: string) => groupUpdate(upd++, { id: GROUP, title: "Friends" }, { id: from, first }, t);
+const inGroup = (from: number, first: string, t: string, extra: Record<string, unknown> = {}) => groupUpdate(upd++, { id: GROUP, title: "Friends" }, { id: from, first }, t, extra);
 
 
 // ---- links --------------------------------------------------------------------------------------------
@@ -89,13 +91,6 @@ describe("links", () => {
     expect(linksIn(`look ${SHORT}. and (https://x.com/example/status/1)!`)).toEqual([SHORT, "https://x.com/example/status/1"]);
     expect(linksIn("看這個https://youtu.be/abc123def45很好笑")).toEqual([SHORT]);
     expect(linksIn("https://en.example.org/wiki/Foo_(bar)")).toEqual(["https://en.example.org/wiki/Foo_(bar)"]);
-  });
-
-  test("the known hosts, with subdomains; short links as themselves; other sites not", () => {
-    const hosts = (t: string) => videoLinks(t).map((l) => l.host);
-    expect(hosts(`${VIDEO} https://m.youtube.com/watch?v=x https://vm.tiktok.com/abc https://www.instagram.com/reel/abc`)).toEqual(["www.youtube.com", "m.youtube.com", "vm.tiktok.com"]);
-    expect(hosts("https://t.co/abc https://bit.ly/abc https://news.example.com/a https://sub.t.co/x")).toEqual(["t.co", "bit.ly"]);
-    expect(hosts("https://threads.net/@x/post/1 https://vimeo.com/1 https://www.bilibili.com/video/BV1 https://x.com/a https://twitter.com/a")).toHaveLength(3);
   });
 
   test("one key for one link however it is written: scheme, www., case, fragment", () => {
@@ -441,94 +436,112 @@ describe("prewarm", () => {
   const ENV = (p: FakePorchkit) => p.env({ SHUVI_WEB: "off" });
 
   function inbound(db: Db, p: FakePorchkit, policy: Policy, ...updates: Parameters<typeof recordBatch>[1]) {
+    saveBotIdentity(db, BOT);
     const caps = enabledCapabilities(ENV(p));
     recordBatch(db, updates, OWNER, { botUsername: BOT.username!, policy, onRecorded: (events) => capabilityInbound(caps, events, policy, { db, ownerId: OWNER }) });
   }
+  const lastSeq = (db: Db) => (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
+  const prewarmCount = (db: Db) => (db.$client.query("select count(*) as n from media_prewarms").get() as { n: number }).n;
 
   const DM = policyOf("");
+  const TRIGGERS = policyOf(`
+chats:
+  dm:
+    tools: all
+  "${GROUP}":
+    title: Friends
+    trigger: [mention, reply, followup]
+    tools:
+      media: {}
+`);
+  const fromBot = (text: string) => ({ reply_to_message: { message_id: 1, from: { id: BOT.id, is_bot: true, first_name: "shuvi" }, text } });
+  const fromAlice = (text: string) => ({ reply_to_message: { message_id: 2, from: { id: ALICE, is_bot: false, first_name: "Alice" }, text } });
 
-  test("an owner's link is probed at once, speculatively, before the turn's first tool call; the turn's input says it is prepared; video_probe uses it", async () => {
+  test("the owner's video link is read at once (/read, speculatively); the line says read_link; video_probe asks porchkit itself", async () => {
     const p = porch();
     const db = memDb();
     inbound(db, p, DM, dmUpdate(upd++, `what is this ${SHORT}`));
-    const seq = db.$client.query("select max(seq) as s from chat_events").get() as { s: number };
-    expect(p.of("/media/probe").length).toBe(0); // in flight, not answered yet: the request is on its way
-    const rows = prewarmsOf(db, seq.s);
-    expect(rows.map((r) => [r.n, r.host, r.urlHash, r.finishedAt])).toEqual([[1, "youtu.be", urlKey(SHORT), null]]);
+    const seq = lastSeq(db);
+    expect(p.of("/read").length).toBe(0); // in flight, not answered yet: the request is on its way
+    expect(prewarmsOf(db, seq).map((r) => [r.n, r.host, r.endpoint, r.urlHash, r.finishedAt])).toEqual([[1, "youtu.be", "read", urlKey(SHORT), null]]);
     await Bun.sleep(100);
-    expect(p.of("/media/probe").map((c) => c.body)).toEqual([{ url: SHORT, speculative: true }]);
-    let toolSawProbes = -1;
-    const a = await dmTurn(db, ENV(p), [{ run: () => (toolSawProbes = p.of("/media/probe").length) }, { tool: "video_probe", args: { url: SHORT } }, { tool: "pass" }], DM);
-    expect(toolSawProbes).toBe(1);
-    expect(JSON.stringify(a.calls[0]!.prompt)).toContain(`(Prepared: #${seq.s}'s link — video_probe returns at once.)`);
+    expect(p.of("/read").map((c) => c.body)).toEqual([{ url: SHORT, speculative: true }]);
+    expect(p.of("/media/probe")).toHaveLength(0); // no probe prewarm any more
+    const a = await dmTurn(db, ENV(p), [{ tool: "video_probe", args: { url: SHORT } }, { tool: "pass" }], DM);
+    expect(JSON.stringify(a.calls[0]!.prompt)).toContain(`(Prepared: #${seq}'s link — read_link returns at once.)`);
     expect(text(a.toolResults[0]!.result)).toStartWith("Title: Example talk");
-    expect(p.of("/media/probe")).toHaveLength(1);
-    const row = prewarmsOf(db, seq.s)[0]!;
+    expect(p.of("/media/probe").map((c) => c.body)).toEqual([{ url: SHORT }]);
+    const row = prewarmsOf(db, seq)[0]!;
     expect(row.outcome).toBe("ok");
-    expect(row.usedTurnId).not.toBeNull();
-    // What is kept of the answer: what video_probe shows, and no URL of the video. The description is the
-    // site's own text and keeps the links it carries; nothing else in the row is a URL.
-    const { description, ...rest } = row.result as Record<string, unknown>;
-    expect(JSON.stringify(row.result)).not.toMatch(/youtube\.com|youtu\.be|canonical_url|abc123def45/);
-    expect(JSON.stringify(rest)).not.toMatch(/https?:/);
-    expect(description).toBe("A talk about examples.\nSlides: https://example.com/slides");
-    expect(row.result).toMatchObject({ title: "Example talk", duration: 635 });
-    expect(turnPrewarms(db, ownerChatId(db), seq.s - 1, seq.s)).toEqual({ used: 1, unused: 0 });
+    expect(row.usedTurnId).toBeNull(); // video_probe joins only probe rows; read_link would have used it
+    // What is kept: the kind porchkit answered, and no URL.
+    expect(row.result).toEqual({ kind: "post" });
+    expect(turnPrewarms(db, ownerChatId(db), seq - 1, seq)).toEqual({ used: 0, unused: 1 });
   });
 
-  test("single-flight: a video_probe during the prewarm waits for it instead of asking again", async () => {
+  test("in a group, from anyone, only a message that starts a turn: a mention and a reply to her are prewarmed, other talk is not", async () => {
     const p = porch();
-    p.probeDelayMs = 400;
     const db = memDb();
-    inbound(db, p, DM, dmUpdate(upd++, `look ${VIDEO}`));
-    const seq = (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
-    const a = await dmTurn(db, ENV(p), [{ tool: "video_probe", args: { url: "http://youtube.com/watch?v=abc123def45" } }, { tool: "pass" }], DM);
-    expect(JSON.stringify(a.calls[0]!.prompt)).toContain(`(Preparing: #${seq}'s link — video_probe joins it.)`);
-    expect(text(a.toolResults[0]!.result)).toStartWith("Title: Example talk");
-    expect(p.of("/media/probe")).toHaveLength(1);
-    expect(p.of("/media/probe")[0]!.body.speculative).toBe(true);
-  });
-
-  test("a prewarm refused (speculative, 429) leaves no line, and video_probe asks for itself", async () => {
-    const p = porch();
-    p.failNext("/media/probe", 429, { error: "rate_limited", reason: "speculative", retry_after: 30, detail: "youtube: speculative" }, { "retry-after": "30" });
-    const db = memDb();
-    inbound(db, p, DM, dmUpdate(upd++, `look ${VIDEO}`));
+    inbound(db, p, TRIGGERS, inGroup(ALICE, "Alice", `just sharing ${VIDEO}`));
+    await Bun.sleep(50);
+    expect(prewarmCount(db)).toBe(0);
+    expect(p.of("/read")).toHaveLength(0);
+    inbound(db, p, TRIGGERS, inGroup(ALICE, "Alice", `@shuvi_test_bot what is this ${X_LINK}`));
+    const mention = lastSeq(db);
+    inbound(db, p, TRIGGERS, inGroup(ALICE, "Alice", `and this one? ${NEWS}`, fromBot("It is a talk.")));
+    const reply = lastSeq(db);
     await Bun.sleep(100);
-    const seq = (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
-    expect(prewarmsOf(db, seq)[0]!.outcome).toBe("rate_limited");
-    const a = await dmTurn(db, ENV(p), [{ tool: "video_probe", args: { url: VIDEO } }, { tool: "pass" }], DM);
-    expect(JSON.stringify(a.calls[0]!.prompt)).not.toContain("Prepared");
-    expect(text(a.toolResults[0]!.result)).toStartWith("Title: Example talk");
-    expect(p.of("/media/probe").map((c) => c.body.speculative ?? false)).toEqual([true, false]);
+    expect(prewarmsOf(db, mention).map((r) => [r.host, r.endpoint])).toEqual([["x.com", "read"]]);
+    expect(prewarmsOf(db, reply).map((r) => [r.host, r.endpoint])).toEqual([["news.example.com", "read"]]);
+    expect(p.of("/read").map((c) => c.body)).toEqual([
+      { url: X_LINK, speculative: true },
+      { url: NEWS, speculative: true },
+    ]);
+    // A reply to someone else, by a stranger, with no turn of hers to follow up: not a trigger.
+    inbound(db, p, TRIGGERS, inGroup(ALICE, "Alice", `see ${VIDEO}`, fromAlice("hm")));
+    await Bun.sleep(50);
+    expect(prewarmsOf(db, lastSeq(db))).toEqual([]);
   });
 
-  test("a stranger's link, a site not on the list, or a chat whose policy leaves media out: no prewarm", async () => {
+  test("a triggering reply to a message holding a link prewarms that link, after the message's own, within the cap", async () => {
     const p = porch();
     const db = memDb();
-    inbound(db, p, GROUP_POLICY, inGroup(ALICE, "Alice", `@shuvi_test_bot ${VIDEO}`));
-    inbound(db, p, DM, dmUpdate(upd++, "https://news.example.com/article/1"));
+    inbound(db, p, TRIGGERS, inGroup(ALICE, "Alice", "@shuvi_test_bot what is this", fromAlice(`look ${VIDEO}`)));
+    const seq = lastSeq(db);
+    expect(prewarmsOf(db, seq).map((r) => [r.n, r.host, r.urlHash])).toEqual([[1, "www.youtube.com", urlKey(VIDEO)]]);
+    inbound(db, p, TRIGGERS, inGroup(ALICE, "Alice", `@shuvi_test_bot ${X_LINK} https://a.example/1 https://b.example/2`, fromAlice(`look ${VIDEO}`)));
+    expect(prewarmsOf(db, lastSeq(db)).map((r) => r.host)).toEqual(["x.com", "a.example", "b.example"]);
+    inbound(db, p, TRIGGERS, inGroup(ALICE, "Alice", `@shuvi_test_bot ${X_LINK}`, fromAlice(`look ${VIDEO} and ${X_LINK}`)));
+    expect(prewarmsOf(db, lastSeq(db)).map((r) => r.host)).toEqual(["x.com", "www.youtube.com"]);
+    await Bun.sleep(100);
+    const turn = claimTurn(db, groupChat(db).id)!;
+    let a!: ScriptedAdapter;
+    await runTurn({ db, turnId: turn.id, home: home(), timeZone: "UTC", ownerId: OWNER, capabilities: enabledCapabilities(ENV(p)), policy: TRIGGERS, makeAdapter: (b) => (a = new ScriptedAdapter(b, [{ tool: "pass" }])) });
+    expect(JSON.stringify(a.calls[0]!.prompt)).toContain(`(Prepared: #${seq}'s link — read_link returns at once.)`);
+  });
+
+  test("a chat whose policy leaves media out: no prewarm, in the DM or a group", async () => {
+    const p = porch();
+    const db = memDb();
     const noMedia = policyOf("chats:\n  dm:\n    tools:\n      web: {}\n");
     inbound(db, p, noMedia, dmUpdate(upd++, `${VIDEO}`));
+    const noMediaGroup = policyOf(`chats:\n  "${GROUP}":\n    title: Friends\n    trigger: [mention]\n    tools:\n      web: {}\n`);
+    inbound(db, p, noMediaGroup, inGroup(OWNER, "Ownerly", `@shuvi_test_bot ${VIDEO}`));
     await Bun.sleep(50);
-    expect(p.of("/media/probe")).toHaveLength(0);
-    expect(db.$client.query("select count(*) as n from media_prewarms").get()).toEqual({ n: 0 });
-    // The owner's own link in that group is prewarmed.
-    inbound(db, p, GROUP_POLICY, inGroup(OWNER, "Ownerly", `@shuvi_test_bot ${VIDEO}`));
-    await Bun.sleep(100);
-    expect(p.of("/media/probe")).toHaveLength(1);
+    expect(prewarmCount(db)).toBe(0);
+    expect(p.calls).toHaveLength(0);
   });
 
-  test("a turn that never asks leaves it unused, and the console's turn view says so", async () => {
+  test("a turn that never asks leaves them unused, and the console's turn view says so", async () => {
     const p = porch();
     const db = memDb();
     inbound(db, p, DM, dmUpdate(upd++, `two links ${VIDEO} and https://vimeo.com/123456`));
     await Bun.sleep(100);
-    const seq = (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
+    const seq = lastSeq(db);
     const a = await dmTurn(db, ENV(p), [{ tool: "pass" }], DM);
     const prompt = JSON.stringify(a.calls[0]!.prompt);
-    expect(prompt).toContain(`(Prepared: #${seq}'s link 1 (www.youtube.com) — video_probe returns at once.)`);
-    expect(prompt).not.toContain("link 2"); // vimeo: not a known video there, so its prewarm failed: no line
+    expect(prompt).toContain(`(Prepared: #${seq}'s link 1 (www.youtube.com) — read_link returns at once.)`);
+    expect(prompt).not.toContain("link 2"); // vimeo: nothing there for the fake, so its prewarm failed: no line
     expect(turnPrewarms(db, ownerChatId(db), seq - 1, seq)).toEqual({ used: 0, unused: 2 });
     expect(getEvent(db, seq)).toBeDefined();
   });
@@ -626,7 +639,7 @@ describe("a prewarm that never finishes", () => {
 
   test("under load (a slow porchkit): recording returns at once and the turn goes on without waiting", async () => {
     const p = porch();
-    p.probeDelayMs = 3000;
+    p.readDelayMs = 3000;
     const db = memDb();
     const caps = enabledCapabilities(p.env({ SHUVI_WEB: "off" }));
     const policy = policyOf("");
@@ -636,7 +649,7 @@ describe("a prewarm that never finishes", () => {
     const seq = (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
     const a = await dmTurn(db, p.env({ SHUVI_WEB: "off" }), [{ tool: "pass" }], policy);
     expect(Date.now() - t0).toBeLessThan(2000);
-    expect(JSON.stringify(a.calls[0]!.prompt)).toContain(`(Preparing: #${seq}'s link — video_probe joins it.)`);
+    expect(JSON.stringify(a.calls[0]!.prompt)).toContain(`(Preparing: #${seq}'s link — read_link joins it.)`);
   });
 });
 

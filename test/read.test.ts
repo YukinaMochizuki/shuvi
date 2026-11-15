@@ -310,17 +310,18 @@ describe("prewarm routing", () => {
   }
   const lastSeq = (db: Db) => (db.$client.query("select max(seq) as s from chat_events").get() as { s: number }).s;
 
-  test("post hosts go to /read, video hosts (and short links) to /media/probe, at most 3 in all", () => {
-    const route = (t: string) => prewarmLinks(t).map((l) => `${l.host}:${l.endpoint}`);
-    expect(route("https://x.com/a/status/1 https://twitter.com/a/status/2 https://youtu.be/abc123def45")).toEqual(["x.com:read", "twitter.com:read", "youtu.be:probe"]);
-    expect(route("https://www.threads.net/@a/post/1 https://www.threads.com/@a/post/1 https://www.instagram.com/p/1 https://m.facebook.com/x https://old.reddit.com/r/a https://bsky.app/profile/a/post/1")).toEqual([
-      "www.threads.net:read",
-      "www.threads.com:read",
-      "www.instagram.com:read",
+  test("every http(s) link goes to /read, whatever its host; the first of each link counts; at most 3; the replied-to text's after the message's own", () => {
+    const route = (...t: (string | undefined)[]) => prewarmLinks(t).map((l) => `${l.host}:${l.endpoint}`);
+    expect(route("https://news.example.com/a https://www.dcard.tw/f/talk/p/1 https://www.tiktok.com/@a/photo/1")).toEqual(["news.example.com:read", "www.dcard.tw:read", "www.tiktok.com:read"]);
+    expect(route("https://youtu.be/abc123def45 https://www.ptt.cc/bbs/a/M.1.html https://mastodon.example/@a/1 https://x.com/a/status/1")).toEqual(["youtu.be:read", "www.ptt.cc:read", "mastodon.example:read"]);
+    // The same link twice (however it is written) is one; the text replied to comes after, within the cap.
+    expect(route("https://x.com/a/status/1 http://www.x.com/a/status/1#top", "see https://x.com/a/status/1 and https://www.youtube.com/watch?v=abc123def45 https://blog.example/p")).toEqual([
+      "x.com:read",
+      "www.youtube.com:read",
+      "blog.example:read",
     ]);
-    expect(route("https://m.facebook.com/x https://old.reddit.com/r/a https://bsky.app/profile/a/post/1")).toEqual(["m.facebook.com:read", "old.reddit.com:read", "bsky.app:read"]);
-    // A short link is read: /read resolves it and answers whatever is behind it.
-    expect(route("https://vimeo.com/1 https://t.co/abc https://news.example.com/a https://www.bit.ly/x")).toEqual(["vimeo.com:probe", "t.co:read", "www.bit.ly:read"]);
+    expect(route(undefined, "https://t.co/abc")).toEqual(["t.co:read"]);
+    expect(route("no links here", undefined)).toEqual([]);
   });
 
   test("an owner's post link is read at once, speculatively; the line says read_link; read_link joins it and asks again, normally", async () => {
@@ -332,22 +333,26 @@ describe("prewarm routing", () => {
     const rows = prewarmsOf(db, seq);
     expect(rows.map((r) => [r.n, r.host, r.endpoint])).toEqual([
       [1, "x.com", "read"],
-      [2, "youtu.be", "probe"],
+      [2, "youtu.be", "read"],
     ]);
     let readsAtFirstTool = -1;
     const a = await dmTurn(db, ENV(p), [{ run: () => (readsAtFirstTool = p.of("/read").length) }, { tool: "read_link", args: { url: X_POST } }, { tool: "pass" }], DM);
     const prompt = JSON.stringify(a.calls[0]!.prompt);
     expect(prompt).toContain(`(Preparing: #${seq}'s link 1 (x.com) — read_link joins it.)`);
-    expect(prompt).toMatch(new RegExp(`\\((?:Prepared|Preparing): #${seq}'s link 2 \\(youtu\\.be\\) — video_probe`));
-    expect(readsAtFirstTool).toBe(0); // the prewarm is still in flight at porchkit (300 ms)
-    // The prewarm went first and was waited for; then the tool's own read, not speculative.
-    expect(p.of("/read").map((c) => c.body)).toEqual([{ url: X_POST, speculative: true }, { url: X_POST }]);
-    expect(p.of("/media/probe").map((c) => c.body)).toEqual([{ url: "https://youtu.be/abc123def45", speculative: true }]);
+    expect(prompt).toContain(`(Preparing: #${seq}'s link 2 (youtu.be) — read_link joins it.)`);
+    expect(readsAtFirstTool).toBe(0); // the prewarms are still in flight at porchkit (300 ms)
+    // The prewarms went first and were waited for; then the tool's own read, not speculative.
+    const reads = p.of("/read").map((c) => c.body);
+    expect(reads).toHaveLength(3);
+    expect(reads.slice(0, 2)).toContainEqual({ url: X_POST, speculative: true });
+    expect(reads.slice(0, 2)).toContainEqual({ url: "https://youtu.be/abc123def45", speculative: true });
+    expect(reads[2]).toEqual({ url: X_POST });
+    expect(p.of("/media/probe")).toHaveLength(0);
     expect(images(a.toolResults[0]!.result)).toHaveLength(4);
     const row = prewarmsOf(db, seq)[0]!;
     expect(row.outcome).toBe("ok");
     expect(row.usedTurnId).not.toBeNull();
-    expect(prewarmsOf(db, seq)[1]!.usedTurnId).toBeNull(); // the probe was not used: read_link joins only reads
+    expect(prewarmsOf(db, seq)[1]!.usedTurnId).toBeNull(); // the other link was not read by the turn
     // What is kept: the kind, and no URL of the link (nor anything else of the post).
     expect(row.result).toEqual({ kind: "post" });
   });
