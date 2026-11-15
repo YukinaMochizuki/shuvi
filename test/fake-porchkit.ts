@@ -26,6 +26,8 @@ export const FAKE_TOKEN = "pk-fake-token-0123456789abcdef";
 
 export interface FakeVideo {
   title: string;
+  /** The site's own text (a tweet's full text, a caption, a description); porchkit answers null without. */
+  description?: string;
   duration: number;
   chapters?: { start: number; end: number; title: string }[];
 }
@@ -60,6 +62,7 @@ export class FakePorchkit {
   constructor(readonly token = FAKE_TOKEN) {
     this.videos.set("https://www.youtube.com/watch?v=abc123def45", {
       title: "Example talk",
+      description: "A talk about examples.\nSlides: https://example.com/slides",
       duration: 635,
       chapters: [
         { start: 0, end: 120, title: "Intro" },
@@ -132,6 +135,7 @@ export class FakePorchkit {
         canonical_url: canon,
         extractor: "youtube",
         title: v.title,
+        description: v.description ?? null,
         uploader: "Example Channel",
         uploader_id: "@examplechannel",
         upload_date: "20260101",

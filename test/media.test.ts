@@ -183,6 +183,9 @@ describe("video_probe and video_subs", () => {
         "  02:00 The main part",
         "Subtitles: en; automatic captions: en (and 157 machine translations, by name) — video_subs reads them",
         "Has: storyboard previews (quick sheets) · video up to 1080p",
+        "Text:",
+        "A talk about examples.",
+        "Slides: https://example.com/slides",
       ].join("\n"),
     );
     expect(p.of("/media/probe")[0]!.body).toEqual({ url: VIDEO });
@@ -463,8 +466,12 @@ describe("prewarm", () => {
     const row = prewarmsOf(db, seq.s)[0]!;
     expect(row.outcome).toBe("ok");
     expect(row.usedTurnId).not.toBeNull();
-    // What is kept of the answer: what video_probe shows, and no URL.
-    expect(JSON.stringify(row.result)).not.toMatch(/https?:|youtu\.be|canonical_url|abc123def45/);
+    // What is kept of the answer: what video_probe shows, and no URL of the video. The description is the
+    // site's own text and keeps the links it carries; nothing else in the row is a URL.
+    const { description, ...rest } = row.result as Record<string, unknown>;
+    expect(JSON.stringify(row.result)).not.toMatch(/youtube\.com|youtu\.be|canonical_url|abc123def45/);
+    expect(JSON.stringify(rest)).not.toMatch(/https?:/);
+    expect(description).toBe("A talk about examples.\nSlides: https://example.com/slides");
     expect(row.result).toMatchObject({ title: "Example talk", duration: 635 });
     expect(turnPrewarms(db, ownerChatId(db), seq.s - 1, seq.s)).toEqual({ used: 1, unused: 0 });
   });
