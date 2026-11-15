@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { err, ok, type ToolDef, type ToolResult } from "agent-runtime";
 import { isOwnerDm, ownerIdFrom } from "../access.ts";
-import { defineCapability, type TurnContext } from "../types.ts";
+import { defineCapability, layersIn, type TurnContext } from "../types.ts";
 import { applyEdits, collectEdits, keepEnding, numbered, unifiedDiff, type Edit } from "./edit.ts";
-import { chatNotesPath, commitHomeEdit, readHomeFile, refusal, type HomeAccess } from "./home.ts";
+import { chatNotesPath, commitHomeEdit, refusal, type HomeAccess } from "./home.ts";
+import type { HomeLayers } from "./layers.ts";
 
 /**
  * Memory: the assistant curates her standing files in `home/` (docs/design.md §8, §9). Each change is a git
@@ -33,6 +34,10 @@ import { chatNotesPath, commitHomeEdit, readHomeFile, refusal, type HomeAccess }
  * `seen` it creates is this turn's state: what she has seen of each file in this turn, by read_home or by
  * her own change. A whole write over a file with text in it is refused unless that file still says what
  * she saw. This chat's notes count as seen from the start, since the system prompt shows them.
+ *
+ * Every read and write goes through the chat's layers (./layers.ts): she reads the file in effect, and her change
+ * lands in the copy in effect (a profile's own copy, else the base). Paths here are LOGICAL; nothing she is told
+ * names a profile (an error from below that names the physical path is put back in logical terms).
  *
  * A change that leaves the file exactly as it was saves nothing and says "no change". Every saved change
  * returns its commit id and a compact unified diff. A trailing newline is kept as it was.
@@ -81,13 +86,14 @@ const pathArg = z.string().describe("e.g. memory/private.md");
 type Seen = Map<string, string | null>;
 
 /** Save `next` as `path` (which was `before`) and say what changed, or that nothing did. */
-function save(home: string, seen: Seen, path: string, before: string | null, next: string, why: string): ToolResult {
+function save(layers: HomeLayers, seen: Seen, path: string, before: string | null, next: string, why: string): ToolResult {
   if (before === next) return ok(`No change: ${path} already says exactly that. Nothing was saved.`);
   let commit: string;
+  const physical = layers.writePath(path);
   try {
-    commit = commitHomeEdit(home, path, next, why.trim());
+    commit = commitHomeEdit(layers.home, physical, next, why.trim());
   } catch (e) {
-    return err(`${e instanceof Error ? e.message : String(e)}. ${path} is unchanged.`);
+    return err(`${(e instanceof Error ? e.message : String(e)).split(physical).join(path)}. ${path} is unchanged.`);
   }
   seen.set(path, next);
   const d = unifiedDiff(before ?? "", next);
@@ -95,16 +101,16 @@ function save(home: string, seen: Seen, path: string, before: string | null, nex
 }
 
 /** The file's text (null: it does not exist), or the refusal when it cannot be reached (a symlink out). */
-function current(home: string, path: string): { text: string | null } | ToolResult {
+function current(layers: HomeLayers, path: string): { text: string | null } | ToolResult {
   try {
-    return { text: readHomeFile(home, path) };
+    return { text: layers.read(path) };
   } catch (e) {
-    return err(e instanceof Error ? e.message : String(e));
+    return err((e instanceof Error ? e.message : String(e)).split(layers.resolve(path).physical).join(path));
   }
 }
 
 /** edit_home's body: exact replacements in an existing file, all or nothing. */
-function editFile(home: string, seen: Seen, path: string, args: EditArgs, create: string): ToolResult {
+function editFile(home: HomeLayers, seen: Seen, path: string, args: EditArgs, create: string): ToolResult {
   const edits = collectEdits(args);
   if (typeof edits === "string") return err(edits);
   const read = current(home, path);
@@ -117,7 +123,7 @@ function editFile(home: string, seen: Seen, path: string, args: EditArgs, create
 }
 
 /** write_home's body: a whole file, refused over text she has not seen as it is now. */
-function writeFile(home: string, seen: Seen, path: string, args: WriteArgs, partly: string): ToolResult {
+function writeFile(home: HomeLayers, seen: Seen, path: string, args: WriteArgs, partly: string): ToolResult {
   const read = current(home, path);
   if (!("text" in read)) return read;
   const before = read.text;
@@ -167,7 +173,7 @@ export const memory = defineCapability<MemoryConfig>({
   enable: (env) => (env.SHUVI_MEMORY === "off" ? null : { ownerId: ownerIdFrom(env) }),
   ownerOnly: ["edit_home", "write_home"],
   tools(ctx, config) {
-    const home = ctx.home;
+    const home = layersIn(ctx);
     const access = () => homeAccess(ctx, config.ownerId);
     const notes = chatNotesPath(ctx.chat.tgChatId);
     // This chat's policy may leave its notes out (memory without `chat`): then they are neither shown nor kept.

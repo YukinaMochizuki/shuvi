@@ -3,7 +3,8 @@
  * `/editor.js`, loaded only on that page. Everything here is an UPGRADE: the page works without it, as a plain
  * textarea in a form that posts to `/home/save`.
  *
- *   textarea[data-editor]   becomes a CodeMirror editor (markdown or yaml, by `data-lang`), the textarea kept
+ *   textarea[data-editor]   (with `data-readonly`: a read-only view of the text, an inherited file in a profile)
+ *                           becomes a CodeMirror editor (markdown or yaml, by `data-lang`), the textarea kept
  *                           hidden and in step so the form posts what the editor holds. Lines that differ from
  *                           `data-saved` (the file as last saved) are marked in the gutter, and removed lines
  *                           shown inline, read-only (@codemirror/merge's unified view against the saved text);
@@ -136,6 +137,11 @@ function upgradeEditor(area: HTMLTextAreaElement): void {
   host.className = "cm-host";
   area.insertAdjacentElement("afterend", host);
   area.hidden = true;
+  // A file a profile inherits from Base: shown, not edited (home.ts `layerBar`).
+  if (area.hasAttribute("data-readonly")) {
+    new EditorView({ parent: host, state: EditorState.create({ doc: area.value, extensions: base(area.dataset.lang, false) }) });
+    return;
+  }
   const view = new EditorView({
     parent: host,
     state: EditorState.create({

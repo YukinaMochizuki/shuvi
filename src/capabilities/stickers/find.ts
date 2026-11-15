@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, ne, or, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, ne, notLike, or, sql } from "drizzle-orm";
 import type { Db } from "../../store/db.ts";
 import { chatEvents, stickerLibrary, stickerMeta, stickerPacks } from "../../store/schema.ts";
 import type { Role, Tier } from "./library.ts";
@@ -67,13 +67,21 @@ export function parseId(id: string): { pack: string; n: number } | null {
   return m ? { pack: m[1]!, n: Number(m[2]) } : null;
 }
 
-function load(db: Db, where: ReturnType<typeof and>): LibrarySticker[] {
+/**
+ * Which pack files a call sees (library.ts `scopeKeys`: the packs in effect for the chat's layers). Absent: the
+ * base's files only.
+ */
+export type Scope = readonly string[] | undefined;
+
+const inScope = (scope: Scope) => (scope ? inArray(stickerLibrary.file, scope.length ? [...scope] : [""]) : notLike(stickerLibrary.file, "profiles/%"));
+
+function load(db: Db, where: ReturnType<typeof and>, scope: Scope): LibrarySticker[] {
   return db
     .select({ s: stickerLibrary, role: stickerPacks.role, packDmOnly: stickerPacks.dmOnly, meta: stickerMeta })
     .from(stickerLibrary)
     .innerJoin(stickerPacks, eq(stickerPacks.file, stickerLibrary.file))
     .leftJoin(stickerMeta, eq(stickerMeta.fileUniqueId, stickerLibrary.fileUniqueId))
-    .where(where)
+    .where(and(where, inScope(scope)))
     .all()
     .map(({ s, role, packDmOnly, meta }) => ({
       id: stickerId(s.pack, s.n),
@@ -101,9 +109,9 @@ export function useLabels(use: string): string[] {
 }
 
 /** The library's `use` labels, most stickers first (see the header). */
-export function vocabulary(db: Db, inDm: boolean, cap = VOCABULARY_CAP): { label: string; count: number }[] {
+export function vocabulary(db: Db, inDm: boolean, cap = VOCABULARY_CAP, scope?: Scope): { label: string; count: number }[] {
   const counts = new Map<string, number>();
-  for (const s of load(db, undefined)) {
+  for (const s of load(db, undefined, scope)) {
     if (!offerable(s, inDm)) continue;
     for (const l of useLabels(s.use)) counts.set(l, (counts.get(l) ?? 0) + 1);
   }
@@ -122,6 +130,7 @@ export interface ListOptions {
   /** 1-based. */
   page?: number;
   pageSize?: number;
+  scope?: Scope;
 }
 
 export interface ListResult {
@@ -138,7 +147,7 @@ export interface ListResult {
 export function listStickers(db: Db, opts: ListOptions): ListResult {
   const use = opts.use?.trim().toLowerCase();
   let unfetched = 0;
-  const all = load(db, and(opts.pack ? eq(stickerLibrary.pack, opts.pack) : undefined, opts.tier ? eq(stickerLibrary.tier, opts.tier) : undefined))
+  const all = load(db, and(opts.pack ? eq(stickerLibrary.pack, opts.pack) : undefined, opts.tier ? eq(stickerLibrary.tier, opts.tier) : undefined), opts.scope)
     .filter((s) => !use || s.use.toLowerCase().includes(use))
     .filter((s) => {
       if (!s.meta && !(s.dmOnly && !opts.inDm) && s.tier !== "never") unfetched++;
@@ -152,10 +161,10 @@ export function listStickers(db: Db, opts: ListOptions): ListResult {
 }
 
 /** The library sticker `id` (`<pack>/<n>`), or undefined. */
-export function getSticker(db: Db, id: string): LibrarySticker | undefined {
+export function getSticker(db: Db, id: string, scope?: Scope): LibrarySticker | undefined {
   const p = parseId(id);
   if (!p) return undefined;
-  return load(db, and(eq(stickerLibrary.pack, p.pack), eq(stickerLibrary.n, p.n)))[0];
+  return load(db, and(eq(stickerLibrary.pack, p.pack), eq(stickerLibrary.n, p.n)), scope)[0];
 }
 
 /** How many times she sent each sticker (by file_unique_id) since `since`, in any chat. */
@@ -211,6 +220,7 @@ export interface FindOptions {
   inDm: boolean;
   now?: Date;
   limit?: number;
+  scope?: Scope;
 }
 
 export interface FindResult {
@@ -225,9 +235,9 @@ export function findStickers(db: Db, opts: FindOptions): FindResult {
   const words = terms.filter((t) => !named.has(t));
 
   const ids = matching(db, words);
-  const byId = ids.length ? load(db, and(inArray(stickerLibrary.id, ids), opts.pack ? eq(stickerLibrary.pack, opts.pack) : undefined)) : [];
+  const byId = ids.length ? load(db, and(inArray(stickerLibrary.id, ids), opts.pack ? eq(stickerLibrary.pack, opts.pack) : undefined), opts.scope) : [];
   const explicit = named.size
-    ? load(db, or(...[...named].map((id) => { const p = parseId(id)!; return and(eq(stickerLibrary.pack, p.pack), eq(stickerLibrary.n, p.n)); })))
+    ? load(db, or(...[...named].map((id) => { const p = parseId(id)!; return and(eq(stickerLibrary.pack, p.pack), eq(stickerLibrary.n, p.n)); })), opts.scope)
     : [];
 
   const now = opts.now ?? new Date();

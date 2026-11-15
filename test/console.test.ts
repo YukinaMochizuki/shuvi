@@ -330,8 +330,10 @@ describe("pages, against fixture data", () => {
   test("one turn: the system prompt by section, the diff on request, and the raw input", async () => {
     const x = await f();
     const prompt = await page(`/turns/${x.turns.done}?tab=prompt`);
-    expect(prompt).toContain('<span class="lbl">persona/public.md</span>');
-    expect(prompt).toContain('<span class="lbl">capability: speech</span>');
+    // Each section with the layer it came from (capabilities/memory/layers.ts): a turn on no profile, the base.
+    expect(prompt).toContain('<span class="pprof">on Base</span>');
+    expect(prompt).toContain('<span class="lbl">persona/public.md<span class="psrc src-base">· base</span></span>');
+    expect(prompt).toContain('<span class="lbl">capability: speech<span class="psrc src-code">· code</span></span>');
     expect(prompt).toContain("the first recorded in this chat");
     const changed = await page(`/turns/${x.turns.failed}?tab=prompt`);
     expect(changed).toContain(`changed since <a href="/turns/${x.turns.done}?tab=prompt">turn ${x.turns.done}</a>`);

@@ -40,6 +40,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | what a capability is, what it may touch | `src/capabilities/types.ts`, `src/capabilities/index.ts` |
 | who may call an owner-only tool, decided per call; a group's operators | `src/agent/turn.ts` (`ownerAuthority`, `operatorAuthority`, `callAuthority`, `turnBoundary`), `src/agent/acting.ts` |
 | which home/ files she may read and edit; which chats a chat may search and read | `src/capabilities/memory/home.ts`, `src/capabilities/access.ts` |
+| profiles: which copy of her files a chat reads and writes (the one resolver), and switching a chat's profile | `src/capabilities/memory/layers.ts`, `src/store/profiles.ts`; the card: `src/control/model-cards.ts` (`profile`); the console: `src/console/home-data.ts`, `home-write.ts` |
 | how events read to the model; framework events that cannot be forged | `src/agent/render.ts` |
 | jobs: one result per job, back to its origin; deadlines | `src/store/jobs.ts`, `src/capabilities/jobs/watch.ts` |
 | schedules, and firing once after downtime | `src/store/schedules.ts` |

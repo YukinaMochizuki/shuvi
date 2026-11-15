@@ -1,10 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { eq, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, notLike } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../../store/db.ts";
 import { stickerLibrary, stickerPacks } from "../../store/schema.ts";
 import { IMMEDIATE } from "../../store/turns.ts";
+import { listProfiles, profileDir, type HomeLayers, type LayerFile } from "../memory/layers.ts";
 
 /**
  * The sticker library's FORMAT (docs/design.md §12) and its INDEX in SQLite.
@@ -29,6 +30,11 @@ import { IMMEDIATE } from "../../store/turns.ts";
  * the skeleton `add_sticker_pack` creates, the file `remove_sticker_pack` deletes, or a hand edit). It runs before every sticker tool reads the library and in a server
  * loop, so no writer has to remember to re-index. A file that stops parsing keeps its last good stickers
  * indexed and records the error, so one typo does not take a pack away.
+ *
+ * PROFILES (memory/layers.ts): a profile may have its own copy of a pack file, or packs of its own. Every pack file,
+ * the base's and each profile's, is indexed, under a key: the base's by its name under home/stickers/ (`<pack>.yaml`),
+ * a profile's by its path in home/ (`profiles/<name>/stickers/<pack>.yaml`). A chat's tools see only the files in
+ * effect for its layers (`scopeKeys`); a pack is described once per layer (base, or one profile), not across them.
  *
  * `sticker_fts` is an FTS5 table (trigram tokenizer, so substrings of any script match, CJK included) over
  * `desc` and `use`. It is a derived cache, so it is created here at runtime rather than by a migration
@@ -149,11 +155,56 @@ function ensureFts(db: Db): boolean {
 
 const hashOf = (bytes: Uint8Array) => Bun.hash(bytes).toString(16);
 
-/** Bring the index up to date with home/stickers/. Cheap when nothing changed: a read and a hash per file. */
+/** The index key of a pack file in effect (see the header). */
+export const packKey = (f: Pick<LayerFile, "logical" | "physical" | "from">) => (f.from === "base" ? f.logical.slice("stickers/".length) : f.physical);
+
+/**
+ * The keys of the pack files in effect for `layers`: what a chat's sticker tools may see. With the index (`db`),
+ * the overlay is keyed by PACK, not only by file name: a base file describing a pack the profile's own files
+ * describe (under whatever name) is left out, and so is any file describing a pack the profile hides.
+ */
+export function scopeKeys(layers: HomeLayers, db?: Pick<Db, "select">): string[] {
+  const keys = layers.packFiles().map(packKey);
+  if (!db || !layers.profile) return keys;
+  const packOf = new Map(
+    db
+      .select({ file: stickerPacks.file, pack: stickerPacks.pack })
+      .from(stickerPacks)
+      .where(inArray(stickerPacks.file, keys.length ? keys : [""]))
+      .all()
+      .map((r) => [r.file, r.pack]),
+  );
+  const own = new Set(keys.filter((k) => k.startsWith("profiles/")).flatMap((k) => packOf.get(k) ?? []));
+  return keys.filter((k) => {
+    const pack = packOf.get(k);
+    if (!pack) return true;
+    // A pack the profile hides: only a copy of its own (made since, by add_sticker_pack) is offered.
+    if (layers.hidesPack(pack)) return k.startsWith("profiles/");
+    return k.startsWith("profiles/") || !own.has(pack);
+  });
+}
+
+/** The layer a key belongs to: "" for the base, `profiles/<name>` for a profile. */
+const layerOfKey = (key: string) => (key.startsWith("profiles/") ? key.split("/").slice(0, 2).join("/") : "");
+
+/** A key as she may read it: the file's logical path (stickers/<file>), whichever layer it is in. */
+export const logicalOfKey = (key: string) => `stickers/${key.split("/").at(-1)!}`;
+
+/** Every pack file in home/, the base's and each profile's, by key. */
+function packSources(home: string): Map<string, Buffer> {
+  const out = new Map<string, Buffer>();
+  const scan = (dir: string, key: (f: string) => string) => {
+    if (!existsSync(dir)) return;
+    for (const f of readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).sort()) out.set(key(f), readFileSync(join(dir, f)));
+  };
+  scan(stickersDir(home), (f) => f);
+  for (const p of listProfiles(home)) scan(join(home, profileDir(p.name), "stickers"), (f) => `${profileDir(p.name)}/stickers/${f}`);
+  return out;
+}
+
+/** Bring the index up to date with every pack file in home/. Cheap when nothing changed: a read and a hash per file. */
 export function syncLibrary(db: Db, home: string): SyncResult {
-  const dir = stickersDir(home);
-  const files = existsSync(dir) ? readdirSync(dir).filter((f) => /\.ya?ml$/.test(f)).sort() : [];
-  const sources = new Map(files.map((f) => [f, readFileSync(join(dir, f))]));
+  const sources = packSources(home);
   const result: SyncResult = { changed: [], errors: [] };
 
   db.transaction((tx) => {
@@ -183,8 +234,9 @@ export function syncLibrary(db: Db, home: string): SyncResult {
           .from(stickerPacks)
           .where(eq(stickerPacks.pack, parsed.pack))
           .all()
-          .find((p) => p.file !== file);
-        if (other) throw new Error(`pack ${parsed.pack} is already described in ${other.file}`);
+          .find((p) => p.file !== file && layerOfKey(p.file) === layerOfKey(file));
+        // Named by its logical path: this text reaches her (stickers/index.ts `errorLines`).
+        if (other) throw new Error(`pack ${parsed.pack} is already described in ${logicalOfKey(other.file)}`);
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e);
         // Keep the last good stickers; remember this version's hash so it is not re-parsed every pass.
@@ -215,17 +267,20 @@ export function syncLibrary(db: Db, home: string): SyncResult {
   return result;
 }
 
-/** The file (under home/stickers/) that describes `pack`, as last indexed, or null when no file does. */
-export function fileOfPack(db: Db, pack: string): string | null {
-  return db.select({ file: stickerPacks.file }).from(stickerPacks).where(eq(stickerPacks.pack, pack)).get()?.file ?? null;
+/** Only the keys in `scope` (absent: the base's). */
+const packScope = (scope?: readonly string[]) => (scope ? inArray(stickerPacks.file, scope.length ? [...scope] : [""]) : notLike(stickerPacks.file, "profiles/%"));
+
+/** The key of the file that describes `pack` among `scope`'s, as last indexed, or null when no file does. */
+export function fileOfPack(db: Db, pack: string, scope?: readonly string[]): string | null {
+  return db.select({ file: stickerPacks.file }).from(stickerPacks).where(and(eq(stickerPacks.pack, pack), packScope(scope))).get()?.file ?? null;
 }
 
-/** The packs the library describes (successfully indexed at least once). */
-export function libraryPacks(db: Db): string[] {
+/** The packs `scope`'s files describe (successfully indexed at least once). */
+export function libraryPacks(db: Db, scope?: readonly string[]): string[] {
   return db
     .select({ pack: stickerPacks.pack })
     .from(stickerPacks)
-    .where(isNotNull(stickerPacks.pack))
+    .where(and(isNotNull(stickerPacks.pack), packScope(scope)))
     .all()
     .map((p) => p.pack!);
 }

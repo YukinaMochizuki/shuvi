@@ -23,6 +23,8 @@ import {
   type CatalogModel,
 } from "../store/models.ts";
 import { controlCards } from "../store/schema.ts";
+import { listProfiles, readProfile } from "../capabilities/memory/layers.ts";
+import { setChatProfile } from "../store/profiles.ts";
 import { chatLabel, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
 
 /**
@@ -51,6 +53,10 @@ import { chatLabel, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
  *                    becomes that list, 6 a page, models already in the catalog ✓; pressing one adds it with
  *                    the listed context window and asks for its probe.
  *   provider_remove  `/provider remove <name>`: names its models and the chats on them, then removes it.
+ *   profile          `/profile` in a chat (acknowledged with 👌 only, as `/model` is) or `/profile <chat>` here:
+ *                    Base and every profile (capabilities/memory/layers.ts, as they were when it opened), the
+ *                    chat's marked ✓; a press switches the chat (store/profiles.ts) and the card says so, from
+ *                    its next turn (a running turn finishes on what it began with, and the card says that too).
  *
  * A button press is recorded by the control poller in the transaction that advances its offset
  * (control/bot.ts), so a press is handled once. A card's state is its row (`control_cards`): a restart
@@ -113,7 +119,9 @@ type State =
   | { step: "listing"; provider: string }
   | { step: "listed"; provider: string; page: number; listed: Listed[]; note?: string }
   // provider_remove
-  | { step: "confirm_provider"; provider: string };
+  | { step: "confirm_provider"; provider: string }
+  // profile: the profiles there were when it opened
+  | { step: "profile"; profiles: { name: string; label?: string }[]; note?: string };
 
 function unknownCardKind(kind: never): never {
   throw new Error(`unknown card kind "${String(kind)}"`);
@@ -280,6 +288,8 @@ function render(db: Db, card: Card, state: State): { text: string; keyboard: Key
       return renderProviderAdd(db, state, cb);
     case "provider_remove":
       return renderProviderRemove(db, state, cb);
+    case "profile":
+      return renderProfile(db, card, state, cb);
     default:
       return unknownCardKind(card.kind);
   }
@@ -566,7 +576,7 @@ export function isCardButton(data: string | undefined): boolean {
  * Record the owner's press of a card button. Call inside the transaction that records the update. Returns the
  * text to answer the press with ("" for none).
  */
-export function pressCard(db: Db, data: string): string {
+export function pressCard(db: Db, data: string, home?: string): string {
   const m = /^cd:(\d+):(\d+):([A-Za-z])(\d*)$/.exec(data);
   const card = m ? getCard(db, Number(m[1])) : undefined;
   if (!m || !card || card.status !== "open" || card.version !== Number(m[2])) return CLOSED;
@@ -588,6 +598,8 @@ export function pressCard(db: Db, data: string): string {
       return pressProviderAdd(db, card, state, action, n);
     case "provider_remove":
       return pressProviderRemove(db, card, action);
+    case "profile":
+      return pressProfile(db, card, state, action, n, home);
     default:
       return unknownCardKind(card.kind);
   }
@@ -882,4 +894,60 @@ export function finishListing(db: Db, cardId: number, r: { listed: Listed[] } | 
     return;
   }
   setState(db, card, { step: "listed", provider: state.provider, page: 0, listed: r.listed }, { step: true });
+}
+
+// ---- profile ---------------------------------------------------------------------------------------------
+
+const profileName = (p: { name: string; label?: string }) => (p.label ? `${p.name} (${p.label})` : p.name);
+
+function renderProfile(db: Db, card: Card, state: State, cb: (a: string) => string): { text: string; keyboard: Keyboard } {
+  if (state.step !== "profile") return wrongStep(state);
+  const chat = chatOf(db, card);
+  const label = chatLabel(chat);
+  const current = chat.profile ? state.profiles.find((p) => p.name === chat.profile) : undefined;
+  const now = chat.profile ? (current ? profileName(current) : `${chat.profile} (gone: it runs on Base)`) : "Base";
+  const lines = [`Profile for ${label}: now ${now}.`];
+  if (!state.profiles.length) lines.push("There are no profiles yet: make one on the console's Home page.");
+  else {
+    const running = runningTurnFor(db, chat.id);
+    lines.push(running ? `Turn ${running.id} is running: it finishes on what it began with; a switch applies from the next turn.` : "A switch applies from its next turn.");
+  }
+  if (state.note) lines.push("", state.note);
+  const keyboard: Keyboard = [[{ text: `${chat.profile ? "" : "✓ "}Base`, callback_data: cb("o") }]];
+  state.profiles.forEach((p, i) => keyboard.push([{ text: `${p.name === chat.profile ? "✓ " : ""}${p.name}${p.label ? ` · ${p.label}` : ""}`, callback_data: cb(`s${i}`) }]));
+  keyboard.push([{ text: "Cancel", callback_data: cb("x") }]);
+  return { text: lines.join("\n"), keyboard };
+}
+
+function pressProfile(db: Db, card: Card, state: State, action: string, n: number | null, home?: string): string {
+  if (state.step !== "profile") return CLOSED;
+  const chat = chatOf(db, card);
+  const label = chatLabel(chat);
+  let to: string | null;
+  if (action === "o") to = null;
+  else if (action === "s" && n !== null && state.profiles[n]) to = state.profiles[n]!.name;
+  else return CLOSED;
+  if (to === chat.profile) return void setState(db, card, { ...state, note: `${label} is already on ${to ?? "Base"}.` }, { step: true }), "";
+  if (to && home && !readProfile(home, to)) return void setState(db, card, { ...state, note: `${to} no longer exists.` }, { step: true }), "";
+  setChatProfile(db, chat.id, to);
+  close(db, card, `${label} now runs on ${to ?? "Base"}, from its next turn.`);
+  return "";
+}
+
+/** Open a profile card for chat `chatId` (closing its older open ones). Null when `idemKey` already opened one. */
+export function openProfileCard(db: Db, chatId: number, idemKey: string, home: string): Card | null {
+  const profiles = listProfiles(home).map((p) => ({ name: p.name, ...(p.label ? { label: p.label } : {}) }));
+  const card = openCard(db, { kind: "profile", chatId, idemKey, state: { step: "profile", profiles } });
+  if (card) supersede(db, "profile", card.id, chatId);
+  return card;
+}
+
+/** `/profile <chat>`: a profile card for that chat. `chat` resolves `<chat>` as `/stop <chat>` does. */
+export function profileCommand(db: Db, key: string, arg: string, chat: (arg: string) => Chat | undefined, home: string | undefined): void {
+  const which = arg.trim();
+  if (!which || /\s/.test(which)) return queueReply(db, key, "Usage: /profile <chat> (the number from /status, or its Telegram id)");
+  if (!home) return queueReply(db, key, "Profiles are not available here (no home/).");
+  const c = chat(which);
+  if (!c) return queueReply(db, key, `No chat ${which}. Use its number from /status, or its Telegram id.`);
+  void openProfileCard(db, c.id, key, home);
 }

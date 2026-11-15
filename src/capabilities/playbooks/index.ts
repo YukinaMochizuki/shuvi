@@ -1,9 +1,7 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { z } from "zod";
 import { err, ok, type ToolDef } from "agent-runtime";
 import { listPlaybooks, PLAYBOOK_NAME } from "../../agent/playbooks.ts";
-import { defineCapability } from "../types.ts";
+import { defineCapability, layersIn } from "../types.ts";
 
 /**
  * Playbooks: `read_playbook`, which reads one of `home/playbooks/<name>.md` in full. The index of them is
@@ -19,7 +17,9 @@ export const playbooks = defineCapability<true>({
   label: "playbooks",
   gives: "read_playbook, and the index of her playbooks in the prompt.",
   enable: (env) => (env.SHUVI_PLAYBOOKS === "off" ? null : true),
-  tools({ home }) {
+  tools(ctx) {
+    // The playbooks in effect in this chat (memory/layers.ts): a profile may replace, add or hide some.
+    const home = layersIn(ctx);
     const read: ToolDef<{ name: string }> = {
       name: "read_playbook",
       description: "Read one of your playbooks in full, by the name the Playbooks list gives.",
@@ -31,7 +31,7 @@ export const playbooks = defineCapability<true>({
           const names = listPlaybooks(home).map((b) => b.name);
           return err(`There is no playbook "${name}". ${names.length ? `There are: ${names.join(", ")}.` : "There are none yet."}`);
         }
-        return ok(readFileSync(join(home, "playbooks", `${n}.md`), "utf8"));
+        return ok(home.read(`playbooks/${n}.md`) ?? "");
       },
     };
     return [{ serverName: "shuvi", tools: [read] as ToolDef[] }];

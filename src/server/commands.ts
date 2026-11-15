@@ -1,7 +1,7 @@
 import type { Api } from "grammy";
 import type { BotCommand, BotCommandScope } from "grammy/types";
 import { applySwitchRequest, noteStoppedTurn, pendingSwitchRequests, type SwitchOptions, type SwitchRequest } from "../agent/switch.ts";
-import { openSwitchCard } from "../control/model-cards.ts";
+import { openProfileCard, openSwitchCard } from "../control/model-cards.ts";
 import type { Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { enqueueOutbound, forgetConversations, markCommandDone, pendingCommands, type CommandPayload } from "../store/events.ts";
@@ -18,6 +18,8 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  *   /model  switch this chat's model: the control bot sends the owner a card for this chat
  *           (control/model-cards.ts), so nobody else in a group sees it. A running turn is NOT stopped here;
  *           the card says it will be, and the switch it asks for stops it.
+ *   /profile switch which of her profiles this chat uses (capabilities/memory/layers.ts): a card in the control
+ *           bot, as /model's. The switch applies from the chat's next turn; a running turn is left as it is.
  *
  * The framework does not speak (invariant 5). It acknowledges a command by reacting 👌 to it, so the
  * owner sees it took effect without a message in the assistant's chat that the assistant did not write.
@@ -39,6 +41,7 @@ export const MAIN_COMMANDS = [
   { command: "new", description: "Start a fresh conversation" },
   { command: "stop", description: "Stop the running turn" },
   { command: "model", description: "Switch this chat's model (a card in the control bot)" },
+  { command: "profile", description: "Switch this chat's profile (a card in the control bot)" },
 ] as const satisfies readonly (BotCommand & { command: CommandPayload["command"] })[];
 
 /**
@@ -167,7 +170,7 @@ export function switchRequestPass(db: Db, signal: SignalTurn = signalTurn, opts:
   return finished;
 }
 
-export function commandPass(db: Db, signal: SignalTurn = signalTurn): number {
+export function commandPass(db: Db, signal: SignalTurn = signalTurn, home?: string): number {
   let handled = 0;
   for (const cmd of pendingCommands(db)) {
     const p = cmd.payload as unknown as CommandPayload;
@@ -190,6 +193,15 @@ export function commandPass(db: Db, signal: SignalTurn = signalTurn): number {
           const t = tx as unknown as Db;
           const card = openSwitchCard(t, cmd.chatId, `command:${cmd.seq}`);
           acknowledge(t, cmd.chatId, cmd.seq, card ? `model card ${card.id} sent to the control bot` : "model card already sent");
+        }, IMMEDIATE);
+        handled++;
+        continue;
+      case "profile":
+        // As /model: the card, its message, the 👌 and the command done, in one transaction.
+        db.transaction((tx) => {
+          const t = tx as unknown as Db;
+          const card = home ? openProfileCard(t, cmd.chatId, `command:${cmd.seq}`, home) : null;
+          acknowledge(t, cmd.chatId, cmd.seq, card ? `profile card ${card.id} sent to the control bot` : home ? "profile card already sent" : "no home/: no profile card");
         }, IMMEDIATE);
         handled++;
         continue;

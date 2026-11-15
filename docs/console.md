@@ -101,6 +101,38 @@ your change and the other are merged; a clean merge is saved and says the other 
 same lines is not saved but shown side by side (the file now, and yours), to resolve and save. An undo whose lines
 were rewritten since is shown the same way.
 
+### Profiles
+
+A profile (docs/design.md §3; `src/capabilities/memory/layers.ts`) is an overlay of her files that some chats use:
+it holds only the files it replaces, and everything else comes from Base. The top of the files pane is the layer
+switch: **Base**, a select of the profiles (label · name), and **+ New profile** (a name, an optional label; it
+starts with nothing of its own). On a profile, its label, its ⋯ menu (Rename, Duplicate, Delete: each one commit;
+Delete names the chats using it, which go back to Base) and "Used by" (its chats) sit under the switch, and each
+file row starts with where the file comes from: `own` (the profile's copy), `inherits` (Base's), `hidden` (a Base
+playbook it hides) or `only in <profile>`.
+
+- **An inherited file** shows Base's text read-only, with "Inherited from Base. [Edit in Base] [Make a <profile>
+  version]" (the second copies Base's text into the profile and opens it). Its history is Base's.
+- **An own file** is the profile's copy: Save writes it, and its history is its own. "Remove the <profile>
+  version" (asked first; the text stays in history) puts the file back to inheriting. An empty one offers **Copy
+  from Base** (Base's text loaded into the editor, not saved).
+- **Base's new changes**: when Base's file changed after the copy was made, the bar says "Base changed since this
+  version was made (n changes)", with **View Base's changes** (Base then → Base now, GitHub-style) and **Apply
+  them** (a three-way merge of Base's changes into the copy, loaded into the editor unsaved; one that overlaps the
+  copy's own change opens the conflict view). Which Base commit a copy was made from is the `Base-Commit:` trailer
+  of the latest commit to it that has one: Make a version, Copy from Base, Duplicate, and every save from the
+  console, which records the Base commit its text is based on (a plain edit the current one, Restore of a version
+  the one at that version, Undo of a change the one before it, Apply Base's head). A copy without one counts from
+  the Base commit just before its first.
+- **A playbook or a sticker pack** offers Hide / Unhide in its bar: chats on the profile do not see a hidden one
+  (profile.yaml's `hides` and `hidden_packs`).
+- **Preview**, a tab beside the file: pick a chat and see the system prompt it would get now, section by section,
+  each labelled with where it came from (`· base`, `· <profile>`, or `· code` for a section written in code).
+
+A chat's page has a **Profile** select next to its title: changing it switches the chat at once (one POST), from
+its next turn, and the page says so once. A turn's System prompt tab says which profile it ran under, and each
+section's layer. The control bot's `/profile` does the same as the chat page's select.
+
 How a commit says who made it is in `src/capabilities/memory/home.ts`'s header: hers carry the turn, the chat and the
 tool call as trailers (`Turn:`, `Tool-Call:`, `Chat:`, `Tool:`); yours are authored `owner (console)` with your
 login. Her commits from before trailers are matched to their call through the `commit <id>` her tool's result names,
@@ -110,11 +142,12 @@ while that turn's transcript is kept, and say "inferred".
 
 ### The write boundary
 
-The console has three ways in for a write: Settings, Home, and deleting messages. Every other page answers GET
-and HEAD only (and `/login` its POST); a POST to it is refused with 405. Settings' buttons POST to
-`/settings/<area>/<verb>`, Home's Save to `/home/save`, a delete to `/messages/delete` and its undo to
-`/messages/undo`, and a GET to any of them is refused too. A POST there is carried out only if it passes, on
-top of the sign-in and the Host check:
+The console has four ways in for a write: Settings, Home, a chat page's Profile select, and deleting messages.
+Every other page answers GET and HEAD only (and `/login` its POST); a POST to it is refused with 405. Settings'
+buttons POST to `/settings/<area>/<verb>`, Home's Save to `/home/save` and its profile actions to
+`/home/profile/<verb>`, a chat's Profile select to `/chats/<id>/profile`, a delete to `/messages/delete` and its
+undo to `/messages/undo`, and a GET to any of them is refused too. A POST there is carried out only if it passes,
+on top of the sign-in and the Host check:
 
 - **Origin**: its `Origin` header is the console's own origin: `SHUVI_CONSOLE_URL`'s, or
   `http://127.0.0.1:<port>` (`localhost`, `[::1]`) for the ssh tunnel. A request without one, or from any other

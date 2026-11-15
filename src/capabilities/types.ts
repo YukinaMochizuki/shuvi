@@ -4,6 +4,7 @@ import { resolveChat, type ChatPolicy, type Policy, type ToolParams } from "../p
 import type { Db } from "../store/db.ts";
 import { getChat, type Chat, type ChatEvent } from "../store/events.ts";
 import type { JobKind } from "../store/jobs.ts";
+import { HomeLayers } from "./memory/layers.ts";
 import type { TelegramFiles } from "../telegram/files.ts";
 
 /**
@@ -52,6 +53,11 @@ export interface TurnContext {
   db: Db;
   /** The assistant's private data directory (docs/design.md §3). */
   home: string;
+  /**
+   * home/ as this chat sees it, its profile overlaid (memory/layers.ts): EVERY read or write of one of her files
+   * (persona, directives, memory, notes, playbooks, stickers) goes through it. Absent: the base (`layersIn`).
+   */
+  layers?: HomeLayers;
   chat: Chat;
   turnId: number;
   timeZone: string;
@@ -64,6 +70,9 @@ export interface TurnContext {
   /** The owner's Telegram user id, when known. */
   ownerId?: number;
 }
+
+/** The context's layers: its own, or the base of its home/. */
+export const layersIn = (ctx: { home: string; layers?: HomeLayers }): HomeLayers => ctx.layers ?? HomeLayers.base(ctx.home);
 
 export interface OwnerInfo {
   name?: string;
@@ -78,6 +87,8 @@ export interface OwnerInfo {
  */
 export interface PromptContext {
   home: string;
+  /** As TurnContext's. */
+  layers?: HomeLayers;
   chat: Chat;
   owner: OwnerInfo;
   /** This chat's policy (src/policy/). Absent in a bare call: the chat's default. */
