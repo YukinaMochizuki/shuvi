@@ -293,6 +293,9 @@ await until("the server to index the pack and fetch its set", () => {
 log("ok  the server indexed home/stickers/Cats.yaml and fetched the set (getStickerSet)");
 tg.updates.push(dmUpdate(8, "send me a sticker"));
 await until("the sticker to be sent", () => tg.sent("sendSticker").length >= 1);
+// `sticker` queues the row and answers at once; the server's sendSticker and that answer's way back to the
+// model (runner child → Claude Code → the fake's next request) then race. Wait for the answer, whichever is first.
+await until("sticker()'s result to reach the model", () => stickerResult !== "");
 check(stickerFound.includes("Cats/1") && stickerFound.includes("a cat waving"), `find_sticker offered Cats/1 (${stickerFound.slice(0, 120)})`);
 check(stickerResult.includes("Sent Cats/1."), `sticker() accepted it (${stickerResult})`);
 check(tg.sent("sendSticker")[0]!.sticker === "cats-f1", "the fake Bot API received sendSticker with the sticker's file_id");
