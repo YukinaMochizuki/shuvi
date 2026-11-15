@@ -14,7 +14,8 @@ import { createHash } from "node:crypto";
  *                       video with poster, probe, transcript and sheet, a quoted post), a Reddit post with
  *                       replies (`REDDIT_POST`), a long page cut at `pageMaxChars` with `full` and
  *                       `original` (`LONG_PAGE`), a short page read whole (`SHORT_PAGE`), raw JSON
- *                       (`RAW_JSON`); a `.pdf` is 415 unsupported_type; anything else 404. A speculative read
+ *                       (`RAW_JSON`), a known video's link (`videos`) as a `youtube` post whose video carries
+ *                       its probe and poster; a `.pdf` is 415 unsupported_type; anything else 404. A speculative read
  *                       leaves a video's transcript and sheet out, as porchkit does. Its files (images,
  *                       posters, the page's whole text and original) are served by GET /files/<key>.
  *
@@ -362,6 +363,31 @@ export class FakePorchkit {
     }
     if (url === RAW_JSON) {
       return Response.json({ kind: "raw", source: "generic", via: "http", canonical_url: url, content_type: "application/json", text: '{"example": true, "items": [1, 2, 3]}', truncated: false, offset: 0, notes: [], ...base });
+    }
+    const found = this.video(url);
+    if (found) {
+      // A video site's link: porchkit probes the video itself (sharing /media/probe's cache).
+      const { canon, v } = found;
+      const probe = { id: `youtube:${canon.slice(-11)}`, extractor: "youtube", title: v.title, description: v.description ?? null, uploader: "Example Channel", uploader_id: "@examplechannel", upload_date: "20260101", duration: v.duration, width: 1920, height: 1080, chapters: v.chapters ?? [], subtitles: ["en"], auto_captions: ["en"], formats: { video_heights: [144, 360, 480, 1080], audio: true } };
+      return Response.json({
+        kind: "post",
+        source: "youtube",
+        via: "yt-dlp",
+        canonical_url: canon,
+        id: `youtube:${canon.slice(-11)}`,
+        author: { name: "Example Channel", handle: "@examplechannel", url: null },
+        created_at: "2026-01-01T00:00:00Z",
+        text: v.description ?? null,
+        lang: "en",
+        metrics: {},
+        media: [{ type: "video", duration: v.duration, width: 1920, height: 1080, media_url: canon, poster: { key: this.keep("video-poster", TINY_JPEG, "image/jpeg"), width: 1280, height: 720 }, probe }],
+        quoted: null,
+        reply_to: null,
+        comments: [],
+        links: [],
+        notes: [],
+        ...base,
+      });
     }
     return Response.json({ error: "not_found", detail: "nothing at that URL" }, { status: 404 });
   }
