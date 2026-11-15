@@ -16,6 +16,15 @@
  *
  *   #first-change           a history diff shows the whole file: its first changed line is brought into view.
  *
+ * A boosted navigation swaps the body, not the document: everything here outlives the page it was made for. So the
+ * page-wide listeners (the leave guards, the viewport's resize) are added ONCE, below, and ask `live`, the editors on
+ * the page now; an editor a swap took away is destroyed (`prune`), so CodeMirror's own window and document listeners
+ * go with it. Only navigations ask before leaving: the page's own background requests (the watch, every 5 s) never.
+ *
+ * On a phone, the on-screen keyboard shrinks the page (html.ts `page`, `interactive-widget=resizes-content`; the
+ * pane's height in style.css is in `dvh`): the editor shrinks with it, and the line with the caret is brought back
+ * into view.
+ *
  * Colours are GitHub's dark diff colours, the same as ghdiff.ts's in style.css.
  *
  * It never changes the text by itself: no formatting, no trimming, no line-ending rewrite. What is saved is
@@ -118,6 +127,34 @@ function getChunksOf(a: string, b: string) {
   return getChunks(state)?.chunks ?? [];
 }
 
+/**
+ * An editor on the page: its view (or merge view) and the element it lives in; for an editable one, whether it holds
+ * unsaved changes, the form that saves them, and how to forget them ("Discard your unsaved changes?" said yes).
+ */
+interface Live {
+  el: Element;
+  destroy(): void;
+  view?: EditorView;
+  unsaved?: () => boolean;
+  discard?: () => void;
+  form?: HTMLFormElement | null;
+}
+const live = new Set<Live>();
+
+/** Destroy the editors a swap took off the page (their views' listeners on window and document go with them). */
+function prune(): void {
+  for (const l of live)
+    if (!document.contains(l.el)) {
+      l.destroy();
+      live.delete(l);
+    }
+}
+
+/** The editors on the page with unsaved changes, but for the one whose own form `elt` is (saving is not leaving). */
+function unsaved(elt?: Element): Live[] {
+  return [...live].filter((l) => l.unsaved?.() && document.contains(l.el) && !(elt && l.form && (elt === l.form || l.form.contains(elt))));
+}
+
 function upgradeEditor(area: HTMLTextAreaElement): void {
   const form = area.form;
   let saved = area.dataset.saved ?? area.value;
@@ -139,7 +176,8 @@ function upgradeEditor(area: HTMLTextAreaElement): void {
   area.hidden = true;
   // A file a profile inherits from Base: shown, not edited (home.ts `layerBar`).
   if (area.hasAttribute("data-readonly")) {
-    new EditorView({ parent: host, state: EditorState.create({ doc: area.value, extensions: base(area.dataset.lang, false) }) });
+    const ro = new EditorView({ parent: host, state: EditorState.create({ doc: area.value, extensions: base(area.dataset.lang, false) }) });
+    live.add({ el: host, view: ro, destroy: () => ro.destroy() });
     return;
   }
   const view = new EditorView({
@@ -162,27 +200,37 @@ function upgradeEditor(area: HTMLTextAreaElement): void {
   showDirty(view.state.doc.toString());
   if (area.autofocus) view.focus();
   // A save that went through: the form's answer replaces the page (htmx), and the new page's editor starts from
-  // the new saved text. Until then, leaving asks first.
-  const guard = (e: BeforeUnloadEvent) => {
-    if (area.value !== saved) e.preventDefault();
-  };
-  window.addEventListener("beforeunload", guard);
+  // the new saved text. Until then, leaving asks first (the guards below).
   form?.addEventListener("submit", () => {
     saved = area.value;
-    window.removeEventListener("beforeunload", guard);
   });
-  // htmx navigations (boosted links) are not unloads: ask on those too.
-  document.body.addEventListener("htmx:confirm", (e) => {
-    const ev = e as CustomEvent<{ elt: Element; issueRequest: () => void }>;
-    if (area.value === saved || ev.detail.elt === form || form?.contains(ev.detail.elt)) return;
-    if (!document.contains(area)) return;
-    e.preventDefault();
-    if (window.confirm("Discard your unsaved changes?")) {
-      saved = area.value;
-      ev.detail.issueRequest();
-    }
-  });
+  live.add({ el: host, view, destroy: () => view.destroy(), unsaved: () => area.value !== saved, discard: () => (saved = area.value), form });
 }
+
+// Leaving with unsaved changes asks first: a load or a close (beforeunload)...
+window.addEventListener("beforeunload", (e) => {
+  if (unsaved().length) e.preventDefault();
+});
+// ...and an htmx navigation (a boosted link or form), which is not an unload. htmx asks `htmx:confirm` before EVERY
+// request, the page's own too: an element with its own hx-get / hx-post (the watch's poll) is not leaving.
+document.addEventListener("htmx:confirm", (e) => {
+  const ev = e as CustomEvent<{ elt: Element; issueRequest: () => void }>;
+  if (ev.detail.elt.matches("[hx-get], [hx-post]")) return;
+  const dirty = unsaved(ev.detail.elt);
+  if (!dirty.length) return;
+  e.preventDefault();
+  if (window.confirm("Discard your unsaved changes?")) {
+    dirty.forEach((l) => l.discard?.());
+    ev.detail.issueRequest();
+  }
+});
+// The keyboard opening (or the window shrinking) keeps the caret's line in view in the editor being typed in.
+(window.visualViewport ?? window).addEventListener("resize", () => {
+  for (const l of live) {
+    const v = l.view;
+    if (v?.hasFocus) v.dispatch({ effects: EditorView.scrollIntoView(v.state.selection.main.head, { y: "nearest", yMargin: 24 }) });
+  }
+});
 
 function text(id: string | undefined): string {
   const tpl = id ? document.getElementById(id) : null;
@@ -209,9 +257,11 @@ function upgradeMerge(el: HTMLElement): void {
     ...(resolve ? { revertControls: "a-to-b" as const } : {}),
   });
   if (resolve) resolve.value = merge.b.state.doc.toString();
+  live.add({ el, view: merge.b, destroy: () => merge.destroy() });
 }
 
 function init(root: ParentNode): void {
+  prune();
   root.querySelectorAll<HTMLTextAreaElement>("textarea[data-editor]:not([data-up])").forEach((a) => {
     a.dataset.up = "1";
     upgradeEditor(a);
