@@ -95,9 +95,11 @@ Everything is in one SQLite file (WAL mode).
   target's; a target with none gets a copy of all of it), lossy (nothing is: the target's conversation
   resumes as it was left, or a fresh one opens with the last 10 messages) and clean start (nothing is, and the
   target's own conversation is dropped: a brand-new one opens with the next turn's input only, not even the
-  last messages; her persona, rules, memory and notes are in the system prompt as always, and `read_chat`
-  reaches the history). The same clean opening without changing model is the console's "Start clean" (`/new`
-  whose next turn opens with its input only). A LANE is only where a
+  last messages; her persona, rules, memory and notes are in the system prompt as always, but she has no
+  `search_chats` / `read_chat` for as long as that conversation lasts: a CLEAN conversation, `chats.clean_since`,
+  which goes where the conversation goes: parked and resumed with it, kept when a lost session restarts it, and
+  then shown only what was said since it began). The same clean start without changing model is `/newclean`
+  and the console's "Start clean" (`/new` whose next turn opens with its input only, in a clean conversation). A LANE is only where a
   conversation is stored, and so which converter carries it: a Claude login's session files, or the
   OpenAI-compatible tables; within one Claude login a copy is the session itself, forked. A chat that
   follows the default moves lossy to the new default's conversation at its next turn. A switch asked for
@@ -253,7 +255,8 @@ to hold it back.
   cheap, since the assistant can `pass()`.
 - **Context**: a turn opens with up to 10 of the messages past the cursor that the assistant has not
   seen, each with its sender, time and reply target, plus the count of unread messages since the last
-  trigger. Anything older is reached with `read_chat`.
+  trigger. Anything older is reached with `read_chat`. In a clean conversation (`/newclean`, §5) there is no
+  `read_chat`, and none of those messages from before it began is shown.
 
 ## 8. Policy and permissions
 
@@ -518,6 +521,8 @@ stickers:
 - **Commands that act on the current chat** are sent in that chat, and only the owner's sender id counts:
   - `/new`: start a fresh conversation context, forgetting every model's conversation of the chat. `chat_events` and the cursor are kept;
     the new conversation opens with the last 10 messages.
+  - `/newclean`: as `/new`, but a clean conversation (above): it opens with its new messages only, and she cannot
+    look back through what was said (no `search_chats` / `read_chat`) for as long as it lasts.
   - `/stop`: stop the turn running in this chat.
   - `/model`, `/profile`: the control bot sends the owner the card for this chat (above), so nobody else in a
     group sees it.

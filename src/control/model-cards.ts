@@ -337,7 +337,7 @@ export function modeLines(p: SwitchPreview, now = Date.now()): { lossless: strin
     default:
       lossy = exhausted(p.lossy, "lossy preview");
   }
-  const clean = `starts ${x} fresh, with no messages${
+  const clean = `starts ${x} fresh, with no messages and no looking back through the chat${
     p.clean.drops ? (p.clean.since ? ` (its conversation from ${relativeTime(p.clean.since, now)} is dropped)` : ` (its current conversation is dropped)`) : ""
   }`;
   return { lossless, lossy, clean, running: p.running ? `turn ${p.running} is running and will be stopped` : null };

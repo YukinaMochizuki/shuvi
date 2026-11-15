@@ -53,6 +53,15 @@ export const chats = sqliteTable("chats", {
   /** Context occupancy the last turn ended at, handed back to the driver on the next turn. */
   contextTokens: integer("context_tokens"),
   /**
+   * Set: the active conversation is a CLEAN one (`/newclean`, the console's Start clean, a clean switch;
+   * agent/switch.ts), which began after this event seq. Its turns get no way to look back through what was said
+   * (the retrieval capability is left out, agent/turn.ts), and a fresh opening of it (a lost session restarted)
+   * is shown only what was said after this seq. It belongs to the conversation, not the chat: parked with it
+   * (`chat_conversations.clean_since`), back with it, kept when a lost session restarts it; null for any other
+   * conversation (`/new`, another model's).
+   */
+  cleanSince: integer("clean_since"),
+  /**
    * The profile the chat uses (home/profiles/<name>/, capabilities/memory/layers.ts), from its next turn; null =
    * none, the base. One that no longer exists is run on the base (agent/turn.ts `chatLayers`).
    */
@@ -130,6 +139,8 @@ export const chatConversations = sqliteTable(
     model: text("model").notNull(),
     backendSessionId: text("backend_session_id").notNull(),
     contextTokens: integer("context_tokens"),
+    /** As `chats.clean_since`, for this parked conversation: back on `chats` when it is resumed. */
+    cleanSince: integer("clean_since"),
     parkedAt: text("parked_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
   (t) => [primaryKey({ columns: [t.chatId, t.model] })],

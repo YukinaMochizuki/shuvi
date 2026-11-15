@@ -9,7 +9,8 @@ import {
   capabilityOwnerOnlyWhen,
   capabilityPerception,
   capabilityTools,
-  chatCapabilities,
+  looksBack,
+  turnCapabilities,
   type EnabledCapability,
   type OwnerInfo,
 } from "../capabilities/types.ts";
@@ -124,6 +125,11 @@ export function isLostSession(e: unknown): boolean {
  * (capabilities/types.ts `chatCapabilities`), and the persona and memory layers it allows (prompt.ts). A
  * chat the policy no longer lists gets no turn: it closes at once, as `empty`.
  *
+ * A CLEAN CONVERSATION (`chats.clean_since`: `/newclean`, a clean start; agent/switch.ts) sees nothing said
+ * before it began: a turn's unseen messages from before then (in a group, the chatter it would open with as
+ * context; anywhere, a message nobody answered yet) are left out and count as seen, its history is bounded
+ * the same way, and its capabilities leave out those that look back (`turnCapabilities`, `looksBack`).
+ *
  * IN A GROUP (design §7) most messages are recorded without waking anyone (agent/triggers.ts), so a turn
  * finds many unseen ones past the cursor. It opens with the messages that woke it, preceded by up to
  * `GROUP_CONTEXT` earlier unseen ones, and a line saying how many older ones it does not show; all of
@@ -140,8 +146,8 @@ export function isLostSession(e: unknown): boolean {
  *
  * A LOST conversation (`isLostSession` recognises the error) is not a failure of the turn: the
  * chat's conversation is reset and the same turn runs again at once, once, as a fresh conversation that
- * opens with the last `HISTORY_ON_NEW` messages (as after `/new`). It costs no failure attempt; the owner
- * is told through the control bot.
+ * opens with the last `HISTORY_ON_NEW` messages (as after `/new`; a clean one: the last said since it began).
+ * It costs no failure attempt; the owner is told through the control bot.
  *
  * The SWITCHES of the chat's model since the last turn (agent/switch.ts) are recorded by the first turn after
  * them: a transcript note each, saying from what to what and how, and, when one moved the chat to another
@@ -466,10 +472,11 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     finishTurn(db, turnId, { status: "done" });
     return "empty";
   }
-  const capabilities = chatCapabilities(deps.capabilities, chatPolicy.tools);
+  const capabilities = turnCapabilities(deps.capabilities, chatPolicy.tools, chat);
   const group = chat.kind === "group";
 
-  const unseen = untilHeld(triggersAfter(db, chat.id, turn.fromSeq), deps.capabilities, Date.now(), turn.toSeq);
+  // A clean conversation sees nothing said before it began (the header): those count as seen.
+  const unseen = untilHeld(triggersAfter(db, chat.id, turn.fromSeq), deps.capabilities, Date.now(), turn.toSeq).filter((e) => chat.cleanSince == null || e.seq > chat.cleanSince);
   const perceive: Perceive = (e) => capabilityPerception(capabilities, e, { db });
   // A fresh conversation (the first turn, or after `/new`) opens with the chat's last few exchanges, so
   // starting over forgets the model's context, not what was just being talked about.
@@ -495,7 +502,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   // Everything said before the first message being answered, the assistant's own replies included
   // (those come after the cursor, so the cursor is not the bound).
   // After a clean start (agent/switch.ts), none: the new conversation opens with its input only.
-  const history = chat.backendSessionId || opensClean(db, chat, switches) ? [] : recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW);
+  // A clean conversation opened afresh again (a lost one restarted) is shown only what was said since it began.
+  const history = chat.backendSessionId || opensClean(db, chat, switches) ? [] : recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW, chat.cleanSince);
   const s: TurnState = { chat, turnId, passed: false, stopping: deps.signal?.aborted ?? false, n: 0, fromSeq: input[context]!.seq - 1, toSeq: input.at(-1)!.seq };
   if (group) {
     s.wokenBy = turn.triggerSeq ?? turn.toSeq;
@@ -505,7 +513,13 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   // In a group the input names the messages that called her (the first that woke the turn, and any after it).
   const called = group ? input.slice(context).filter((e) => isTrigger(db, e, chatPolicy, deps.bot)).map((e) => e.seq) : [];
   if (group && !called.length) called.push(s.wokenBy!);
-  const renderOpts: InputOptions = { ...(s.markOwner !== undefined ? { owner: s.markOwner } : {}), ...(s.markOperators ? { operators: s.markOperators } : {}), ...(unread ? { unread } : {}), ...(context ? { context } : {}), ...(called.length ? { called } : {}) };
+  const renderOpts: InputOptions = {
+    ...(s.markOwner !== undefined ? { owner: s.markOwner } : {}),
+    ...(s.markOperators ? { operators: s.markOperators } : {}),
+    ...(unread ? { unread, ...(looksBack(capabilities) ? {} : { unreadUnreachable: true }) } : {}),
+    ...(context ? { context } : {}),
+    ...(called.length ? { called } : {}),
+  };
   // The input opens with the "It is now…" line after a gap, and always in a fresh conversation.
   const withNote = (fresh: boolean): InputOptions => {
     const t = openingTimeNote(db, chat.id, input[0]!, turn.startedAt, deps.timeZone, fresh);
@@ -615,13 +629,13 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
           key: `lost-session:${turnId}`,
           turnId,
           topic: `lost-session:${chat.id}`,
-          text: `The conversation of ${chatLabel(chat)} was lost (${chat.backendSessionId}); turn ${turnId} restarted it fresh with the last ${HISTORY_ON_NEW} messages.`,
+          text: `The conversation of ${chatLabel(chat)} was lost (${chat.backendSessionId}); turn ${turnId} restarted it fresh with the last ${HISTORY_ON_NEW} messages${chat.cleanSince != null ? " said since it began (a clean conversation)" : ""}.`,
         });
         buf = "";
         lastThinking = false;
         rec.discardOpen();
-        rec.note(`The conversation ${chat.backendSessionId} was lost; the turn started over as a fresh conversation, opening with the last ${HISTORY_ON_NEW} messages.`);
-        const lastSeen = recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW);
+        rec.note(`The conversation ${chat.backendSessionId} was lost; the turn started over as a fresh conversation, opening with the last ${HISTORY_ON_NEW} messages${chat.cleanSince != null ? " said since it began (a clean conversation)" : ""}.`);
+        const lastSeen = recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW, chat.cleanSince);
         const restart = withNote(true);
         result = await fresh(lastSeen.length ? renderWithHistory(lastSeen, input, deps.timeZone, perceive, restart) : renderTurnInput(input, deps.timeZone, perceive, restart));
       }

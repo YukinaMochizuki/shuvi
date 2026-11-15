@@ -9,6 +9,8 @@ import { sendPass } from "../src/server/sender.ts";
 import { SPAWN_GRACE_MS, wakerPass } from "../src/server/waker.ts";
 import { enqueueOutbound, getChat, getEvent, pendingOutbound, type BotMessagePayload } from "../src/store/events.ts";
 import { claimTurn, finishTurn, getTurn, MAX_ATTEMPTS, RETRY_BASE_MS, runningTurns, saveSession, setTurnPid } from "../src/store/turns.ts";
+import { controlMessagesOf } from "../src/store/control.ts";
+import { addModel, addProvider } from "../src/store/models.ts";
 import { dmUpdate, FakeTelegram, memDb, OWNER, ownerChatId, ownerSays } from "./helpers.ts";
 
 let tg: FakeTelegram | null = null;
@@ -136,6 +138,48 @@ describe("commands", () => {
     expect(claimTurn(db, chatId)).not.toBeNull(); // "B" gets its own turn
   });
 
+  test("/newclean stops the running turn, forgets every conversation and starts a clean one after the command, with 👌", () => {
+    const db = memDb();
+    addProvider(db, { name: "vllm", kind: "openai-compat", baseUrl: "http://127.0.0.1:9/v1" });
+    addModel(db, { provider: "vllm", model: "qwen", contextWindow: 32_000, isDefault: true });
+    ownerSays(db, "long task");
+    const chatId = ownerChatId(db);
+    saveSession(db, chatId, "sess-1");
+    const t = claimTurn(db, chatId)!;
+    setTurnPid(db, t.id, 31337);
+    recordBatch(db, [dmUpdate(903, "/newclean")], OWNER);
+    const cmdSeq = (db.$client.query("select seq from chat_events where kind = 'command'").get() as { seq: number }).seq;
+    ownerSays(db, "sent right after");
+    const killed: number[] = [];
+    commandPass(db, (pid) => killed.push(pid));
+    expect(killed).toEqual([31337]);
+    const chat = getChat(db, chatId)!;
+    expect(chat.backendSessionId).toBeNull();
+    expect(chat.cleanSince).toBe(cmdSeq);
+    expect(db.$client.query("select mode, from_model, to_model from model_switches").all()).toEqual([{ mode: "clean", from_model: "vllm/qwen", to_model: "vllm/qwen" }]);
+    expect(pendingOutbound(db).map((e) => [e.kind, (e.payload as { emoji?: string }).emoji])).toEqual([["bot_reaction", "👌"]]);
+    expect(controlMessagesOf(db, "alert")).toEqual([]);
+    expect(commandPass(db, () => {})).toBe(0);
+  });
+
+  test("/newclean with no model to start clean on: the turn is still stopped, nothing else changes, the owner is told why", () => {
+    const db = memDb();
+    ownerSays(db, "hi");
+    const chatId = ownerChatId(db);
+    saveSession(db, chatId, "sess-1");
+    recordBatch(db, [dmUpdate(904, "/newclean")], OWNER);
+    commandPass(db, () => {});
+    const chat = getChat(db, chatId)!;
+    expect(chat.backendSessionId).toBe("sess-1");
+    expect(chat.cleanSince).toBeNull();
+    expect(pendingOutbound(db).map((e) => e.kind)).toEqual(["bot_reaction"]);
+    const alerts = controlMessagesOf(db, "alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.text).toContain("/newclean");
+    expect(alerts[0]!.text).toContain("no model");
+    expect(commandPass(db, () => {})).toBe(0);
+  });
+
   test("/new forgets the model's conversation but keeps the chat's events and cursor", () => {
     const db = memDb();
     ownerSays(db, "hi");
@@ -154,7 +198,7 @@ describe("commands", () => {
     expect(await registerCommands(api, OWNER, MAIN_COMMANDS, "main bot")).toBe(true);
     expect(await registerCommands(api, OWNER, CONTROL_COMMANDS, "control bot")).toBe(true);
     const scope = { type: "chat", chat_id: OWNER };
-    const main = { scope, commands: [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }, { command: "model", description: expect.stringContaining("control bot") }, { command: "profile", description: expect.stringContaining("control bot") }] };
+    const main = { scope, commands: [{ command: "new", description: expect.any(String) }, { command: "newclean", description: expect.stringContaining("fresh") }, { command: "stop", description: expect.any(String) }, { command: "model", description: expect.stringContaining("control bot") }, { command: "profile", description: expect.stringContaining("control bot") }] };
     const control = {
       scope,
       commands: [
@@ -184,7 +228,7 @@ describe("commands", () => {
     const C = -1000000000003;
     const policyOf = (...groups: number[]): Policy => ({ chats: { dm: DM_DEFAULT, ...Object.fromEntries(groups.map((g) => [String(g), GROUP_DEFAULTS])) }, unknownChat: "ignore" });
     const memberScope = (g: number) => ({ type: "chat_member", chat_id: g, user_id: OWNER });
-    const commands = [{ command: "new", description: expect.any(String) }, { command: "stop", description: expect.any(String) }, { command: "model", description: expect.any(String) }, { command: "profile", description: expect.any(String) }];
+    const commands = [{ command: "new", description: expect.any(String) }, { command: "newclean", description: expect.any(String) }, { command: "stop", description: expect.any(String) }, { command: "model", description: expect.any(String) }, { command: "profile", description: expect.any(String) }];
 
     test("each listed group gets the commands for the owner only; the DM is not a group", async () => {
       const api = fakeApi();

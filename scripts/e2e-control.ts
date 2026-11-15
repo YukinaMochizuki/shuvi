@@ -208,7 +208,7 @@ const ownerScope = JSON.stringify({ type: "chat", chat_id: OWNER });
 const groupScope = (g: number) => JSON.stringify({ type: "chat_member", chat_id: g, user_id: OWNER });
 await until("the group menu", () => menu(tg).length >= 2);
 check(
-  [...menu(tg)].sort().join("|") === [`${ownerScope} new,stop,model,profile`, `${groupScope(-1009999999999)} new,stop,model,profile`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn,model,models,profile,provider`,
+  [...menu(tg)].sort().join("|") === [`${ownerScope} new,newclean,stop,model,profile`, `${groupScope(-1009999999999)} new,newclean,stop,model,profile`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn,model,models,profile,provider`,
   `each bot registered its commands for the owner's chat, and the main bot for the owner in the listed group (${menu(tg)} / ${menu(control)})`,
 );
 
@@ -226,7 +226,7 @@ check(detail!.includes("<b>2. Fake Hiking Club</b>") && detail!.includes("<b>Off
 writeFileSync(join(dataDir, "home", "policy.yaml"), `chats:\n  "-1008888888888":\n    title: Fake Chess Club\n`);
 await until("the group menus to follow the policy change", () => menu(tg).length >= 3 && tg.sent("deleteMyCommands").length >= 1);
 await Bun.sleep(1500); // a few more policy passes: nothing changed, so no more calls
-check(menu(tg).length === 3 && menu(tg)[2] === `${groupScope(-1008888888888)} new,stop,model,profile`, `a group added to policy gets the owner's menu (${menu(tg)})`);
+check(menu(tg).length === 3 && menu(tg)[2] === `${groupScope(-1008888888888)} new,newclean,stop,model,profile`, `a group added to policy gets the owner's menu (${menu(tg)})`);
 check(tg.sent("deleteMyCommands").map((b) => JSON.stringify(b.scope)).join("|") === groupScope(-1009999999999), `a group removed from policy has its menu cleared (${JSON.stringify(tg.sent("deleteMyCommands"))})`);
 
 // ---- 2. a forced failure, retried to the cap ---------------------------------------------------------
@@ -370,7 +370,7 @@ pressButton(buttonOf(switchCard, "claude/opus"));
 await until("the mode step", () => cardNow("Model for chat 1")!.text.startsWith("Switch chat 1"));
 switchCard = cardNow("Model for chat 1")!;
 check(
-  /^Switch chat 1 \(tg 1001\) to claude\/opus:\nLossless: copies the whole conversation \(\d+ messages\) to claude\/opus\nLossy: claude\/opus starts fresh with the last 10 messages\nClean start: starts claude\/opus fresh, with no messages\nturn \d+ is running and will be stopped$/.test(switchCard.text) && switchCard.text.endsWith(`turn ${stalledTurn} is running and will be stopped`),
+  /^Switch chat 1 \(tg 1001\) to claude\/opus:\nLossless: copies the whole conversation \(\d+ messages\) to claude\/opus\nLossy: claude\/opus starts fresh with the last 10 messages\nClean start: starts claude\/opus fresh, with no messages and no looking back through the chat\nturn \d+ is running and will be stopped$/.test(switchCard.text) && switchCard.text.endsWith(`turn ${stalledTurn} is running and will be stopped`),
   `the mode step says what each mode does here, and that the running turn will be stopped (${JSON.stringify(switchCard.text)})`,
 );
 const requestsBefore = turnModels.length;

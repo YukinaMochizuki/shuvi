@@ -149,7 +149,7 @@ export function chatSettingsWrite(deps: ChatSettingsWriteDeps, chatId: number, v
       }
       return back({
         section: "conversation",
-        flash: { tone: "ok", text: `${stopped ? `Stopped turn ${stopped.id}; ` : ""}${label} starts clean: her next turn here opens with its new messages only, no earlier ones.` },
+        flash: { tone: "ok", text: `${stopped ? `Stopped turn ${stopped.id}; ` : ""}${label} starts clean: her next turn here opens with its new messages only, no earlier ones, and she cannot look back through the chat's history while this conversation lasts.` },
       });
     }
     case "policy":

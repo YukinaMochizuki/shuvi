@@ -131,7 +131,8 @@ export interface ChatSettingsView {
   /** Drawn once per page load: a switch posted twice from it (a double submit) is asked for once (model-cards.ts `consoleSwitch`). */
   pageKey: string;
   profile: { current: string | null; gone: boolean; rows: ProfileRow[]; flash?: Flash };
-  conversation: { began: string | null; how?: string; segments: number; contextTokens: number | null; running?: RunningTurn; confirmNew: boolean; confirmClean?: boolean; flash?: Flash };
+  /** `clean`: the conversation is a clean one (`chats.clean_since`): she has no search_chats / read_chat in it. */
+  conversation: { began: string | null; how?: string; segments: number; contextTokens: number | null; clean?: boolean; running?: RunningTurn; confirmNew: boolean; confirmClean?: boolean; flash?: Flash };
   permissions: PermissionsView;
   /** Loaded for the Automation & machine page only. */
   schedules?: SchedulesView;
@@ -216,8 +217,10 @@ function conversationSection(v: ChatSettingsView): Raw {
   const facts = c.began
     ? html`<p class="xline">The current conversation began <b>${when(c.began, v.timeZone)}</b>${c.how ? ` (${c.how})` : ""} · ${plural(c.segments, "segment")}${
         c.contextTokens ? html` · <b>${short(c.contextTokens)}</b> tokens of context` : ""
-      }</p>`
-    : html`<p class="xline">No conversation yet: her next turn here starts one.</p>`;
+      }${c.clean ? html` · <b>clean</b>: she cannot look back through the chat's history in it` : ""}</p>`
+    : c.clean
+      ? html`<p class="xline">Started clean: her next turn here opens a <b>clean</b> conversation, with its new messages only and no looking back through the chat's history.</p>`
+      : html`<p class="xline">No conversation yet: her next turn here starts one.</p>`;
   const stop = c.running
     ? html`<div class="crow running"><div class="stext"><b>${dot("running")}Turn ${c.running.id} is running <span class="faint num">${secs(Math.max(0, v.now - Date.parse(c.running.startedAt)))}</span></b> <span>As <span class="mono">/stop</span> does: she stops now; what she already sent stays.</span></div>
 <form method="post" action="${base(v)}/stop">${csrfField(v)}<input type="hidden" name="turn" value="${c.running.id}"><button type="submit" class="btn">Stop the turn</button></form></div>`
@@ -232,9 +235,9 @@ function conversationSection(v: ChatSettingsView): Raw {
   const clean = c.confirmClean
     ? html`<div class="confirm" role="alertdialog" aria-label="Start clean"><p><b>Start clean?</b> Every conversation of this chat is forgotten, on every model; her next turn starts fresh with its new messages only, not the chat's last 10.${
         c.running ? ` Turn ${c.running.id} is running and will be stopped.` : ""
-      } Her files and notes stay, and she can still read the chat's history.</p>
+      } Her files and notes stay, but for as long as this conversation lasts she cannot look back through the chat's history (no search_chats, no read_chat). As <span class="mono">/newclean</span> does.</p>
 <form method="post" action="${base(v)}/clean">${csrfField(v)}<button type="submit" class="btn danger solid">Start clean</button> <a class="btn ghost" href="${base(v)}#conversation">Cancel</a></form></div>`
-    : html`<div class="crow"><div class="stext"><b>Start clean</b> <span>As New conversation, but her next turn opens with no earlier messages at all, only the new ones. Her files and notes stay.</span></div><a class="btn" href="${href(base(v), { confirm: "clean" })}#conversation">Start clean</a></div>`;
+    : html`<div class="crow"><div class="stext"><b>Start clean</b> <span>As <span class="mono">/newclean</span> does: a new conversation, but her next turn opens with no earlier messages at all, only the new ones, and she cannot look back through the chat's history while it lasts. Her files and notes stay.</span></div><a class="btn" href="${href(base(v), { confirm: "clean" })}#conversation">Start clean</a></div>`;
   return html`<section class="cs" id="conversation"><div class="cshd"><h2>Conversation</h2> <a class="right" href="/chats/${v.chat.id}">The chat's log →</a></div>${flashLine(c.flash)}${facts}${stop}${fresh}${clean}</section>`;
 }
 

@@ -223,13 +223,14 @@ const text = (t: string): PromptPart => ({ type: "text", text: t });
 
 /**
  * A group turn's note on what it does not show: the unread messages older than the ones it opens with
- * (agent/turn.ts `GROUP_CONTEXT`).
+ * (agent/turn.ts `GROUP_CONTEXT`). `reachable`: whether she has read_chat to read them (not in a clean
+ * conversation, nor where the chat's policy leaves retrieval out).
  */
-export function unreadNote(n: number): string {
-  return `(${n} earlier message${n === 1 ? "" : "s"} since your last turn ${n === 1 ? "is" : "are"} not shown here; read_chat reaches ${n === 1 ? "it" : "them"}.)`;
+export function unreadNote(n: number, reachable = true): string {
+  return `(${n} earlier message${n === 1 ? "" : "s"} since your last turn ${n === 1 ? "is" : "are"} not shown here${reachable ? `; read_chat reaches ${n === 1 ? "it" : "them"}` : ""}.)`;
 }
 
-const note = (unread: number | undefined): PromptPart[] => (unread ? [text(unreadNote(unread))] : []);
+const note = (opts: InputOptions): PromptPart[] => (opts.unread ? [text(unreadNote(opts.unread, !opts.unreadUnreachable))] : []);
 
 /** What a turn's input opens with: the time line, and in a group `unread` and `context` (see `InputOptions`). */
 export interface InputOptions extends RenderOptions {
@@ -239,6 +240,8 @@ export interface InputOptions extends RenderOptions {
   retry?: boolean;
   /** How many older unread messages are not shown. */
   unread?: number;
+  /** The turn has no read_chat to read those with: the note does not offer it. */
+  unreadUnreachable?: boolean;
   /** How many of the first events are context from before she was called (they carry no authority). */
   context?: number;
   /** In a group: the events that called her (by seq), named in a heading before the first of them. */
@@ -261,9 +264,9 @@ export function calledHeading(seqs: number[]): string {
 
 function inputParts(events: ChatEvent[], timeZone: string, perceive: Perceive, opts: InputOptions): PromptPart[] {
   const n = opts.context ?? 0;
-  if (!opts.called?.length) return [...note(opts.unread), ...eventParts(events, timeZone, perceive, opts)];
+  if (!opts.called?.length) return [...note(opts), ...eventParts(events, timeZone, perceive, opts)];
   return [
-    ...note(opts.unread),
+    ...note(opts),
     ...(n ? [text(CONTEXT_HEADING), ...eventParts(events.slice(0, n), timeZone, perceive, opts)] : []),
     text(calledHeading(opts.called)),
     ...eventParts(events.slice(n), timeZone, perceive, opts),

@@ -185,6 +185,7 @@ export function loadChatSettings(
       ...(how ? { how } : {}),
       segments,
       contextTokens: chat.backendSessionId ? chat.contextTokens : null,
+      ...(chat.cleanSince != null ? { clean: true } : {}),
       ...(running ? { running: { id: running.id, startedAt: running.startedAt } } : {}),
       confirmNew: q.get("confirm") === "new",
       confirmClean: q.get("confirm") === "clean",

@@ -208,8 +208,9 @@ Every button comes back to the tab it is on, with its result shown once.
   runs) does what `/stop` does. **New conversation** does what `/new` does, after asking: a running turn is
   stopped, every model's conversation of the chat is forgotten, and her next turn opens with the chat's last 10
   messages. **Start clean** is the same, after asking too, but her next turn opens with its new messages only, not
-  the last 10: the opening of a model switch's Clean start, for the model the chat is on (picking that model in
-  the list does nothing). Her files and notes stay either way, and she can still read the chat's history.
+  the last 10, and she has no `search_chats` / `read_chat` for as long as that conversation lasts: what `/newclean`
+  does, and a model switch's Clean start does, for the model the chat is on (picking that model in the list does
+  nothing). The section says when the current conversation is such a clean one. Her files and notes stay either way.
 - **Permissions**: the chat's entry in `home/policy.yaml` as a form: what wakes her (every message, or mentions,
   replies and follow-ups within some minutes), what she sees (the private persona and memory are offered only for
   your DM, as the policy parser requires), each capability on or off with its parameters (a workstream's
