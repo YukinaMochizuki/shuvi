@@ -1866,6 +1866,193 @@ html:not(.js) .bmenu,
 .bmenu .menu .dm-del:focus-visible {
   color: var(--failed);
 }
+/* A turn divider's "⋯" (pages.ts `turnMenu`): in the line, after the label, faint until the divider is hovered.
+   Its one item is a link, so it works without script and shows then (and on a touch screen: no long press here). */
+.divider .tmenu {
+  position: relative;
+  top: auto;
+  right: auto;
+  flex: none;
+}
+.divider:hover .tmenu {
+  opacity: 1;
+}
+html:not(.js) .divider .tmenu {
+  display: block;
+}
+html:not(.js) .divider .tmenu:not([open]) {
+  opacity: 0.6;
+}
+.tmenu .menu {
+  min-width: 150px;
+}
+.divider .tmenu .menu a {
+  color: var(--ink);
+}
+/* An open divider menu over the rows after it. */
+.lb:has(> .divider .tmenu[open]),
+.divider:has(.tmenu[open]) {
+  position: relative;
+  z-index: 6;
+}
+.bmenu .menu a {
+  padding: var(--s1) var(--s2);
+  border-radius: 6px;
+  color: var(--ink);
+  font-size: var(--t-ui);
+  white-space: nowrap;
+}
+.bmenu .menu a:hover,
+.bmenu .menu a:focus-visible {
+  background: var(--line);
+  color: var(--failed);
+  text-decoration: none;
+}
+@media (hover: none) and (pointer: coarse) {
+  .divider .tmenu:not([open]) {
+    opacity: 0.8;
+  }
+}
+/* The turn page's "Delete this turn": a quiet red button at the end of the title row. */
+.head .title .tdelbtn {
+  align-self: center;
+  height: 24px;
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.head .title .tdelbtn:hover {
+  background: rgb(255 138 139 / 0.12);
+}
+/* The confirmation of deleting a turn (pages.ts `turnDeleteConfirm`): a Confirm listing what goes. In a chat's log it
+   opens under the divider (console.js), on the turn page under the header, and is a page of its own without script. */
+.tconfirm {
+  margin-top: var(--s4);
+  max-width: 760px;
+  border: 1px solid rgb(255 138 139 / 0.25);
+}
+.convo .tconfirm,
+.trace .tconfirm {
+  margin: var(--s1) 0 var(--s2);
+}
+.tconfirm .q {
+  font-size: var(--t-ui);
+}
+.tconfirm .effect.faint {
+  color: var(--ink-faint);
+  font-size: var(--t-meta);
+}
+.tgone {
+  margin-top: var(--s3);
+  padding: var(--s2) var(--s3);
+  border-radius: 6px;
+  background: rgb(0 0 0 / 0.18);
+}
+.tgone h3 {
+  margin: var(--s2) 0 var(--s1);
+  font-size: var(--t-meta);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.tgone h3:first-child {
+  margin-top: 0;
+}
+.tgone h3 .meta {
+  margin-left: var(--s2);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-faint);
+}
+.glist {
+  margin: 0 0 var(--s2);
+  padding: 0;
+  list-style: none;
+}
+.glist li {
+  display: grid;
+  grid-template-columns: minmax(0, 120px) minmax(0, 1fr) auto;
+  gap: var(--s3);
+  padding: 2px 0;
+  align-items: baseline;
+}
+.glist .gwho {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-dim);
+  font-weight: 500;
+}
+.glist li.you .gwho {
+  color: var(--lost);
+}
+.glist li.her .gwho {
+  color: var(--accent);
+}
+.glist .gwhat {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+}
+.glist .gmeta {
+  color: var(--ink-faint);
+  font-size: var(--t-meta);
+  white-space: nowrap;
+}
+.glist li.gmore {
+  display: block;
+  color: var(--ink-faint);
+  font-size: var(--t-meta);
+}
+.grecord {
+  margin: 0 0 var(--s1);
+  color: var(--ink-dim);
+  line-height: 1.6;
+}
+.grecord b {
+  color: var(--ink);
+  font-weight: 500;
+}
+.tconfirm .cbtns .faint {
+  color: var(--ink-faint);
+  font-size: var(--t-meta);
+}
+@media (max-width: 760px) {
+  .glist li {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0 var(--s2);
+  }
+  .glist .gwhat {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .tconfirm .cbtns .btn {
+    flex: 1;
+    justify-content: center;
+    height: 36px;
+  }
+  .tconfirm .cbtns .faint {
+    flex-basis: 100%;
+    text-align: center;
+  }
+}
+/* A turn deleted, waiting out its undo (console.js): its divider and rows leave the page with its messages. */
+.divider.gone,
+.tconfirm.gone {
+  display: none;
+}
+/* The page of a turn that is not there (pages.ts `turnGonePage`): deleted, or never was. */
+.tdeleted {
+  margin-top: var(--s5);
+  color: var(--ink-dim);
+}
+
 /* Deleted, waiting for the undo to run out (console.js): gone from the page, its trace row too (no gap). */
 .pickable.gone,
 .pill.gone,

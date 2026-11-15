@@ -16,7 +16,7 @@ import type {
 import { OUTBOUND_KINDS, TRIGGER_KINDS, type TranscriptPart } from "../store/schema.ts";
 import { getPromptText, getTranscript, previousPrompt, stepsOf, transcriptAbsence, type PromptText, type Step, type Transcript } from "../store/transcripts.ts";
 import type { Turn } from "../store/turns.ts";
-import { DELETABLE_KINDS } from "../store/deletions.ts";
+import { DELETABLE_KINDS, DELETE_UNDO_MS, turnDeletionPlan, turnMessageCount, type TurnDeletionEvent, type TurnDeletionPlan } from "../store/deletions.ts";
 import { listModels } from "../store/models.ts";
 import { diffLines, hunks } from "./diff.ts";
 import { ago, badge, block, clock, dot, empty, excerpt, href, html, lb, livePart, markdown, page, raw, resetBlocks, scopedBlocks, secs, short, size, tokens, usd, wall, when, type LivePart, type Raw } from "./html.ts";
@@ -227,6 +227,182 @@ function deleteBar(ctx: PageContext): Raw {
   return html`<noscript><form id="del" class="nsdel" method="post" action="/messages/delete"><input type="hidden" name="csrf" value="${ctx.csrf}"><input type="hidden" name="back" value="${ctx.here ?? "/turns"}"><button type="submit" class="btn danger">Delete the ticked messages</button></form></noscript>
 <div class="delui" data-csrf="${ctx.csrf}"><div class="selpill" role="toolbar" hidden aria-label="Selected messages"><span class="pn" aria-live="polite"></span><span class="psep" aria-hidden="true"></span><button type="button" class="pdel" title="Delete (Del)">Delete</button><button type="button" class="px" aria-label="Clear the selection" title="Clear (Esc)">✕</button><span class="pwhy" role="alert"></span></div>
 <div class="snack" role="status" hidden><span class="swhat"></span><button type="button" class="sundo">Undo</button><span class="sline" aria-hidden="true"></span></div></div>`;
+}
+
+// ---- deleting a whole turn -------------------------------------------------------------------------------
+
+/**
+ * Where deleting a turn starts: its confirmation (`/turns/<id>/delete`, a page of its own, which works without
+ * script; console.js opens the same panel in place). `back`: the page to come back to.
+ */
+export function turnDeleteHref(turnId: number, back: string | undefined): string {
+  return href(`/turns/${turnId}/delete`, back ? { back } : {});
+}
+
+/**
+ * A turn divider's "⋯" in a chat's log: its menu, "Delete turn…" (a link to the confirmation). With script it fades
+ * in on hover, as a bubble's does; without script it shows faintly, as a link works without script; on a touch
+ * screen it shows too (a divider has no long press). Not tied to the session (no CSRF token in it): the live stream
+ * draws it for every session alike, and the confirmation page carries its own token.
+ */
+function turnMenu(ctx: PageContext, turnId: number): Raw {
+  return html`<details class="bmenu tmenu"><summary title="More" aria-label="More for turn ${turnId}">⋯</summary><div class="menu"><a class="dm-tdel" hx-boost="false" href="${turnDeleteHref(turnId, ctx.here)}" data-turn="${turnId}">Delete turn…</a></div></details>`;
+}
+
+/** One line of the confirmation's lists: who, what it says, when, its number. */
+function goneLine(e: TurnDeletionEvent, tz: string, me: number | undefined): Raw {
+  const p = parsePayload(e.payload) ?? {};
+  let who = "";
+  let what = "";
+  let side = "other";
+  switch (e.kind) {
+    case "message": {
+      const m = p as unknown as MessagePayload;
+      side = me !== undefined && m.from.id === me ? "you" : "other";
+      who = side === "you" ? "you" : m.from.name;
+      what = m.text || (m.media ? "[a picture]" : "");
+      break;
+    }
+    case "bot_message":
+      side = "her";
+      who = "shuvi";
+      what = (p as unknown as BotMessagePayload).text.replace(/\*\*|`/g, "");
+      break;
+    case "bot_sticker":
+      side = "her";
+      who = "shuvi";
+      what = `a sticker${(p as unknown as BotStickerPayload).emoji ? ` ${(p as unknown as BotStickerPayload).emoji}` : ""}`;
+      break;
+    case "bot_file":
+      side = "her";
+      who = "shuvi";
+      what = `a file: ${(p as unknown as BotFilePayload).name}`;
+      break;
+    case "bot_reaction":
+      side = "her";
+      who = "shuvi";
+      what = `reacted ${(p as unknown as BotReactionPayload).emoji} to #${(p as unknown as BotReactionPayload).targetSeq}`;
+      break;
+    default:
+      who = e.kind.replace("_", " ");
+      what = eventPreview(e.kind, p);
+  }
+  return html`<li class="${side}"><span class="gwho">${who}</span><span class="gwhat">${excerpt(what, 120)}</span><span class="gmeta">${clock(e.at, tz)} <span class="mono">#${e.seq}</span></span></li>`;
+}
+
+const GONE_SHOWN = 8;
+
+/** A list of events going, the first few and how many more. */
+function goneList(events: TurnDeletionEvent[], tz: string, me: number | undefined): Raw {
+  const shown = events.slice(0, GONE_SHOWN);
+  const more = events.length - shown.length;
+  return html`<ul class="glist">${shown.map((e) => goneLine(e, tz, me))}${more > 0 ? html`<li class="gmore">and ${more} more</li>` : ""}</ul>`;
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** "you 1, Alice Example 2, Bob 2": who sent the messages a turn answered, in the order they first spoke. */
+function byWhom(events: TurnDeletionEvent[], me: number | undefined): string {
+  const n = new Map<string, number>();
+  for (const e of events) {
+    const p = parsePayload(e.payload);
+    const who = e.kind === "message" ? (me !== undefined && (p as unknown as MessagePayload).from.id === me ? "you" : (p as unknown as MessagePayload).from.name) : e.kind.replace("_", " ");
+    n.set(who, (n.get(who) ?? 0) + 1);
+  }
+  return [...n].map(([w, c]) => `${w} ${c}`).join(", ");
+}
+
+/** "2 messages, 1 sticker, 1 reaction": what a turn wrote, by kind. */
+function wroteSummary(events: TurnDeletionEvent[]): string {
+  const count = (k: string) => events.filter((e) => e.kind === k).length;
+  return [
+    [count("bot_message"), "message"],
+    [count("bot_sticker"), "sticker"],
+    [count("bot_file"), "file"],
+    [count("bot_reaction"), "reaction"],
+  ]
+    .filter(([c]) => (c as number) > 0)
+    .map(([c, w]) => plural(c as number, w as string))
+    .join(", ");
+}
+
+/**
+ * The confirmation of deleting a turn: a red-tinted panel (DESIGN.md "Deleting a turn") listing what goes, first
+ * the messages (those it answered, anyone's; what she wrote), then her record of it; what is NOT undone; the
+ * button and Cancel. Refused (running, a message still to send): the reason instead of the button.
+ */
+export function turnDeleteConfirm(ctx: PageContext, plan: TurnDeletionPlan, back: string): Raw {
+  const me = ctx.ownerId;
+  const tz = ctx.timeZone;
+  const s = plan.steps;
+  const record = [
+    ...(plan.transcript ? ["its input and system prompt"] : []),
+    ...(s.thinking ? [plural(s.thinking, "stretch of thinking", "stretches of thinking")] : []),
+    ...(s.text ? [plural(s.text, "text block")] : []),
+    ...(s.append ? [plural(s.append, "append")] : []),
+    ...(s.note ? [plural(s.note, "note")] : []),
+    ...(s.compaction ? [plural(s.compaction, "compaction")] : []),
+  ];
+  const tools = plan.tools.map((t) => `${t.name}${t.n > 1 ? ` ×${t.n}` : ""}`).join(", ");
+  // The one count of a turn's messages (store/deletions.ts): the snackbar and the notice say the same.
+  const messages = turnMessageCount(plan);
+  return html`<div class="confirm tconfirm" role="alertdialog" aria-label="Delete turn ${plan.turnId}" data-turn="${plan.turnId}">
+<p class="q">Delete turn ${plan.turnId}${messages ? html`, with the ${plural(messages, "message")} in it` : ""}?</p>
+<p class="effect">It goes from the chat's log, the console, her history and her searches, as deleted messages do: no trace.</p>
+<div class="tgone">
+<h3>It answered <span class="meta">${plan.answered.length ? html`${plural(plan.answered.length, "message")} · ${byWhom(plan.answered, me)}` : "nothing still in the log"}</span></h3>
+${plan.answered.length ? goneList(plan.answered, tz, me) : ""}
+<h3>She wrote <span class="meta">${plan.wrote.length ? wroteSummary(plan.wrote) : "nothing"}</span></h3>
+${plan.wrote.length ? goneList(plan.wrote, tz, me) : ""}
+<h3>Her record of it</h3>
+<p class="grecord">${record.length ? record.join(" · ") : "no transcript"}${s.tool ? html`<br><b>${plural(s.tool, "tool call")}</b>: <span class="mono">${tools}</span>` : ""}</p>
+</div>
+${plan.shared.length ? html`<p class="effect">Some of these messages were also answered by ${plan.shared.length === 1 ? `turn ${plan.shared[0]}` : `turns ${plan.shared.join(", ")}`}: they go from ${plan.shared.length === 1 ? "its" : "their"} input too.</p>` : ""}
+<p class="effect faint">Not undone: what the turn did (her edits in home/, schedules it set, jobs it started), nor what her conversation remembers of it.</p>
+${
+  plan.refused
+    ? html`<p class="row-note refused" role="alert">${plan.refused}</p><div class="cbtns"><a class="btn tcancel" href="${back}">Back</a></div>`
+    : html`<form class="cbtns" method="post" action="/turns/delete"><input type="hidden" name="csrf" value="${ctx.csrf ?? ""}"><input type="hidden" name="turn" value="${plan.turnId}"><input type="hidden" name="back" value="${back}"><button type="submit" class="btn danger solid">Delete turn ${plan.turnId}</button><a class="btn tcancel" href="${back}">Cancel</a><span class="faint">You can undo it for ${DELETE_UNDO_MS / 1000} seconds.</span></form>`
+}
+</div>`;
+}
+
+/** The confirmation as a page of its own (`/turns/<id>/delete?back=…`): for no script, and what console.js takes the panel from. */
+export function turnDeletePage(ctx: PageContext, turnId: number, back: string): string | null {
+  resetBlocks();
+  const turn = turnById(ctx.db, turnId);
+  const plan = turnDeletionPlan(ctx.db, turnId);
+  if (!turn || !plan) return null;
+  const chat = chatById(ctx.db, turn.chatId)!;
+  const detail = html`<div class="detail"><a class="back" href="${back}">← Back</a><div class="head"><div class="title">${badge(turn.status)}<h1>Delete turn ${turn.id}</h1><a href="/chats/${chat.id}">${chatName(chat)}</a><span class="meta" title="${when(turn.startedAt, ctx.timeZone, true)}">${when(turn.startedAt, ctx.timeZone)} · ${ago(turn.startedAt, ctx.now)}</span></div></div>${turnDeleteConfirm(ctx, plan, back)}</div>`;
+  const { pane } = listPane(ctx, new URLSearchParams(), { turn });
+  // Not a live page: nothing on it changes by itself (no `data-live-page`).
+  const { here: _here, ...still } = ctx;
+  return page(`Delete turn ${turn.id}`, split(still, pane, detail, true), ctx.who, "turns");
+}
+
+/**
+ * The page for a turn (or a segment, a conversation named by one) that is not there: deleted (store/deletions.ts
+ * leaves every pointer to it as it was: an alert's link, a Home commit's `Turn:` trailer, a switch note) or never
+ * was. Plain, as a not-found page: the list beside it (which no longer has it), the sentence, and a delete's notice
+ * with its Undo when it came back here from the delete. Not live.
+ */
+export function turnGonePage(ctx: PageContext, what: string, turnId?: number): string {
+  resetBlocks();
+  // The list marks no row (no segment is shown); a turn deleted and still undoable opens its chat's group, and the
+  // page is live (liveView: an undo, from here or another tab, swaps it back for the turn's page).
+  const chat = turnId === undefined ? undefined : stashedTurnChat(ctx.db, turnId);
+  const { pane } = listPane(ctx, new URLSearchParams(), chat !== undefined ? { chat: -1, inChat: chat } : { chat: -1 });
+  const gone = livePart("gone", html`<div class="head"><div class="title"><h1>No such ${what}</h1></div></div><p class="tdeleted">This ${what} was deleted or does not exist. <a href="/turns">Back to the turns</a>.</p>`, true);
+  const detail = html`<div class="detail"><a class="back" href="/turns">← All chats</a>${ctx.notice ?? ""}${lb(gone)}${snackbarOnly(ctx)}</div>`;
+  const { here: _here, ...still } = ctx;
+  return page(`No such ${what}`, split(chat !== undefined ? ctx : still, pane, detail, true), ctx.who, "turns");
+}
+
+/** The delete UI's snackbar alone (a page with no bubbles: nothing to tick, no form; console.js puts an Undo in it). */
+function snackbarOnly(ctx: PageContext): Raw {
+  if (!ctx.csrf) return raw("");
+  return html`<div class="delui" data-csrf="${ctx.csrf}"><div class="snack" role="status" hidden><span class="swhat"></span><button type="button" class="sundo">Undo</button><span class="sline" aria-hidden="true"></span></div></div>`;
 }
 
 /** An event someone (or something) sent into the chat: a left bubble. */
@@ -800,7 +976,9 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
   const headRaw = html`<div class="head">
 <a class="back" href="${href("/turns", f)}">← All chats</a>
 <div class="title">${badge(turn.status)}<h1>Turn ${turn.id}</h1><a href="/chats/${chat.id}#e${turn.toSeq}">${chatName(chat)}</a>${settingsLink(chat.id)}<span class="meta" title="${when(turn.startedAt, ctx.timeZone, true)}">${when(turn.startedAt, ctx.timeZone)} · ${ago(turn.startedAt, ctx.now)}</span>
-<span class="nav">${prev ? html`<a href="${href(`/turns/${prev}`, f)}" title="the chat's previous turn">‹ turn ${prev}</a>` : ""}${next ? html`<a href="${href(`/turns/${next}`, f)}" title="the chat's next turn">turn ${next} ›</a>` : ""}</span></div>
+<span class="nav">${prev ? html`<a href="${href(`/turns/${prev}`, f)}" title="the chat's previous turn">‹ turn ${prev}</a>` : ""}${next ? html`<a href="${href(`/turns/${next}`, f)}" title="the chat's next turn">turn ${next} ›</a>` : ""}</span>${
+    html`<a class="btn danger tdelbtn" hx-boost="false" href="${turnDeleteHref(turn.id, ctx.here)}" data-turn="${turn.id}" title="Delete this turn, the messages it answered and what it wrote">Delete this turn</a>`
+  }</div>
 ${trigger ? html`<p class="trigger">Triggered by ${eventPreview(trigger.kind, trigger.payload)} <span class="mono">#${trigger.seq}</span></p>` : ""}
 ${place ? html`<p class="trigger context">In <a href="${href(`/segments/${place.id}`, f)}">the segment of ${when(turnById(ctx.db, place.id)?.startedAt, ctx.timeZone)}</a> (turn ${place.turnIds.indexOf(turn.id) + 1} of ${place.turnIds.length}), of <a href="${href(`/conversations/${place.conversation.id}`, f)}">${inSentence(conversationLabel(place.conversation))}</a></p>` : ""}
 <p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
@@ -812,7 +990,7 @@ ${turn.error ? html`<div class="banner">${turn.status === "stopped" ? "Stopped" 
     const tabs = html`<nav class="tabs">${TABS.map((t) => html`<a class="${t.id === tab ? "on" : ""}" href="${link(t.id === "conversation" ? {} : { tab: t.id })}">${t.label}${t.id === "prompt" && prompt ? html` <span class="meta">${size(prompt.text)}</span>` : ""}</a>`)}<span class="aside"><a href="${link(expandAll ? (tab === "conversation" ? {} : { tab }) : { ...(tab === "conversation" ? {} : { tab }), expand: "1" })}">${expandAll ? "collapse all" : "expand all"}</a> · j / k: next / previous turn</span></nav>`;
     const body = tab === "prompt" ? promptTab(ctx, turn, prompt, q.get("diff") === "1", link) : tab === "raw" ? rawTab(ctx, turn, transcript, steps) : html`<div class="trace" data-region="trace">${lb(trace!)}</div>`;
     const del = tab === "conversation";
-    return html`<div class="detail">${lb(head)}${tabs}${del ? (ctx.notice ?? "") : ""}<div class="panel">${body}</div>${del ? deleteBar(ctx) : ""}</div>`;
+    return html`<div class="detail">${lb(head)}${tabs}${del ? (ctx.notice ?? "") : ""}<div class="panel turnpanel">${body}</div>${del ? deleteBar(ctx) : ""}</div>`;
   };
   return { raw: detail, head, trace };
 }
@@ -1075,7 +1253,7 @@ function chatParts(ctx: PageContext, chat: ConsoleChat, q: URLSearchParams, even
       const model = modelOf(models.get(t));
       const sig = JSON.stringify([t, s?.status, w, s?.costMicroUsd, model.s, filters]);
       take(`d${t}${nth > 1 ? `x${nth}` : ""}`, sig, s?.status === "running", () =>
-        html`<div class="divider"><a href="${href(`/turns/${t}`, filters)}">${dot(s?.status ?? "")}turn ${t}${s ? ` · ${s.status}` : ""}${w !== null ? ` · ${secs(w)}` : ""}${s?.costMicroUsd ? ` · ${usd(s.costMicroUsd / 1e6)}` : ""}</a>${model}</div>`,
+        html`<div class="divider" data-turn="${t}"><a href="${href(`/turns/${t}`, filters)}">${dot(s?.status ?? "")}turn ${t}${s ? ` · ${s.status}` : ""}${w !== null ? ` · ${secs(w)}` : ""}${s?.costMicroUsd ? ` · ${usd(s.costMicroUsd / 1e6)}` : ""}</a>${model}${s ? turnMenu(ctx, t) : ""}</div>`,
       );
     }
     if (t !== null) current = t;
@@ -1113,7 +1291,7 @@ function turnModelsOf(db: Db, ids: number[]): Map<number, string | null> {
 }
 
 /** A chat's page: its detail (`raw`), and its header and parts as the live stream draws them again (none on an earlier page of it). */
-function chatDetail(ctx: PageContext, chat: ConsoleChat, q: URLSearchParams, cache?: ChatCache): { raw: () => Raw; head: LivePart; runs: LivePart[] | null } {
+function chatDetail(ctx: PageContext, chat: ConsoleChat, q: URLSearchParams, cache?: ChatCache): { raw: () => Raw; head: LivePart; runs: LivePart[] | null; since: number } {
   const b = q.get("before");
   const before = b && /^\d+$/.test(b) ? Number(b) : undefined;
   const { events, more } = chatEventsPage(ctx.db, chat.id, EVENTS_PER_PAGE, before);
@@ -1139,7 +1317,7 @@ ${ctx.notice ?? ""}
 ${more && first ? html`<p class="note"><a href="${href(`/chats/${chat.id}`, { ...currentFilters(q), before: first })}">Earlier events</a></p>` : ""}
 ${events.length ? html`<div class="convo"${live ? html` data-region="trace"` : ""}>${runs.map(lb)}</div>` : html`${empty("Nothing recorded in this chat.")}${live ? html`<div class="convo" data-region="trace"></div>` : ""}`}
 </div>${deleteBar(ctx)}</div>`;
-  return { raw, head, runs: live ? runs : null };
+  return { raw, head, runs: live ? runs : null, since: more && first ? first - 1 : 0 };
 }
 
 /**
@@ -1162,13 +1340,30 @@ export function chatPage(ctx: PageContext, chatId: number, q: URLSearchParams = 
  * the list's count line), its trace's parts in order (a segment's or conversation's turns, a turn's rows, a chat's
  * rows; absent: not drawn, or none is live here), and the list's groups in order (absent: not drawn). `newer`: on
  * `/turns` with nothing selected, a newer segment is now the one a load would show (the page offers to load it; it
- * never loads by itself).
+ * never loads by itself). `turnIds`: the turns of the page's chat that exist now; a turn's part or divider the page
+ * has for any other (deleted) is taken out, and put back with an undo. `swap`: what a load of a turn's, a segment's or
+ * a conversation's page now shows: the page itself, or the plain page of one that is not there (deleted); a page
+ * showing the other is told to swap (live.ts).
  */
 export interface LiveFrame {
   fixed: LivePart[];
   trace?: LivePart[];
   list?: LivePart[];
   newer?: boolean;
+  turnIds?: ReadonlySet<number>;
+  swap?: "page" | "gone";
+  /** A chat's log: its trace holds every event after this seq (0: the whole log); one the page has from there on and the trace lacks is gone. */
+  since?: number;
+}
+
+/** The turns of chat `chatId` that exist now (a frame's `turnIds`). */
+function turnIdsOf(db: Db, chatId: number): Set<number> {
+  return new Set((db.$client.query("select id from turns where chat_id = ?").all(chatId) as { id: number }[]).map((r) => r.id));
+}
+
+/** The chat of a deleted turn still waiting out its undo (its page can come back), else undefined. */
+export function stashedTurnChat(db: Db, turnId: number): number | undefined {
+  return (db.$client.query("select chat_id as c from deleted_turns where id = ?").get(turnId) as { c: number } | null)?.c;
 }
 
 /** What a frame is to draw: the detail (with the turns that changed since the last one; "all": every one), the list. */
@@ -1211,17 +1406,22 @@ export function liveView(ctx: PageContext, path: string, q: URLSearchParams): Li
     const shown = span ? undefined : listParts(begin(ctx), q, {}).first;
     const id = span ? Number(span[2]) : shown;
     const t0 = id !== undefined ? turnById(ctx.db, id) : undefined;
-    if (span && !t0) return null;
+    // A segment or conversation named by a deleted turn: its page is the plain one, live while the undo can bring it back.
+    const chatId = t0?.chatId ?? (span ? stashedTurnChat(ctx.db, id!) : undefined);
+    if (span && chatId === undefined) return null;
     let newerSeen = false;
     return {
-      ...(t0 ? { chatId: t0.chatId } : {}),
+      ...(chatId !== undefined ? { chatId } : {}),
       frame(c, want) {
         begin(c);
-        const newer = !span && want.list && listParts(c, q, {}).first !== shown;
+        const now = id !== undefined ? turnById(c.db, id) : undefined;
+        if (span && !now) return { fixed: [], swap: "gone" };
+        // On /turns, the segment shown was deleted: a load would show another, offered as newer activity.
+        const newer = !span && ((want.list && listParts(c, q, {}).first !== shown) || (t0 !== undefined && !now));
         if (newer) newerSeen = true;
-        const sp = !t0 ? null : level === "segment" ? segmentOf(c.db, t0.chatId, t0.id) : conversationOf(c.db, t0.chatId, t0.id);
+        const sp = !now ? null : level === "segment" ? segmentOf(c.db, now.chatId, now.id) : conversationOf(c.db, now.chatId, now.id);
         const sel: Selection = !sp ? {} : !span ? (newerSeen ? { segment: sp.id, inChat: sp.chatId } : {}) : level === "segment" ? { segment: sp.id, inChat: sp.chatId } : { conversation: sp.id, inChat: sp.chatId };
-        const out: LiveFrame = { fixed: [], ...(newer ? { newer: true } : {}) };
+        const out: LiveFrame = { fixed: [], ...(newer ? { newer: true } : {}), ...(span ? { swap: "page" as const } : {}), ...(chatId !== undefined ? { turnIds: turnIdsOf(c.db, chatId) } : {}) };
         if (!sp || !want.detail) return withList(c, want, sel, out);
         const d = spanDetail(c, sp, level, q, f, cache, want.detail);
         return withList(c, want, sel, { ...out, fixed: [d.head], trace: d.turns });
@@ -1230,17 +1430,18 @@ export function liveView(ctx: PageContext, path: string, q: URLSearchParams): Li
   }
   if (turn) {
     const id = Number(turn[1]);
-    const t0 = turnById(ctx.db, id);
-    if (!t0) return null;
+    const chatId = turnById(ctx.db, id)?.chatId ?? stashedTurnChat(ctx.db, id);
+    if (chatId === undefined) return null;
     return {
-      chatId: t0.chatId,
+      chatId,
       frame(c, want) {
         begin(c);
         const t = turnById(c.db, id);
-        if (!t) return null;
-        if (!want.detail) return withList(c, want, { turn: t }, { fixed: [] });
+        // Deleted: a load shows the plain page now; undone: the turn's page again.
+        if (!t) return { fixed: [], swap: "gone" };
+        if (!want.detail) return withList(c, want, { turn: t }, { fixed: [], swap: "page" });
         const d = turnDetail(c, t, q, f);
-        return withList(c, want, { turn: t }, { fixed: [d.head], ...(d.trace ? { trace: [d.trace] } : {}) });
+        return withList(c, want, { turn: t }, { fixed: [d.head], ...(d.trace ? { trace: [d.trace] } : {}), swap: "page" });
       },
     };
   }
@@ -1257,7 +1458,7 @@ export function liveView(ctx: PageContext, path: string, q: URLSearchParams): Li
         const sel: Selection = { chat: id, inChat: id };
         if (!want.detail) return withList(c, want, sel, { fixed: [] });
         const d = chatDetail(c, ch, q, cache);
-        return withList(c, want, sel, { fixed: [d.head], ...(d.runs ? { trace: d.runs } : {}) });
+        return withList(c, want, sel, { fixed: [d.head], ...(d.runs ? { trace: d.runs, since: d.since } : {}), turnIds: turnIdsOf(c.db, id) });
       },
     };
   }

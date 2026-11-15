@@ -19,7 +19,8 @@ import { liveView, type LiveFrame, type LiveView, type LiveWant, type PageContex
  *     usage, profile, wall-clock stop), their tool calls still `running`, the outbound rows still `pending`, and the
  *     recent messages whose picture or file is still being fetched (store/media.ts `updateMedia`,
  *     `updateAttachment` rewrite their payload in place);
- *   - deletes and undos (store/deletions.ts): the rows waiting in `deleted_events`, counted per chat.
+ *   - deletes and undos (store/deletions.ts): the rows waiting in `deleted_events` and the turns in `deleted_turns`,
+ *     counted per chat.
  * What it yields is which chats and turns changed (`Changes`).
  *
  * ONE DRAWING PER PAGE. Streams of the same page (its path and query) share one `PageFeed`: on a change that
@@ -43,7 +44,12 @@ import { liveView, type LiveFrame, type LiveView, type LiveWant, type PageContex
  *
  * A DELETE (console.js hides the bubbles at once; store/deletions.ts moves the rows out) is not undone by the
  * stream: what it draws comes from `chat_events`, where the rows no longer are; console.js keeps a hidden bubble
- * in place for its undo, and an undo is a change the poll sees, so the chat's parts are drawn again.
+ * in place for its undo, and an undo is a change the poll sees, so the chat's parts are drawn again. A DELETED TURN
+ * leaves every page that shows it, in every tab: its part and its dividers are taken out (a divider otherwise stays,
+ * as history), by the frame's `turnIds` (the chat's turns that exist); the page of the turn itself, or of a segment or
+ * conversation named by it, is told to `swap` for the plain page of one that is not there, which is live while the
+ * undo can bring it back, and is told to swap back on the undo (console.js loads it in place). A swap is never done
+ * by itself on a page holding an undo or a selection: the page offers it.
  *
  * RESOURCES. At most MAX_STREAMS_PER_SESSION tabs per session (sign-in) are live: one more closes the oldest other
  * (told `bye`; console.js offers to resume, which closes the oldest in turn). A tab names itself (`tab`, kept for
@@ -146,13 +152,13 @@ export class Watch {
 
   private deletedMark(): string {
     const r = this.db.$client
-      .query("select (select count(*) from deleted_events) as n, (select coalesce(max(seq), 0) from sqlite_sequence where name = 'deletions') as d")
+      .query("select (select count(*) from deleted_events) + (select count(*) from deleted_turns) as n, (select coalesce(max(seq), 0) from sqlite_sequence where name = 'deletions') as d")
       .get() as { n: number; d: number };
     return `${r.n}:${r.d}`;
   }
 
   private deletedCounts(): Map<number, number> {
-    const rows = this.db.$client.query("select chat_id as chatId, count(*) as n from deleted_events group by chat_id").all() as { chatId: number; n: number }[];
+    const rows = this.db.$client.query("select chatId, sum(n) as n from (select chat_id as chatId, count(*) as n from deleted_events group by chat_id union all select chat_id, count(*) from deleted_turns group by chat_id) group by chatId").all() as { chatId: number; n: number }[];
     return new Map(rows.map((r) => [r.chatId, r.n]));
   }
 
@@ -285,7 +291,8 @@ export type Op =
   | { k: string; h: string; html: string; live: boolean; in?: "trace" | "list"; after?: string | null }
   | { k: string; rm: true }
   | { order: string[]; in: "list" }
-  | { newer: true };
+  | { newer: true }
+  | { swap: true };
 
 const TRACE_KEY = /^[tde]\d+(?:x\d+)?$/;
 const regionOf = (k: string): "trace" | "list" | null => (TRACE_KEY.test(k) ? "trace" : /^g\d+$/.test(k) || k === "none" ? "list" : null);
@@ -327,6 +334,7 @@ export class LiveStream {
   private connect: { last: string | null } | null;
   private listOrder: string[] | null = null;
   private newerSaid = false;
+  private swapSaid = false;
   lastWrite = 0;
   closed = false;
   feed: PageFeed | null = null;
@@ -366,6 +374,17 @@ export class LiveStream {
       this.newerSaid = true;
       ops.push({ newer: true });
     }
+    // A turn's (segment's, conversation's) page and the plain page of one that is not there are two pages: a page
+    // showing the other than a load now would is told to swap, once, and nothing else.
+    if (frame.swap) {
+      const shows = this.sent.has("gone") ? "gone" : "page";
+      if (frame.swap !== shows) {
+        if (!this.swapSaid) ops.push({ swap: true });
+        this.swapSaid = true;
+        return ops;
+      }
+      this.swapSaid = false;
+    }
     let first = this.connect;
     const put = (p: LivePart, region: "trace" | "list" | null, after: string | null, isNew: (k: string) => boolean) => {
       const had = this.sent.get(p.k);
@@ -394,8 +413,9 @@ export class LiveStream {
         prev = p.k;
       }
       // Gone from the page: an event or a turn within the range drawn. One that only fell off the start of a chat's
-      // newest page, and a divider, stay, as history.
-      const lowest = Math.min(...[...at.entries()].filter(([k]) => !k.startsWith("d")).map(([, n]) => n));
+      // newest page, and a divider, stay, as history; but not a deleted turn's (below). A chat's log says where its
+      // window starts (`since`), so an event deleted at its start is gone, not fallen off.
+      const lowest = frame.since !== undefined ? frame.since + 0.5 : Math.min(...[...at.entries()].filter(([k]) => !k.startsWith("d")).map(([, n]) => n));
       for (const k of [...this.sent.keys()]) {
         if (regionOf(k) !== "trace" || at.has(k) || k.startsWith("d")) continue;
         if (Number(k.slice(1)) < lowest) continue;
@@ -403,6 +423,16 @@ export class LiveStream {
         ops.push({ k, rm: true });
       }
       if (first) this.connect = first = null;
+    }
+    // A DELETED TURN (store/deletions.ts `deleteTurns`): its part (`t<turn>`) and its dividers (`d<turn>`, `d<turn>x2`)
+    // go from every page that has them, wherever they stand; an undo draws them again, as new parts in place.
+    if (frame.turnIds) {
+      const at = new Set(frame.trace?.map((p) => p.k) ?? []);
+      for (const k of [...this.sent.keys()]) {
+        if (!/^[td]\d/.test(k) || at.has(k) || frame.turnIds.has(Number(k.slice(1).split("x")[0]))) continue;
+        this.sent.delete(k);
+        ops.push({ k, rm: true });
+      }
     }
     if (frame.list) {
       let prev: string | null = null;
@@ -458,6 +488,8 @@ export class PageFeed {
   private trace: LivePart[] | undefined;
   private list: LivePart[] | undefined;
   private newer = false;
+  private swap: LiveFrame["swap"];
+  private turnIds: LiveFrame["turnIds"];
   private drawn = false;
   /** Frames drawn (for tests and checks: one per change, however many streams). */
   frames = 0;
@@ -483,10 +515,17 @@ export class PageFeed {
     }
     this.frames++;
     if (!frame) return null;
+    // The plain page of a deleted turn: nothing of the page it was is kept for a stream joining later.
+    if (frame.swap && frame.swap !== this.swap) {
+      this.fixed.clear();
+      this.trace = undefined;
+    }
     for (const p of frame.fixed) this.fixed.set(p.k, p);
     if (frame.trace) this.trace = frame.trace;
     if (frame.list) this.list = frame.list;
     if (frame.newer) this.newer = true;
+    if (frame.swap) this.swap = frame.swap;
+    if (frame.turnIds) this.turnIds = frame.turnIds;
     this.drawn = true;
     return frame;
   }
@@ -498,7 +537,7 @@ export class PageFeed {
     s.hello(now);
     if (!this.drawn) this.draw({ detail: "all", list: true }, now);
     if (!this.drawn) return;
-    s.push({ fixed: [...this.fixed.values()], ...(this.trace ? { trace: this.trace } : {}), ...(this.list ? { list: this.list } : {}), ...(this.newer ? { newer: true } : {}) }, now);
+    s.push({ fixed: [...this.fixed.values()], ...(this.trace ? { trace: this.trace } : {}), ...(this.list ? { list: this.list } : {}), ...(this.newer ? { newer: true } : {}), ...(this.swap ? { swap: this.swap } : {}), ...(this.turnIds ? { turnIds: this.turnIds } : {}) }, now);
   }
 
   leave(s: LiveStream): void {

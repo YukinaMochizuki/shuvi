@@ -8,9 +8,13 @@ import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { handleHook } from "../src/capabilities/jobs/hooks.ts";
 import { inboundText, inboundTokens, inboundTokenVar, loadInboundSources } from "../src/capabilities/jobs/inbound.ts";
 import type { Db } from "../src/store/db.ts";
-import { getEvent, type ExternalPayload } from "../src/store/events.ts";
-import { claimTurn } from "../src/store/turns.ts";
+import { DELETE_UNDO_MS, deleteTurns, purgeDeletions } from "../src/store/deletions.ts";
+import { getChat, getEvent, triggersAfter, type ExternalPayload } from "../src/store/events.ts";
+import { claimTurn, finishTurn } from "../src/store/turns.ts";
 import { memDb, OWNER, ownerChatId, ScriptedAdapter } from "./helpers.ts";
+
+/** What the next turn of chat `chatId` would be given: null when nothing asks for one. */
+const nextTurnInput = (db: Db, chatId: number) => (triggersAfter(db, chatId, getChat(db, chatId)!.cursorSeq).length ? "something" : null);
 
 function homeWith(yaml: string): string {
   const home = mkdtempSync(join(tmpdir(), "shuvi-home-"));
@@ -92,6 +96,27 @@ describe("POST /inbound/<source>", () => {
     expect((await handleHook(deps(db), post("/inbound/grafana", "a", h))).status).toBe(200);
     const again = await handleHook(deps(db), post("/inbound/grafana", "a", h));
     expect(await again.json()).toEqual({ ok: true, already: "recorded" });
+    expect(externals(db)).toHaveLength(1);
+  });
+
+  test("a turn deleted from the console, with the event it answered, then purged: a retry with the same key is not recorded again", async () => {
+    const db = memDb();
+    const chat = ownerChatId(db);
+    const h = { authorization: "Bearer g-secret", "idempotency-key": "alert-78" };
+    await handleHook(deps(db), post("/inbound/grafana", "disk 95%", h));
+    const turn = claimTurn(db, chat)!;
+    finishTurn(db, turn.id, { status: "done" });
+    const r = deleteTurns(db, [turn.id], 1_000);
+    expect(r.ok).toBe(true);
+    expect(externals(db)).toHaveLength(0);
+    // While the undo can still put it back, and after the purge: the key is spent.
+    expect(await (await handleHook(deps(db), post("/inbound/grafana", "disk 95%", h))).json()).toEqual({ ok: true, already: "recorded" });
+    expect(purgeDeletions(db, "/nonexistent", 1_000 + DELETE_UNDO_MS).deletions).toBe(1);
+    expect(await (await handleHook(deps(db), post("/inbound/grafana", "disk 95%", h))).json()).toEqual({ ok: true, already: "recorded" });
+    expect(externals(db)).toHaveLength(0);
+    expect(nextTurnInput(db, chat)).toBeNull();
+    // Another key still lands.
+    await handleHook(deps(db), post("/inbound/grafana", "disk 96%", { ...h, "idempotency-key": "alert-79" }));
     expect(externals(db)).toHaveLength(1);
   });
 

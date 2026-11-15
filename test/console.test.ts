@@ -400,10 +400,13 @@ describe("pages, against fixture data", () => {
   });
 
   test("unknown pages and turns are 404, as a styled page", async () => {
+    // A turn that is not there (deleted, or never was): the plain page saying so, beside the list.
     const res = await handleConsole(await deps(), get("/turns/99999"));
     expect(res.status).toBe(404);
-    expect(await res.text()).toContain('class="card"');
-    expect((await handleConsole(await deps(), get("/nope"))).status).toBe(404);
+    expect(await res.text()).toContain("This turn was deleted or does not exist.");
+    const nope = await handleConsole(await deps(), get("/nope"));
+    expect(nope.status).toBe(404);
+    expect(await nope.text()).toContain('class="card"');
   });
 
   test("the stylesheet and the script are served without credentials (the sign-in and error pages need them)", async () => {
@@ -499,7 +502,7 @@ describe("the model on each turn's divider", () => {
     expect(places.map((p) => p.turnId)).toEqual([1, 2, 3]);
     return { x, dm, segment: places[0]!.sessionId, conversation: places[0]!.conversationId };
   }
-  const dividers = (html: string, cls: string) => [...html.matchAll(new RegExp(`<div class="${cls}[^"]*">[\\s\\S]*?</div>`, "g"))].map((m) => m[0]);
+  const dividers = (html: string, cls: string) => [...html.matchAll(new RegExp(`<div class="${cls}[^"]*"[^>]*>[\\s\\S]*?</div>`, "g"))].map((m) => m[0]);
 
   test("its catalog label when the catalog has it (a dated API name included), else as recorded; nothing without a transcript; a switch marked", async () => {
     const { x, dm, segment, conversation } = await fixtureWith("claude-sonnet-4-5-20250929");

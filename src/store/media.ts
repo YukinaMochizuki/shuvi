@@ -120,6 +120,8 @@ export function mediaInUse(db: Db, path: string): boolean {
        union all select 1 from sticker_meta where path = ?1
        union all select 1 from turn_transcripts where instr(input, ?2) > 0
        union all select 1 from turn_steps where instr(images, ?2) > 0
+       union all select 1 from deleted_turn_transcripts where instr(input, ?2) > 0
+       union all select 1 from deleted_turn_steps where instr(images, ?2) > 0
        limit 1`,
     )
     .get(path, JSON.stringify(path));

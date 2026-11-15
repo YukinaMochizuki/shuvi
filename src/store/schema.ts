@@ -342,6 +342,8 @@ export const deletedEvents = sqliteTable(
     note: text("note"),
     turnId: integer("turn_id"),
     at: text("at").notNull(),
+    /** The turn whose delete took this row (it answered or wrote it), null for a message deleted by itself. */
+    byTurn: integer("by_turn"),
   },
   (t) => [index("deleted_events_deletion").on(t.deletionId)],
 );
@@ -367,6 +369,102 @@ export const deletionScrubs = sqliteTable(
     scrubbed: text("scrubbed").notNull(),
   },
   (t) => [index("deletion_scrubs_deletion").on(t.deletionId)],
+);
+
+/**
+ * The idempotency keys of deleted rows, kept (the key alone, nothing of the row) once their deletion is purged, so
+ * a delete never re-opens an exactly-once key: a webhook retried with the same Idempotency-Key after its event was
+ * deleted stays recorded once (store/events.ts `recordFrameworkEvent`, `recordApprovalEvent` check here and in
+ * `deleted_events`, which holds the keys of rows still waiting out their undo).
+ */
+export const spentIdemKeys = sqliteTable("spent_idem_keys", {
+  key: text("key").primaryKey(),
+  spentAt: text("spent_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
+
+// A deleted TURN (store/deletions.ts `deleteTurns`): its rows MOVED here, every column as it was, under the
+// deletion that holds it (the same open deletion as the chat's deleted messages), for the undo to put back and the
+// purge to drop. No foreign key to `turns`: the row is not there while it is stashed.
+
+/** The `turns` rows a deletion moved out (same columns, same id). */
+export const deletedTurns = sqliteTable(
+  "deleted_turns",
+  {
+    id: integer("id").primaryKey(),
+    deletionId: integer("deletion_id")
+      .notNull()
+      .references(() => deletions.id),
+    chatId: integer("chat_id").notNull(),
+    status: text("status").notNull(),
+    pid: integer("pid"),
+    pidStart: text("pid_start"),
+    termAt: text("term_at"),
+    fromSeq: integer("from_seq").notNull(),
+    toSeq: integer("to_seq").notNull(),
+    triggerSeq: integer("trigger_seq"),
+    stopSeq: integer("stop_seq"),
+    error: text("error"),
+    costMicroUsd: integer("cost_micro_usd"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    cacheReadTokens: integer("cache_read_tokens"),
+    cacheCreationTokens: integer("cache_creation_tokens"),
+    backendSessionId: text("backend_session_id"),
+    opening: text("opening"),
+    conversationStart: text("conversation_start"),
+    profile: text("profile"),
+    startedAt: text("started_at").notNull(),
+    endedAt: text("ended_at"),
+  },
+  (t) => [index("deleted_turns_deletion").on(t.deletionId)],
+);
+
+/** The `turn_steps` rows of a deleted turn (same columns, same id). */
+export const deletedTurnSteps = sqliteTable(
+  "deleted_turn_steps",
+  {
+    id: integer("id").primaryKey(),
+    deletionId: integer("deletion_id")
+      .notNull()
+      .references(() => deletions.id),
+    turnId: integer("turn_id").notNull(),
+    n: integer("n").notNull(),
+    kind: text("kind").notNull(),
+    text: text("text"),
+    sent: integer("sent"),
+    outboundSeq: integer("outbound_seq"),
+    name: text("name"),
+    args: text("args"),
+    result: text("result"),
+    status: text("status"),
+    error: text("error"),
+    callId: text("call_id"),
+    images: text("images"),
+    fromSeq: integer("from_seq"),
+    toSeq: integer("to_seq"),
+    tokensBefore: integer("tokens_before"),
+    tokensAfter: integer("tokens_after"),
+    at: text("at").notNull(),
+    endedAt: text("ended_at"),
+  },
+  (t) => [index("deleted_turn_steps_deletion").on(t.deletionId)],
+);
+
+/** The `turn_transcripts` row of a deleted turn (same columns). Its `prompt_hash` keeps its `prompt_texts` row alive. */
+export const deletedTurnTranscripts = sqliteTable(
+  "deleted_turn_transcripts",
+  {
+    turnId: integer("turn_id").primaryKey(),
+    deletionId: integer("deletion_id")
+      .notNull()
+      .references(() => deletions.id),
+    promptHash: text("prompt_hash"),
+    input: text("input").notNull(),
+    model: text("model"),
+    resumed: integer("resumed").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [index("deleted_turn_transcripts_deletion").on(t.deletionId)],
 );
 
 /** The events past the cursor that start a turn: TRIGGER_KINDS, minus quiet `external` ones. */

@@ -279,7 +279,7 @@ async function remove(detail, seqs, fromSelection) {
 }
 
 /** The deletion the snackbar is for, and every message it took on this page: a delete while it is open joins it. */
-let snacked = { id: null, seqs: new Set(), timer: null };
+let snacked = { id: null, seqs: new Set(), turns: new Set(), timer: null };
 
 function hideSnack(snack, detail) {
   clearTimeout(snacked.timer);
@@ -291,17 +291,25 @@ function hideSnack(snack, detail) {
   }, 300);
 }
 
-function showSnack(detail, deleted, answer) {
+/** What the snackbar says: "Deleted 3" (messages alone, as before), or the server's words ("Deleted turn 12 and its 5 messages"). */
+function snackText(answer) {
+  return answer.turnIds?.length && answer.label ? `Deleted ${answer.label}` : `Deleted ${answer.count}`;
+}
+
+/** `undone`: what an Undo does once the server has put them back (default: the hidden rows come back). */
+function showSnack(detail, deleted, answer, turn, undone) {
   const snack = detail.querySelector(".snack");
   if (!snack) return;
   clearTimeout(snacked.timer);
   // The server joins a delete to the chat's open deletion (store/deletions.ts): one snackbar, one Undo, for all.
-  if (snacked.id !== answer.id || snack.hidden) snacked = { id: answer.id, seqs: new Set(), timer: null };
+  if (snacked.id !== answer.id || snack.hidden) snacked = { id: answer.id, seqs: new Set(), turns: new Set(), timer: null };
   for (const s of deleted) snacked.seqs.add(s);
+  if (turn) snacked.turns.add(String(turn));
   const seqs = [...snacked.seqs];
+  const turns = [...snacked.turns];
   const what = snack.querySelector(".swhat");
   const undo = snack.querySelector(".sundo");
-  what.textContent = `Deleted ${answer.count}`;
+  what.textContent = snackText(answer);
   snack.classList.remove("refused", "fading");
   undo.hidden = false;
   undo.disabled = false;
@@ -322,8 +330,10 @@ function showSnack(detail, deleted, answer) {
       snacked.timer = setTimeout(() => hideSnack(snack, detail), 5000);
       return;
     }
-    setGone(detail, seqs, false);
     snacked.id = null;
+    if (undone) return undone();
+    setGone(detail, seqs, false);
+    for (const t of turns) setTurnGone(detail, t, [], false);
     hideSnack(snack, detail);
   };
   snack.hidden = false;
@@ -331,6 +341,120 @@ function showSnack(detail, deleted, answer) {
   // The window is over: the server purges them, they stay off the page; the snackbar fades.
   snacked.timer = setTimeout(() => hideSnack(snack, detail), answer.seconds * 1000);
 }
+
+// ---- deleting a turn -------------------------------------------------------------------------------------------
+// "Delete turn…" in a divider's ⋯ menu (a chat's log) and "Delete this turn" (the turn page) are links to the
+// confirmation page (`/turns/<id>/delete`, pages.ts `turnDeletePage`); with script its panel is fetched and opened in
+// place instead: under the divider, or under the turn page's header. Cancel closes it. Its Delete posts in the
+// background (`/turns/delete`, delete-write.ts); the turn leaves the page at once (its divider, every bubble it
+// answered or wrote) and the snackbar offers the Undo, joined with any message deleted just before or after it. A
+// refusal says why in the panel, which stays open.
+
+/** Where a turn's panel opens: under the divider's row in a chat's log, else under the turn page's header. */
+function confirmSpot(link) {
+  const divider = link.closest(".divider");
+  if (divider) return divider.closest(".lb") ?? divider;
+  const head = link.closest(".head");
+  return head?.closest(".lb") ?? head;
+}
+
+async function openTurnConfirm(link) {
+  const spot = confirmSpot(link);
+  const detail = detailOf(link);
+  if (!spot || !detail) return false;
+  for (const old of document.querySelectorAll(".tconfirm.inplace")) old.remove();
+  let panel = null;
+  try {
+    const r = await fetch(link.href, { credentials: "same-origin" });
+    if (r.ok) panel = new DOMParser().parseFromString(await r.text(), "text/html").querySelector(".tconfirm");
+  } catch {}
+  if (!panel) return false;
+  panel = document.importNode(panel, true);
+  panel.classList.add("inplace");
+  spot.after(panel);
+  panel.scrollIntoView({ block: "nearest" });
+  panel.querySelector("button[type=submit], a.tcancel")?.focus({ preventScroll: true });
+  return true;
+}
+
+document.addEventListener("click", async (e) => {
+  const t = e.target instanceof Element ? e.target : null;
+  const cancel = t?.closest(".tconfirm.inplace a.tcancel");
+  if (cancel) {
+    e.preventDefault();
+    return void cancel.closest(".tconfirm").remove();
+  }
+  const link = t?.closest("a.dm-tdel, a.tdelbtn");
+  if (!link || e.metaKey || e.ctrlKey || e.shiftKey) return;
+  e.preventDefault();
+  e.stopPropagation();
+  closeMenus();
+  // Not opened in place (the console not answering): the confirmation page itself.
+  if (!(await openTurnConfirm(link))) location.href = link.href;
+});
+
+/** The turn's rows in a chat's log: its divider(s), and the bubbles of `seqs` (what it answered and wrote). */
+function setTurnGone(detail, turn, seqs, gone) {
+  for (const d of detail.querySelectorAll(`.divider[data-turn="${turn}"]`)) d.classList.toggle("gone", gone);
+  setGone(detail, seqs, gone);
+}
+
+/** The page as a load now draws it, in place of this one (no reload: the tab keeps its scroll of the list); live again. */
+async function swapPage() {
+  stopLive();
+  let split = null;
+  try {
+    const r = await fetch(location.href, { credentials: "same-origin" });
+    const doc = new DOMParser().parseFromString(await r.text(), "text/html");
+    split = doc.querySelector(".split");
+    if (split) document.title = doc.title;
+  } catch {}
+  const here = document.querySelector(".split");
+  if (!split || !here) return false;
+  here.replaceWith(document.importNode(split, true));
+  arrive(document.body);
+  return true;
+}
+
+/**
+ * The turn page once its turn is deleted: the page as a load would now draw it (the plain "no such turn", the list
+ * without its segment) in place of this one, the snackbar on it. Its Undo loads the turn page again.
+ */
+async function becomeGone(answer) {
+  if (!(await swapPage())) return void location.reload();
+  const detail = document.querySelector(".detail-pane .detail");
+  if (detail) showSnack(detail, [], answer, null, () => location.reload());
+}
+
+document.addEventListener("submit", async (e) => {
+  const form = e.target instanceof HTMLFormElement ? e.target : null;
+  const panel = form?.closest(".tconfirm.inplace");
+  if (!panel) return;
+  e.preventDefault();
+  const detail = detailOf(panel);
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  const csrf = csrfOf(detail) || form.querySelector("input[name=csrf]")?.value || "";
+  const answer = await post("/turns/delete", [["csrf", csrf], ["turn", panel.dataset.turn]]);
+  if (answer.refused) {
+    button.disabled = false;
+    let why = panel.querySelector(".row-note.refused");
+    if (!why) {
+      why = document.createElement("p");
+      why.className = "row-note refused";
+      why.setAttribute("role", "alert");
+      form.before(why);
+    }
+    why.textContent = answer.refused;
+    return;
+  }
+  panel.remove();
+  // On the turn's own page, nothing of it is left to show.
+  if (detail.querySelector(".turnpanel")) return void becomeGone(answer);
+  const seqs = answer.seqs.map(String);
+  setTurnGone(detail, panel.dataset.turn, seqs, true);
+  showSnack(detail, seqs, answer, panel.dataset.turn);
+});
 
 // ---- live pages ------------------------------------------------------------------------------------------------
 // A page drawn with `data-live-page` (pages.ts `split`: a chat's log, a segment, a conversation, a turn) opens an
@@ -547,6 +671,13 @@ function apply(ops) {
       // On /turns, a newer segment is what a load would show now: offered, never loaded by itself.
       liveBar("New activity", "Show", () => location.assign(live.page));
       continue;
+    }
+    if (op.swap) {
+      // The turn (segment, conversation) was deleted, or its deletion undone, in this tab or another: a load shows
+      // the other page now. Put in place, unless that would cost an undo or a selection: then offered.
+      if (holding()) liveBar("This page has changed", "Show", () => location.reload());
+      else void swapPage();
+      return;
     }
     const region = op.in ? document.querySelector(`[data-region="${op.in}"]`) : null;
     if (op.order) {
