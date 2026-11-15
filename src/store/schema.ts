@@ -148,7 +148,7 @@ export const modelSwitchRequests = sqliteTable(
       .notNull()
       .references(() => chats.id),
     toModel: text("to_model").notNull(),
-    mode: text("mode", { enum: ["lossless", "lossy"] }).notNull(),
+    mode: text("mode", { enum: ["lossless", "lossy", "clean"] }).notNull(),
     status: text("status", { enum: ["pending", "done", "failed"] }).notNull().default("pending"),
     stoppedTurnId: integer("stopped_turn_id"),
     result: text("result", { mode: "json" }).$type<Record<string, unknown>>(),
@@ -161,7 +161,8 @@ export const modelSwitchRequests = sqliteTable(
 
 /**
  * Each move of a chat from one model's conversation to another's (agent/switch.ts), carrying what the
- * other lacks (`lossless`, `carried` messages) or nothing (`lossy`). `native` (a switch within a lane that
+ * other lacks (`lossless`, `carried` messages) or nothing (`lossy`), or starting the target over with nothing
+ * (`clean`: its own conversation dropped, the next turn opens with its input only). `native` (a switch within a lane that
  * kept the conversation) is no longer written, and is only read in rows from before a conversation per model.
  * `turn_id` is the first turn after it, which records it.
  */
@@ -174,7 +175,7 @@ export const modelSwitches = sqliteTable(
       .references(() => chats.id),
     fromModel: text("from_model"),
     toModel: text("to_model").notNull(),
-    mode: text("mode", { enum: ["native", "lossless", "lossy"] }).notNull(),
+    mode: text("mode", { enum: ["native", "lossless", "lossy", "clean"] }).notNull(),
     fromSessionId: text("from_session_id"),
     toSessionId: text("to_session_id"),
     carried: integer("carried").notNull().default(0),
@@ -681,6 +682,19 @@ export const jobs = sqliteTable(
   (t) => [index("jobs_state").on(t.state)],
 );
 
+/** The last apply of a chat's ~/.computer.yaml, as `computers.last_apply` keeps it. */
+export interface LastApply {
+  at: string;
+  ok: boolean;
+  /** Applied: what it did ("apt: ripgrep; the setup script") and how long it took, in ms. */
+  what?: string;
+  ms?: number;
+  /** Failed: the step (`parse`, `apt`, `setup`, …), its reason, and its output's tail, redacted. */
+  step?: string;
+  why?: string;
+  output?: string;
+}
+
 /**
  * Each chat's computer (docs/design.md §15, src/capabilities/computer/): a Hangar Disk mounted as the home
  * of a Hangar Container, both named after the chat, created on the first exec and never deleted. This row is
@@ -717,6 +731,11 @@ export const computers = sqliteTable("computers", {
   leases: text("leases", { mode: "json" }).notNull().default({}).$type<Record<string, string>>(),
   /** When the last exec ended (or started): the idle clock. */
   lastExecAt: text("last_exec_at"),
+  /**
+   * The last time ~/.computer.yaml was applied (declared.ts `ensureDeclared`): when, whether it worked, and, failed,
+   * the step, its reason and its output's tail, redacted before it is written. Null: none recorded yet.
+   */
+  lastApply: text("last_apply", { mode: "json" }).$type<LastApply>(),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
 
@@ -763,9 +782,12 @@ export const schedules = sqliteTable(
     /** Recurring: a cron expression, read in `time_zone`. */
     cron: text("cron"),
     timeZone: text("time_zone").notNull(),
-    /** active → done (a one-shot that fired) | cancelled. */
-    state: text("state", { enum: ["active", "done", "cancelled"] }).notNull().default("active"),
-    /** The next time it is due (ISO, UTC); null once done or cancelled. */
+    /**
+     * active → done (a one-shot that fired) | cancelled; active ⇄ paused (from the console: store/schedules.ts
+     * `pauseSchedule`, `resumeSchedule`). A paused schedule never fires; resumed, it runs next from NOW.
+     */
+    state: text("state", { enum: ["active", "paused", "done", "cancelled"] }).notNull().default("active"),
+    /** The next time it is due (ISO, UTC); null once done or cancelled. Paused: as it was when paused. */
     nextAt: text("next_at"),
     lastFiredAt: text("last_fired_at"),
     createdTurnId: integer("created_turn_id"),

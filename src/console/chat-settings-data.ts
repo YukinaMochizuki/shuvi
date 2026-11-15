@@ -10,12 +10,14 @@ import type { Db } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
 import { defaultModel, listModels } from "../store/models.ts";
 import { runningTurnFor } from "../store/turns.ts";
-import type { CapabilityRow, ChatSettingsView, ModelGroup, PermissionsView, Picked, Switching } from "./chat-settings.ts";
+import type { CapabilityRow, ChatSettingsView, ModelGroup, PermissionsView, Picked, SettingsCategory, Switching } from "./chat-settings.ts";
 import type { Flash } from "./home.ts";
 import { ownFiles } from "./home-data.ts";
 import { chatName, conversationLabel } from "./pages.ts";
 import { formFromEntry, type PolicyForm } from "./policy-form.ts";
 import { chatById } from "./queries.ts";
+import { loadExtras } from "./chat-extras-data.ts";
+import type { ComputerConfig } from "../capabilities/computer/config.ts";
 import { chatGrouping, conversations } from "./sessions.ts";
 import type { Raw } from "./html.ts";
 
@@ -32,12 +34,14 @@ export interface ChatSettingsDeps {
   registry: readonly Capability<any>[];
   /** The ids set up in this process; absent: all of the registry. */
   enabled?: ReadonlySet<string>;
+  /** The computer's configuration, when it is set up in this process (its secrets file, its idle time, Hangar). */
+  computer?: ComputerConfig | null;
 }
 
 /** The result of a write, shown once on the page it comes back to (chat-settings-write.ts keeps it). */
 export interface ChatSettingsResult {
   chatId: number;
-  section: "model" | "profile" | "conversation" | "permissions";
+  section: "model" | "profile" | "conversation" | "permissions" | "schedules" | "secrets";
   flash?: Flash;
   /** A switch asked for from the page: the page follows it until it is done. */
   switchRequest?: number;
@@ -91,7 +95,19 @@ export function loadPermissions(deps: ChatSettingsDeps, chat: { kind: "private" 
   };
 }
 
-export function loadChatSettings(deps: ChatSettingsDeps, chatId: number, q: URLSearchParams, ctx: { timeZone: string; now: number; csrf: string; who?: string }, result?: ChatSettingsResult): ChatSettingsView | null {
+/** The category a result's section is on (chat-settings.ts `CATEGORIES`). */
+export function categoryOf(section: ChatSettingsResult["section"]): SettingsCategory {
+  return section === "permissions" ? "permissions" : section === "schedules" || section === "secrets" ? "automation" : "chat";
+}
+
+export function loadChatSettings(
+  deps: ChatSettingsDeps,
+  chatId: number,
+  q: URLSearchParams,
+  ctx: { timeZone: string; now: number; csrf: string; who?: string; category?: SettingsCategory },
+  result?: ChatSettingsResult,
+): ChatSettingsView | null {
+  const category = ctx.category ?? "chat";
   const { db } = deps;
   const chat = chatById(db, chatId);
   if (!chat) return null;
@@ -116,7 +132,7 @@ export function loadChatSettings(deps: ChatSettingsDeps, chatId: number, q: URLS
       if (p.noop) picked = { id: to, noop: `${chatName(chat)} is already on ${to}.` };
       else {
         const l = modeLines(p, ctx.now);
-        picked = { id: to, lossless: l.lossless, lossy: l.lossy, running: l.running };
+        picked = { id: to, lossless: l.lossless, lossy: l.lossy, clean: l.clean, running: l.running };
       }
     } catch (e) {
       picked = { id: to, error: e instanceof Error ? e.message : String(e) };
@@ -156,6 +172,7 @@ export function loadChatSettings(deps: ChatSettingsDeps, chatId: number, q: URLS
 
   return {
     chat: { id: chat.id, name: chatName(chat), kind: chat.kind as "private" | "group", tgChatId: chat.tgChatId },
+    category,
     timeZone: ctx.timeZone,
     now: ctx.now,
     csrf: ctx.csrf,
@@ -170,9 +187,20 @@ export function loadChatSettings(deps: ChatSettingsDeps, chatId: number, q: URLS
       contextTokens: chat.backendSessionId ? chat.contextTokens : null,
       ...(running ? { running: { id: running.id, startedAt: running.startedAt } } : {}),
       confirmNew: q.get("confirm") === "new",
+      confirmClean: q.get("confirm") === "clean",
       ...(flashFor("conversation") ? { flash: flashFor("conversation")! } : {}),
     },
     permissions: loadPermissions(deps, { kind: chat.kind as "private" | "group", tgChatId: chat.tgChatId }, result),
+    // The Automation & machine page's sections, read only there (the secrets file, the computer's row).
+    ...(category === "automation"
+      ? loadExtras(
+          { db, schedulesOn: !deps.enabled || deps.enabled.has("schedules"), computer: deps.computer ?? null, ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}) },
+          chatId,
+          q,
+          ctx.now,
+          result?.section === "schedules" || result?.section === "secrets" ? { section: result.section, ...(result.flash ? { flash: result.flash } : {}) } : undefined,
+        )
+      : {}),
   };
 }
 

@@ -7,7 +7,8 @@ import { HOME_DIR } from "./config.ts";
 import type { Computers } from "./computer.ts";
 import { describeError } from "./hangar/client.ts";
 import { secretsForChat } from "./secrets.ts";
-import { acquireLease, getComputer, releaseLease } from "./state.ts";
+import { acquireLease, getComputer, releaseLease, updateComputer } from "./state.ts";
+import type { Db } from "../../store/db.ts";
 
 /**
  * `~/.computer.yaml`: what a chat's computer has outside its home, declared in its home (docs/design.md §15).
@@ -35,6 +36,9 @@ import { acquireLease, getComputer, releaseLease } from "./state.ts";
  *            result of the command that triggered it (which then runs anyway, without it), and an alert to
  *            the owner. The hash is NOT recorded as applied, only as failed for this boot: the next start
  *            tries again, and so does `apply_computer_config` (`force`), without waiting for one.
+ *   RECORD   every apply that ran (applied, or failed at a step, the parse included) is recorded on the chat's
+ *            `computers` row (`last_apply`: when, ok or the step and its reason, the output's tail, redacted
+ *            already), for the console's chat settings page. A file found current, or none, records nothing.
  *   ONE AT A TIME   the apply holds a lock (`flock` on /run/shuvi/apply.lock) and checks the marker again
  *            under it, so two commands starting at once apply once.
  *
@@ -163,7 +167,22 @@ async function recordFailed(computers: Computers, container: string, hash: strin
   await computers.hangar.run(container, { command: ["bash", "-c", `mkdir -p /run/shuvi && echo ${hash} > ${FAILED_FILE}`], user: ROOT, workingDir: HOME_DIR }).catch(() => {});
 }
 
+/** The longest output tail `last_apply` keeps. */
+const RECORD_TAIL = 1_200;
+
+/** Record an apply that ran on the chat's row (see the header). The output is redacted before it gets here. */
+export function recordApply(db: Db, chatId: number, o: Extract<DeclaredOutcome, { kind: "applied" | "failed" }>, at = new Date()): void {
+  const tail = (s: string) => (s.length > RECORD_TAIL ? `…${s.slice(-RECORD_TAIL)}` : s);
+  updateComputer(db, chatId, {
+    lastApply:
+      o.kind === "applied"
+        ? { at: at.toISOString(), ok: true, what: what(o.declared), ms: o.ms }
+        : { at: at.toISOString(), ok: false, step: o.step, why: o.why, ...(o.output.trim() ? { output: tail(o.output.trim()) } : {}) },
+  });
+}
+
 function alert(computers: Computers, chatId: number, o: Extract<DeclaredOutcome, { kind: "failed" }>): void {
+  recordApply(computers.db, chatId, o);
   const chat = getChat(computers.db, chatId);
   const label = chat ? chatLabel(chat) : `chat ${chatId}`;
   const tail = o.output.trim() ? `\n${o.output.trim().slice(-600)}` : "";
@@ -237,7 +256,11 @@ export async function ensureDeclared(computers: Computers, chat: Chat, opts: { f
   const outputOf = (s: string) => trim(red.redact((by[s] ?? []).join("\n").trim()));
   const all = trim(red.redact(Object.values(by).flat().join("\n").trim()));
   if (end?.kind === "current") return { kind: "current", hash };
-  if (end?.kind === "done") return { kind: "applied", hash, declared: d, ms, output: all };
+  if (end?.kind === "done") {
+    const applied = { kind: "applied" as const, hash, declared: d, ms, output: all };
+    recordApply(computers.db, chat.id, applied);
+    return applied;
+  }
   const o =
     end?.kind === "fail"
       ? { kind: "failed" as const, hash, step: end.step, why: exitWhy(end.code, stepSec), output: outputOf(end.step) }

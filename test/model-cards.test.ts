@@ -97,8 +97,8 @@ describe("the switch card", () => {
     say(db, "/model 1");
     const id = lastCard(db).id;
     expect(press(db, button(db, "vllm/llama"))).toBe("");
-    expect(getCard(db, id)!.text).toBe("Switch chat 1 (tg 1001) to vllm/llama:\nLossless: copies the whole conversation (2 messages) to vllm/llama\nLossy: vllm/llama starts fresh with the last 10 messages");
-    expect(buttons(db).map((b) => b.text)).toEqual(["Lossless", "Lossy", "‹ Back"]);
+    expect(getCard(db, id)!.text).toBe("Switch chat 1 (tg 1001) to vllm/llama:\nLossless: copies the whole conversation (2 messages) to vllm/llama\nLossy: vllm/llama starts fresh with the last 10 messages\nClean start: starts vllm/llama fresh, with no messages");
+    expect(buttons(db).map((b) => b.text)).toEqual(["Lossless", "Lossy", "Clean start", "‹ Back"]);
     // Back, and forth: nothing is lost on the way.
     press(db, button(db, "‹ Back"));
     press(db, button(db, "vllm/llama"));
@@ -200,19 +200,45 @@ describe("the switch card", () => {
     say(db, "/model 1 vllm/nope lossy");
     expect(replies(db).slice(1)).toEqual([
       "chat 1 (tg 1001): already on vllm/llama",
-      "Usage: /model <chat> [<provider>/<model> lossless|lossy]",
+      "Usage: /model <chat> [<provider>/<model> lossless|lossy|clean]",
       "No chat 7. Use its number from /status, or its Telegram id.",
       "There is no model vllm/nope in the catalog. /models lists them.",
     ]);
   });
 
+  test("Clean start: from the card or /model <chat> <model> clean; the result says so; the target's conversation is dropped", () => {
+    const { db, chatId } = setup();
+    say(db, "/model 1");
+    const id = lastCard(db).id;
+    press(db, button(db, "vllm/llama"));
+    press(db, button(db, "Clean start"));
+    expect(getCard(db, id)!.text).toBe("chat 1 (tg 1001) → vllm/llama (clean): switching…");
+    expect(getSwitchRequest(db, getCard(db, id)!.switchRequestId!)!.mode).toBe("clean");
+    switchRequestPass(db, () => {});
+    switchCardPass(db);
+    expect(getCard(db, id)!.text).toBe("chat 1 (tg 1001) → vllm/llama (clean start, a new conversation with no messages)");
+    expect(getChat(db, chatId)!.backendSessionId).toBeNull();
+    // Back to qwen, clean too, with no card: qwen's parked conversation is dropped, not resumed.
+    say(db, "/model 1 vllm/qwen clean");
+    switchRequestPass(db, () => {});
+    switchCardPass(db);
+    expect(replies(db).at(-1)).toBe("chat 1 (tg 1001) → vllm/qwen (clean start, a new conversation with no messages)");
+    expect(getChat(db, chatId)!.backendSessionId).toBeNull();
+    expect(db.$client.query("select model from chat_conversations where chat_id = ?").all(chatId)).toEqual([]);
+  });
+
   test("the mode lines, and relative times", () => {
     const now = Date.parse("2026-11-13T12:00:00Z");
-    expect(modeLines({ to: "x/y", noop: false, lossless: { kind: "carry", messages: 1 }, lossy: { kind: "resume", since: "2026-11-10T11:00:00Z" }, running: 812 }, now)).toEqual({
+    expect(modeLines({ to: "x/y", noop: false, lossless: { kind: "carry", messages: 1 }, lossy: { kind: "resume", since: "2026-11-10T11:00:00Z" }, clean: { drops: true, since: "2026-11-10T11:00:00Z" }, running: 812 }, now)).toEqual({
       lossless: "carries 1 new message into x/y's conversation",
       lossy: "resumes x/y's conversation from 3 days ago",
+      clean: "starts x/y fresh, with no messages (its conversation from 3 days ago is dropped)",
       running: "turn 812 is running and will be stopped",
     });
+    expect(modeLines({ to: "x/y", noop: false, lossless: { kind: "copy", messages: 4 }, lossy: { kind: "fresh" }, clean: { drops: false }, running: null }, now).clean).toBe("starts x/y fresh, with no messages");
+    expect(modeLines({ to: "x/y", noop: false, lossless: { kind: "carry", messages: 0 }, lossy: { kind: "resume", since: null }, clean: { drops: true, since: null }, running: null }, now).clean).toBe(
+      "starts x/y fresh, with no messages (its current conversation is dropped)",
+    );
     expect(relativeTime("2026-11-13T11:55:00Z", now)).toBe("5 minutes ago");
     expect(relativeTime("2026-11-13T09:00:00Z", now)).toBe("3 hours ago");
   });

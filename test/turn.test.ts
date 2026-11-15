@@ -11,6 +11,9 @@ import { enabledCapabilities } from "../src/capabilities/index.ts";
 import type { Db } from "../src/store/db.ts";
 import { enqueueOutbound, getChat, pendingOutbound, type BotMessagePayload, type BotReactionPayload } from "../src/store/events.ts";
 import { claimTurn, DRAIN_STOP, finishTurn, getTurn, markDrainStop, markStop, saveSession } from "../src/store/turns.ts";
+import { modelSwitches } from "../src/store/schema.ts";
+import { startClean } from "../src/agent/switch.ts";
+import { addModel, addProvider } from "../src/store/models.ts";
 import { lastSeq, memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./helpers.ts";
 
 const emptyHome = mkdtempSync(join(tmpdir(), "shuvi-home-"));
@@ -220,6 +223,52 @@ describe("runTurn: input and the cursor", () => {
     expect(prompt).toContain("we were just talking about headphones");
     expect(prompt).toContain("· ⚙ you] QC Ultra is good");
     expect(prompt.indexOf("which colour then")).toBeGreaterThan(prompt.indexOf("(New messages:)"));
+  });
+
+  test("after a clean start (agent/switch.ts), the new conversation opens with its input only; after a later /new, with history again", async () => {
+    const db = memDb();
+    ownerSays(db, "we were just talking about headphones");
+    await turnWith(db, [{ token: "QC Ultra is good" }]);
+    db.$client.exec("update chat_events set status = 'sent' where kind = 'bot_message'");
+    // What a clean switch leaves: no conversation, and its unclaimed switch row.
+    db.$client.exec("update chats set backend_session_id = null");
+    db.insert(modelSwitches).values({ chatId: ownerChatId(db), fromModel: "example/a", toModel: "example/b", mode: "clean" }).run();
+    ownerSays(db, "which colour then");
+    const { adapter, turn } = await turnWith(db, [{ token: "black" }]);
+    const prompt = JSON.stringify(adapter.calls[0]!.prompt);
+    expect(adapter.calls[0]!.method).toBe("run");
+    expect(prompt).toContain("which colour then");
+    expect(prompt).not.toContain("headphones");
+    expect(prompt).not.toContain("QC Ultra");
+    expect(prompt).not.toContain("(New messages:)");
+    // The model is never told; the transcript notes it for the console.
+    expect(prompt).not.toContain("clean");
+    const notes = db.$client.query("select text from turn_steps where turn_id = ? and kind = 'note'").all(turn.id) as { text: string }[];
+    expect(notes.some((n) => n.text.includes("clean start"))).toBe(true);
+    // A later /new is a /new: its fresh conversation opens with the recent exchange.
+    db.$client.exec("update chat_events set status = 'sent' where kind = 'bot_message'");
+    db.$client.exec("update chats set backend_session_id = null");
+    ownerSays(db, "and the case?");
+    const again = await turnWith(db, [{ token: "grey" }]);
+    expect(JSON.stringify(again.adapter.calls[0]!.prompt)).toContain("which colour then");
+  });
+
+  test("Start clean (agent/switch.ts startClean): the next turn is a NEW conversation (not a switch) that opens with its input only", async () => {
+    const db = memDb();
+    addProvider(db, { name: "vllm", kind: "openai-compat", baseUrl: "http://127.0.0.1:9/v1" });
+    addModel(db, { provider: "vllm", model: "qwen", contextWindow: 32_000, isDefault: true });
+    ownerSays(db, "we were just talking about headphones");
+    await turnWith(db, [{ token: "QC Ultra is good" }]);
+    db.$client.exec("update chat_events set status = 'sent' where kind = 'bot_message'");
+    startClean(db, ownerChatId(db));
+    ownerSays(db, "which colour then");
+    const { adapter, turn } = await turnWith(db, [{ token: "black" }]);
+    const prompt = JSON.stringify(adapter.calls[0]!.prompt);
+    expect(adapter.calls[0]!.method).toBe("run");
+    expect(prompt).toContain("which colour then");
+    expect(prompt).not.toContain("headphones");
+    expect(prompt).not.toContain("QC Ultra");
+    expect(getTurn(db, turn.id)!.opening).toBe("new");
   });
 
   test("the first turn starts a conversation with the system prompt; later turns continue it with the prompt built afresh", async () => {

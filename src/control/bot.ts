@@ -29,7 +29,7 @@ import { turnSummary } from "./turn-summary.ts";
  *                    what is off; <chat> is the number /policy shows, or the Telegram id. Telegram HTML,
  *                    queued as `reply_html` rows, one per message
  *   /turn <id>       one paragraph on that turn, and its link in the console (turn-summary.ts)
- *   /model <chat> [<provider>/<model> lossless|lossy]
+ *   /model <chat> [<provider>/<model> lossless|lossy|clean]
  *                    a card to switch that chat's model (the same card `/model` in the chat opens), or, with
  *                    a model and a mode, the switch at once, its result a reply (model-cards.ts)
  *   /models [add <provider>/<model> [<context_window>]]
@@ -86,7 +86,7 @@ export const CONTROL_COMMANDS = [
   { command: "stop", description: "Stop a chat's turn: /stop <chat> (the number from /status)" },
   { command: "policy", description: "What each chat may do; /policy <chat> for one in detail" },
   { command: "turn", description: "One turn in a paragraph, with its console link: /turn <id>" },
-  { command: "model", description: "Switch a chat's model: /model <chat> [<provider>/<model> lossless|lossy]" },
+  { command: "model", description: "Switch a chat's model: /model <chat> [<provider>/<model> lossless|lossy|clean]" },
   { command: "models", description: "The model catalog; /models add <provider>/<model> [<context_window>]" },
   { command: "profile", description: "Switch a chat's profile: /profile <chat>" },
   { command: "provider", description: "/provider add <name> <base_url> [<profile>.<VAR>] | add <name> claude [<dir>] | remove <name>" },

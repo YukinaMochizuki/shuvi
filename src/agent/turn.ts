@@ -40,7 +40,7 @@ import { turns } from "../store/schema.ts";
 import { eq } from "drizzle-orm";
 import { withCall } from "./call-context.ts";
 import { buildPromptSections, joinSections } from "./prompt.ts";
-import { claimSwitches, switchNote } from "./switch.ts";
+import { claimSwitches, isStartClean, opensClean, switchNote } from "./switch.ts";
 import { renderMidTurn, renderTurnInput, renderWithHistory, timeNote, type InputOptions, type Perceive } from "./render.ts";
 import { recordingBoundary, TurnRecorder, type RecorderOptions } from "./transcript.ts";
 import { isTrigger, type BotIdentity } from "./triggers.ts";
@@ -479,7 +479,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   }
   // The switches since the last turn (agent/switch.ts) are this turn's to record.
   const switches = claimSwitches(db, chat.id, turnId);
-  const switched = switches.some((s) => s.mode !== "native");
+  // A "Start clean" of the current model is a new conversation, not a switch (agent/switch.ts `isStartClean`).
+  const switched = switches.some((s) => s.mode !== "native" && !isStartClean(s));
   // In a group: from up to GROUP_CONTEXT messages before the first that woke the turn.
   let input = unseen;
   let context = 0;
@@ -493,7 +494,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const unread = unseen.length - input.length;
   // Everything said before the first message being answered, the assistant's own replies included
   // (those come after the cursor, so the cursor is not the bound).
-  const history = chat.backendSessionId ? [] : recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW);
+  // After a clean start (agent/switch.ts), none: the new conversation opens with its input only.
+  const history = chat.backendSessionId || opensClean(db, chat, switches) ? [] : recentHistory(db, chat.id, unseen[0]!.seq - 1, HISTORY_ON_NEW);
   const s: TurnState = { chat, turnId, passed: false, stopping: deps.signal?.aborted ?? false, n: 0, fromSeq: input[context]!.seq - 1, toSeq: input.at(-1)!.seq };
   if (group) {
     s.wokenBy = turn.triggerSeq ?? turn.toSeq;

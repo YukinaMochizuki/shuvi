@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { enterChatModel, getSwitchRequest, requestSwitch } from "../src/agent/switch.ts";
+import { enterChatModel, getSwitchRequest, opensClean, requestSwitch } from "../src/agent/switch.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { allowedHosts, allowedOrigins } from "../src/console/index.ts";
 import { csrfToken, handleConsole, LOGIN_HEADER, type ConsoleDeps } from "../src/console/server.ts";
@@ -134,7 +134,8 @@ async function act(w: World, chatId: number, verb: string, fields: [string, stri
   const res = await post(w, `/chats/${chatId}/settings/${verb}`, fields);
   expect(res.status).toBe(303);
   const location = res.headers.get("location")!;
-  expect(location).toMatch(new RegExp(`^/chats/${chatId}/settings\\?r=[\\w-]+#\\w+$`));
+  // Back to the category the write came from: Chat (the bare URL), Permissions.
+  expect(location).toMatch(new RegExp(`^/chats/${chatId}/settings${verb === "policy" ? "/permissions" : ""}\\?r=[\\w-]+#\\w+$`));
   return { html: await page(w, location), location };
 }
 
@@ -166,7 +167,20 @@ describe("the way in", () => {
     expect(chat).not.toContain(`/chats/${w.dm}/profile`);
     const s = await page(w, `/chats/${w.dm}/settings`);
     expect(s).toContain("<h1>DM · Owner</h1>");
-    for (const id of ["model", "profile", "conversation", "permissions"]) expect(s).toContain(`id="${id}"`);
+    // The Chat category: its three sections, and real tabs to the other two pages, Chat marked.
+    for (const id of ["model", "profile", "conversation"]) expect(s).toContain(`id="${id}"`);
+    expect(s).not.toContain('id="permissions"');
+    expect(s).toContain(`<a class="on" href="/chats/${w.dm}/settings" aria-current="page">Chat</a>`);
+    expect(s).toContain(`<a href="/chats/${w.dm}/settings/permissions">Permissions</a>`);
+    expect(s).toContain(`<a href="/chats/${w.dm}/settings/automation">Automation &amp; machine</a>`);
+    const p = await page(w, `/chats/${w.dm}/settings/permissions`);
+    expect(p).toContain('id="permissions"');
+    expect(p).not.toContain('id="model"');
+    expect(p).toContain(`<a class="on" href="/chats/${w.dm}/settings/permissions" aria-current="page">Permissions</a>`);
+    const a = await page(w, `/chats/${w.dm}/settings/automation`);
+    for (const id of ["schedules", "secrets", "computer"]) expect(a).toContain(`id="${id}"`);
+    expect(a).not.toContain('id="model"');
+    expect((await get(w, `/chats/${w.dm}/settings/elsewhere`)).status).toBe(404);
     expect(s).toContain('<span class="mid">vllm/qwen</span>');
     expect(s).toContain('<span class="nowtag">current</span>');
     expect((await get(w, "/chats/999/settings")).status).toBe(404);
@@ -227,6 +241,24 @@ describe("model", () => {
     expect((await act(w, w.dm, "switch", { to: "vllm/llama", mode: "lossy" })).html).toContain("already on vllm/llama");
     expect((await act(w, w.dm, "switch", { to: "nope/none", mode: "lossy" })).html).toContain("There is no model nope/none in the catalog.");
   });
+
+  test("Clean start is the third mode: its preview line, the request, the result in the bot's words", async () => {
+    const w = world();
+    const picked = await page(w, `/chats/${w.dm}/settings?to=vllm/llama`);
+    expect(picked).toContain('<input type="hidden" name="mode" value="clean">');
+    expect(picked).toContain('<span class="mname">Clean start</span> <span class="mline">starts vllm/llama fresh, with no messages</span>');
+    await act(w, w.dm, "switch", { to: "vllm/llama", mode: "clean" });
+    const req = w.db.$client.query("select id, mode from model_switch_requests").get() as { id: number; mode: string };
+    expect(req.mode).toBe("clean");
+    switchRequestPass(w.db, () => {});
+    switchCardPass(w.db);
+    const to = (await get(w, `/chats/${w.dm}/settings/switching?req=${req.id}`)).headers.get("hx-redirect")!;
+    expect(await page(w, to)).toContain(" → vllm/llama (clean start, a new conversation with no messages)</p>");
+    expect(getChat(w.db, w.dm)!.backendSessionId).toBeNull();
+    // Back to qwen: its conversation (parked by the switch) would be dropped, and the preview says so.
+    expect(await page(w, `/chats/${w.dm}/settings?to=vllm/qwen`)).toMatch(/starts vllm\/qwen fresh, with no messages \(its conversation from [^)]+ is dropped\)/);
+    expect((await act(w, w.dm, "switch", { to: "vllm/llama", mode: "sideways" })).html).toContain("Pick Lossless, Lossy or Clean start.");
+  });
 });
 
 describe("profile", () => {
@@ -235,7 +267,7 @@ describe("profile", () => {
     const { html, location } = await act(w, w.dm, "profile", { profile: "work" });
     expect(getChat(w.db, w.dm)!.profile).toBe("work");
     expect(html).toContain("DM · Owner now runs on work, from its next turn.");
-    expect(html).toMatch(/class="prow cur"[^>]*><span class="radio-dot"[^>]*><\/span><span class="pname">work<\/span>/);
+    expect(html).toMatch(/class="prow cur"[^>]*><span class="radio-dot"[^>]*><\/span> <span class="pname">work<\/span>/);
     expect(await page(w, location)).not.toContain("now runs on work");
     expect((await act(w, w.dm, "profile", { profile: "nope" })).html).toContain("There is no profile nope.");
     await act(w, w.dm, "profile", { profile: "" });
@@ -274,15 +306,49 @@ describe("conversation", () => {
   });
 });
 
+describe("Start clean", () => {
+  test("beside New conversation: one line, asks first; then as /new, but the next turn opens with no messages", async () => {
+    const w = world();
+    const s = await page(w, `/chats/${w.dm}/settings`);
+    expect(s).toContain("<b>Start clean</b> <span>As New conversation, but her next turn opens with no earlier messages at all, only the new ones.");
+    expect(s).toContain(`href="/chats/${w.dm}/settings?confirm=clean#conversation"`);
+    expect(s).not.toContain(`action="/chats/${w.dm}/settings/clean"`);
+    const asking = await page(w, `/chats/${w.dm}/settings?confirm=clean`);
+    expect(asking).toContain("<b>Start clean?</b>");
+    expect(asking).toContain(`action="/chats/${w.dm}/settings/clean"`);
+    expect(getChat(w.db, w.dm)!.backendSessionId).toBe("oa-1");
+    expect((await get(w, `/chats/${w.dm}/settings/clean`)).status).toBe(405);
+    expect((await post(w, `/chats/${w.dm}/settings/clean`, {}, { origin: null })).status).toBe(403);
+    expect(getChat(w.db, w.dm)!.backendSessionId).toBe("oa-1");
+    const { html } = await act(w, w.dm, "clean", {});
+    expect(html).toContain("DM · Owner starts clean: her next turn here opens with its new messages only, no earlier ones.");
+    expect(getChat(w.db, w.dm)!.backendSessionId).toBeNull();
+    const row = w.db.$client.query("select mode, from_model as f, to_model as t from model_switches order by id desc limit 1").get();
+    expect(row).toEqual({ mode: "clean", f: "vllm/qwen", t: "vllm/qwen" });
+    expect(opensClean(w.db, getChat(w.db, w.dm)!, [])).toBe(true);
+  });
+
+  test("a running turn is stopped first, as for New conversation", async () => {
+    const w = world();
+    ownerSays(w.db, "go");
+    const turn = claimTurn(w.db, w.dm)!;
+    setTurnPid(w.db, turn.id, 4242);
+    expect((await page(w, `/chats/${w.dm}/settings?confirm=clean`))).toContain(`Turn ${turn.id} is running and will be stopped.`);
+    const { html } = await act(w, w.dm, "clean", {});
+    expect(html).toContain(`Stopped turn ${turn.id};`);
+    expect(w.signals).toEqual([4242]);
+  });
+});
+
 describe("permissions", () => {
   test("the form shows the entry; private layers are not offered in a group, and are in the DM", async () => {
     const w = world();
-    const g = await page(w, `/chats/${w.group}/settings`);
+    const g = await page(w, `/chats/${w.group}/settings/permissions`);
     expect(g).toContain(`listed as <span class="mono">"${GROUP}"</span>`);
     expect(g).not.toContain('name="persona" value="private"');
     expect(g).not.toContain('name="memory" value="private"');
     expect(g).toContain('name="tool" value="web" checked');
-    const d = await page(w, `/chats/${w.dm}/settings`);
+    const d = await page(w, `/chats/${w.dm}/settings/permissions`);
     expect(d).toContain('name="persona" value="private" checked');
   });
 
@@ -373,7 +439,7 @@ describe("permissions", () => {
   test("a group not listed starts from the unknown-group card's proposal, and saving adds it at the end of chats", async () => {
     const w = world();
     const other = ensureChat(w.db, { id: -100999, kind: "group", title: "New Example" }).id;
-    const html = await page(w, `/chats/${other}/settings`);
+    const html = await page(w, `/chats/${other}/settings/permissions`);
     expect(html).toContain("This group is not in policy.yaml");
     const review = await act(w, other, "policy", [["trigger_mode", "some"], ["trigger", "mention"], ["persona", "public"], ["memory", "chat"], ["tools_mode", "some"], ["tool", "web"], ["operators_mode", "none"], ["action", "review"]]);
     const base = /name="base" value="([0-9a-f]+)"/.exec(review.html)![1]!;
@@ -395,6 +461,28 @@ describe("policy/edit.ts replaceEntry", () => {
     expect(w.rewritten).toBe(true);
     expect(parsePolicy(w.text, OWNER)).toHaveProperty("policy");
     expect(replaceEntry(POLICY, String(GROUP), { persona: ["private"] }, OWNER)).toEqual({ error: expect.stringContaining("private is for the owner's DM only") });
+  });
+});
+
+describe("without the stylesheet", () => {
+  test("adjacent inline pieces are separated by real whitespace, so each page still reads as text", async () => {
+    const w = world();
+    const text = async (path: string) =>
+      (await page(w, path))
+        .replace(/<[^>]+>/g, "")
+        .replace(/&amp;/g, "&")
+        .replace(/&#39;/g, "'")
+        .replace(/\s+/g, " ");
+    const chat = await text(`/chats/${w.dm}/settings`);
+    expect(chat).toContain("Base her own files, no overlay");
+    expect(chat).toContain("work Work hours no files of its own yet");
+    expect(chat).toContain("Model what her turns here run on The catalog →");
+    expect(chat).toContain("New conversation As /new does:");
+    expect(chat).toContain("Chat Permissions Automation & machine");
+    const perms = await text(`/chats/${w.group}/settings/permissions`);
+    expect(perms).toContain("web lookups web_search");
+    expect(perms).toContain("Review changes Reset Nothing is written");
+    expect(perms).toContain("persona public persona");
   });
 });
 
@@ -456,7 +544,7 @@ describe("review fixes", () => {
   test("a broken policy.yaml says what is wrong and where to fix it, with no link to Home", async () => {
     const w = world();
     byHand(w.home, { "policy.yaml": POLICY.replace("trigger: [mention, reply]", "trigger: [shouting]") });
-    const html = await page(w, `/chats/${w.group}/settings`);
+    const html = await page(w, `/chats/${w.group}/settings/permissions`);
     expect(html).toContain("policy.yaml is broken as it is:");
     expect(html).toContain("edit home/policy.yaml on the machine shuvi runs on, or ask her to propose a change");
     expect(html).not.toContain("/home?file=policy.yaml");

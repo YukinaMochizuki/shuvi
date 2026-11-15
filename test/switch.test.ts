@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "agent-runtime/openai-compat";
 import { appendToClaudeSession, claudeSessionMessages, findClaudeSession } from "agent-runtime/convert";
-import { conversationPosition, enterChatModel, getSwitchRequest, previewSwitch, requestSwitch, switchModel, type SwitchMode } from "../src/agent/switch.ts";
+import { claimSwitches, conversationPosition, enterChatModel, getSwitchRequest, isStartClean, opensClean, previewSwitch, requestSwitch, startClean, switchModel, switchNote, type SwitchMode } from "../src/agent/switch.ts";
 import { switchRequestPass } from "../src/server/commands.ts";
 import { wakerPass } from "../src/server/waker.ts";
 import { appendMessages, conversationSince, conversationStore, pruneConversations } from "../src/store/conversations.ts";
@@ -411,13 +411,13 @@ describe("previewSwitch: what each mode would do, without writing", () => {
   test("a target with no conversation: lossless copies all of it, lossy starts fresh; then it has one", () => {
     const w = started();
     const before = snapshot(w);
-    expect(previewSwitch(w.db, w.chatId, "vllm/qwen")).toEqual({ to: "vllm/qwen", noop: false, lossless: { kind: "copy", messages: 2 }, lossy: { kind: "fresh" }, running: null });
+    expect(previewSwitch(w.db, w.chatId, "vllm/qwen")).toEqual({ to: "vllm/qwen", noop: false, lossless: { kind: "copy", messages: 2 }, lossy: { kind: "fresh" }, clean: { drops: false }, running: null });
     expect(snapshot(w)).toBe(before);
     switchModel(w.db, w.chatId, "vllm/qwen", "lossless");
     speak(w, "T2");
     const parkedAt = w.db.select().from(chatConversations).get()!.parkedAt;
     // Back to opus: it lacks T2 only, and its own conversation was parked when the chat left it.
-    expect(previewSwitch(w.db, w.chatId, "claude/opus")).toEqual({ to: "claude/opus", noop: false, lossless: { kind: "carry", messages: 2 }, lossy: { kind: "resume", since: parkedAt }, running: null });
+    expect(previewSwitch(w.db, w.chatId, "claude/opus")).toEqual({ to: "claude/opus", noop: false, lossless: { kind: "carry", messages: 2 }, lossy: { kind: "resume", since: parkedAt }, clean: { drops: true, since: parkedAt }, running: null });
     // The preview's count is what the switch then carries.
     expect(switchModel(w.db, w.chatId, "claude/opus", "lossless").carried).toBe(2);
   });
@@ -586,5 +586,148 @@ describe("switch requests", () => {
     expect(runningTurnFor(w.db, w.chatId)).toBeUndefined();
     expect(() => requestSwitch(w.db, w.chatId, "vllm/nope", "lossy")).toThrow(/no model/);
     expect(switchModel(w.db, w.chatId, "claude/opus", "lossy")).toMatchObject({ changed: true, from: "claude/sonnet" });
+  });
+});
+
+describe("clean start", () => {
+  /** opus T1 → lossless to qwen, T2 → lossy back to opus, T3: qwen's conversation is parked, holding T1 and T2. */
+  function travelled(): World {
+    const w = started();
+    switchModel(w.db, w.chatId, "vllm/qwen", "lossless");
+    speak(w, "T2");
+    switchModel(w.db, w.chatId, "claude/opus", "lossy");
+    speak(w, "T3");
+    return w;
+  }
+
+  test("nothing is carried, the target's parked conversation is dropped, the one left is parked; the row and the note say so", () => {
+    const w = travelled();
+    const parkedAt = w.db.select().from(chatConversations).get()!.parkedAt;
+    expect(previewSwitch(w.db, w.chatId, "vllm/qwen").clean).toEqual({ drops: true, since: parkedAt });
+    expect(switchModel(w.db, w.chatId, "vllm/qwen", "clean")).toEqual({ mode: "clean", changed: true, from: "claude/opus", to: "vllm/qwen", carried: 0, compacted: false, resumed: false });
+    expect(active(w)).toEqual({ model: "vllm/qwen", texts: [] });
+    expect(getChat(w.db, w.chatId)!.backendSessionId).toBeNull();
+    expect(getChat(w.db, w.chatId)!.model).toBe("vllm/qwen");
+    // Opus's conversation is kept (parked), qwen's is gone.
+    expect(parked(w)).toEqual({ "claude/opus": ["T1-PROMPT", "T1-ANSWER", "T3-PROMPT", "T3-ANSWER"] });
+    const row = w.db.select().from(modelSwitches).all().at(-1)!;
+    expect(row).toMatchObject({ mode: "clean", fromModel: "claude/opus", toModel: "vllm/qwen", toSessionId: null, carried: 0 });
+    expect(switchNote(row)).toBe("Model switched from claude/opus to vllm/qwen, clean start: a new conversation with nothing carried, opening with this turn's input only (not the chat's last messages).");
+    // The next turn starts qwen's new conversation with nothing; back to opus resumes opus's, untouched.
+    speak(w, "T4");
+    expect(active(w)).toEqual({ model: "vllm/qwen", texts: ["T4-PROMPT", "T4-ANSWER"] });
+    switchModel(w.db, w.chatId, "claude/opus", "lossy");
+    expect(active(w).texts).toEqual(["T1-PROMPT", "T1-ANSWER", "T3-PROMPT", "T3-ANSWER"]);
+  });
+
+  test("a target with nothing to drop previews so; across one Claude login it is no fork either", () => {
+    const w = started();
+    expect(previewSwitch(w.db, w.chatId, "claude/sonnet").clean).toEqual({ drops: false });
+    expect(switchModel(w.db, w.chatId, "claude/sonnet", "clean")).toMatchObject({ changed: true, carried: 0, resumed: false });
+    expect(active(w)).toEqual({ model: "claude/sonnet", texts: [] });
+    expect(parked(w)).toEqual({ "claude/opus": ["T1-PROMPT", "T1-ANSWER"] });
+  });
+
+  test("the model the chat is on: a no-op, as in the other modes; its conversation moved there without a switch is dropped", () => {
+    const w = started();
+    expect(switchModel(w.db, w.chatId, "claude/opus", "clean").changed).toBe(false);
+    expect(active(w).texts).toEqual(["T1-PROMPT", "T1-ANSWER"]);
+    // The chat's own model set to sonnet directly, its conversation still opus's: clean to opus drops it.
+    w.db.$client.run("update chats set model = 'claude/sonnet' where id = ?", [w.chatId]);
+    expect(previewSwitch(w.db, w.chatId, "claude/opus").clean).toEqual({ drops: true, since: null });
+    expect(switchModel(w.db, w.chatId, "claude/opus", "clean")).toMatchObject({ changed: true, from: null, to: "claude/opus", carried: 0 });
+    expect(getChat(w.db, w.chatId)!.backendSessionId).toBeNull();
+    expect(parked(w)).toEqual({});
+  });
+
+  test("opensClean: the turn that takes it up, or its retry after it failed; not once a turn has run, nor after a lossy switch", () => {
+    const w = travelled();
+    switchModel(w.db, w.chatId, "vllm/qwen", "clean");
+    const chat = () => getChat(w.db, w.chatId)!;
+    // The turn that claims the switch opens clean; it fails before opening a conversation.
+    ownerSays(w.db, "q1");
+    const first = claimTurn(w.db, w.chatId)!;
+    const claimed = claimSwitches(w.db, w.chatId, first.id);
+    expect(opensClean(w.db, chat(), claimed)).toBe(true);
+    finishTurn(w.db, first.id, { status: "failed", error: "boom" });
+    // Its retry claims nothing, and still opens clean.
+    const retry = claimTurn(w.db, w.chatId)!;
+    expect(claimSwitches(w.db, w.chatId, retry.id)).toEqual([]);
+    expect(opensClean(w.db, chat(), [])).toBe(true);
+    // Once a conversation is open, never.
+    speak(w, "T4");
+    setTurnConversation(w.db, retry.id, { backendSessionId: chat().backendSessionId! }); // as agent/turn.ts records it
+    expect(opensClean(w.db, chat(), [])).toBe(false);
+    finishTurn(w.db, retry.id, { status: "done" });
+    // A turn finished after it: a later /new opens with history again.
+    forgetConversations(w.db, w.chatId);
+    expect(opensClean(w.db, chat(), [])).toBe(false);
+    // A lossy switch is not a clean start.
+    switchModel(w.db, w.chatId, "claude/opus", "lossy");
+    forgetConversations(w.db, w.chatId);
+    expect(opensClean(w.db, chat(), [])).toBe(false);
+  });
+
+  test("a clean switch request is applied by the server like the others", () => {
+    const w = travelled();
+    const req = requestSwitch(w.db, w.chatId, "vllm/qwen", "clean");
+    switchRequestPass(w.db, () => {});
+    expect(getSwitchRequest(w.db, req.id)).toMatchObject({ status: "done", mode: "clean", result: { mode: "clean", changed: true, carried: 0 } });
+    expect(active(w)).toEqual({ model: "vllm/qwen", texts: [] });
+  });
+});
+
+describe("clean start, after review", () => {
+  test("the model the chat is on previews as a no-op that drops nothing", () => {
+    const w = started();
+    const p = previewSwitch(w.db, w.chatId, "claude/opus");
+    expect(p.noop).toBe(true);
+    expect(p.clean).toEqual({ drops: false });
+  });
+
+  test("opensClean: a clean turn that failed, then a turn closed done with nothing to answer, then the retry: still clean", () => {
+    const w = started();
+    switchModel(w.db, w.chatId, "vllm/qwen", "clean");
+    const chat = () => getChat(w.db, w.chatId)!;
+    ownerSays(w.db, "q1");
+    const failed = claimTurn(w.db, w.chatId)!;
+    expect(opensClean(w.db, chat(), claimSwitches(w.db, w.chatId, failed.id))).toBe(true);
+    finishTurn(w.db, failed.id, { status: "failed", error: "boom" });
+    // A turn that found nothing to answer closes done, opening no conversation (agent/turn.ts "empty").
+    const empty = claimTurn(w.db, w.chatId)!;
+    finishTurn(w.db, empty.id, { status: "done" });
+    expect(getTurn(w.db, empty.id)!.backendSessionId).toBeNull();
+    // The next turn (a new message arrives): still the clean opening.
+    ownerSays(w.db, "q2");
+    const retry = claimTurn(w.db, w.chatId)!;
+    expect(claimSwitches(w.db, w.chatId, retry.id)).toEqual([]);
+    expect(opensClean(w.db, chat(), [])).toBe(true);
+    // It opens the conversation; a later /new is a /new again.
+    setTurnConversation(w.db, retry.id, { backendSessionId: "oa-retry" });
+    finishTurn(w.db, retry.id, { status: "done" });
+    forgetConversations(w.db, w.chatId);
+    expect(opensClean(w.db, chat(), [])).toBe(false);
+  });
+
+  test("startClean: every conversation forgotten, as /new; recorded as the current model started clean; the next turn opens clean", () => {
+    const w = started();
+    switchModel(w.db, w.chatId, "vllm/qwen", "lossless");
+    speak(w, "T2");
+    expect(Object.keys(parked(w))).toEqual(["claude/opus"]);
+    startClean(w.db, w.chatId);
+    const c = getChat(w.db, w.chatId)!;
+    expect(c.backendSessionId).toBeNull();
+    expect(c.conversationModel).toBe("vllm/qwen");
+    expect(parked(w)).toEqual({});
+    const row = w.db.select().from(modelSwitches).all().at(-1)!;
+    expect(row).toMatchObject({ mode: "clean", fromModel: "vllm/qwen", toModel: "vllm/qwen", toSessionId: null });
+    expect(isStartClean(row)).toBe(true);
+    expect(switchNote(row)).toBe("Started clean on vllm/qwen: every conversation of the chat forgotten, and this turn opens with its input only (not the chat's last messages).");
+    // Nothing moves before the next turn (the chat's model and its conversation's agree), and it opens clean.
+    enterChatModel(w.db, c);
+    expect(w.db.select().from(modelSwitches).all().at(-1)!.id).toBe(row.id);
+    expect(opensClean(w.db, getChat(w.db, w.chatId)!, [])).toBe(true);
+    // A switch between two models is never a start-clean.
+    expect(isStartClean({ mode: "clean", fromModel: "claude/opus", toModel: "vllm/qwen" })).toBe(false);
   });
 });

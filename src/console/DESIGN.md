@@ -64,7 +64,10 @@ page marks those turns. `j` / `k` move between segments.
   one continuous exchange. The header places it ("Segment 2 of 3 of the chat's first conversation, which
   began …"; a conversation: when it began, its session id, segments, compactions) and sums it up (span, turns,
   tokens, cost, tool calls). Each turn opens with a thin divider: its number (a link to the turn), outcome,
-  duration, cost, tags (retry, messages only, match) and links to its prompt and raw tabs. Between segments of
+  duration, cost, the model it ran on (TurnModel: its catalog label, else the recorded id; faint like the rest;
+  nothing for a turn without a transcript; where it differs from the last turn before it on the page, "→ label"
+  in the accent and semibold, so a switch stands out), tags (retry, messages only, match) and links to its
+  prompt and raw tabs. A chat's log has the same model on its dividers. Between segments of
   a conversation, a dashed divider says how long the silence was. The badge: a segment shows its worst
   outcome, a conversation its last turn's (an old failure that was retried is history, not its state).
 - **The turn** (`/turns/:id`), three tabs (`?tab=`): *Conversation* (default), *System prompt*, *Raw input*,
@@ -143,12 +146,22 @@ boundary is in server.ts's header.
 
 One column (max 760px) in the detail pane, the chat's group open in the list (chat-settings.ts). The ways in:
 "⚙ Settings", small and faint, after the chat's name in the title of its log, a segment, a conversation and a turn;
-and a ⚙ on the chat's header in the list, shown on hover (always where there is no hover).
+and a ⚙ on the chat's header in the list, shown on hover (always where there is no hover). Every way in lands on
+Chat.
+
+Three categories, each a page with its own URL, as real tabs at the top of the detail pane (the Tabs component:
+the page's own tab underlined in the accent, `aria-current="page"`): **Chat** (`/chats/<id>/settings`: Model,
+Profile, Conversation), **Permissions** (`/permissions`), **Automation & machine** (`/automation`: Schedules,
+Secrets, Computer). Each page is short; a write's 303 comes back to the page it was made on. Adjacent pieces of
+inline text (a label and its hint, a radio's name and its description) have real whitespace between them in the
+markup, so a page still reads when its stylesheet does not load.
 
 ```
 ┌ Example Group  settings · group                                     ┐
 │ on vllm/qwen · profile work · conversation since 13 Nov · the log   │
-│ Model  Profile  Conversation  Permissions        (sticky jumps)     │
+│ Chat   Permissions   Automation & machine          (tabs, pages)    │
+│ ────                                                                │
+│ (Chat:)                                                             │
 │ MODEL  what her turns here run on ─────────────────── The catalog → │
 │ claude · Claude login                                               │
 │ ○ claude/opus  Opus                                                 │
@@ -159,13 +172,29 @@ and a ⚙ on the chat's header in the list, shown on hover (always where there i
 │   │ Either way her files stay. Turn 24 will be stopped. Cancel│     │
 │   └───────────────────────────────────────────────────────────┘     │
 │ PROFILE ──────────────────────────────────── Profiles in Home →     │
-│ CONVERSATION  facts · [Stop the turn] · [New conversation]          │
+│ CONVERSATION  facts · [Stop the turn] · [New conv.] · [Start clean] │
+│ (Permissions:)                                                      │
 │ PERMISSIONS  policy.yaml, listed as "-100123" ──────────────────    │
 │ Wakes her  ○ every message ◉ only: ☑ mention ☑ reply ☐ follow-up 3  │
 │ Sees       persona ☑ public ☐ private (DM only) · memory ☑ chat …   │
 │ Can use    ◉ only what is on below: ⊂● web lookups  description     │
 │ Operators  ◉ nobody ○ everyone ○ these ids […]; may also ask for ☐  │
 │ [Review changes] → the diff (GhDiff) → [Save to policy.yaml]        │
+│ (Automation & machine:)                                             │
+│ SCHEDULES  when she wakes here by herself, in Asia/Taipei ────────  │
+│ every weekday at 09:00  next Mon 16 Nov, 09:00   [Pause] Cancel     │
+│ Check whether the nightly build passed…                             │
+│ recurring · 0 9 * * 1-5 · set by you · last ran … · #12             │
+│ every Sunday at 20:30 PAUSED  if resumed, next …   [Resume] Cancel  │
+│ SECRETS  granted to this chat's computer ─────────────────────────  │
+│ modal  3 h 12 min left                              [Revoke now]    │
+│ MODAL_TOKEN_ID, MODAL_TOKEN_SECRET · until … · asked for by you     │
+│ COMPUTER  this chat's Linux machine, read only ─────────────────    │
+│ ● running · 2 vCPU / 2Gi                                            │
+│ When idle         stops when idle at 14:32, in 12 min               │
+│ Disk              7Gi allocated, up to 50Gi (its size, not usage)   │
+│ Background jobs   #41 cd ~/proj && python train.py …     ● 1 h 3 min│
+│ ~/.computer.yaml  failed at its apt step (exit 100)  [output]       │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -175,11 +204,23 @@ and a ⚙ on the chat's header in the list, shown on hover (always where there i
   is pending the rows are inert and a blue Notice with a spinner fetches itself every second.
 - **Profile rows** are radio-looking buttons of one form.
 - **Conversation**: a facts line; a row per action (what it does in a line, the button on the right; below it under
-  760px); New conversation opens a Confirm in place (`?confirm=new`).
+  760px); New conversation opens a Confirm in place (`?confirm=new`), and so does Start clean (`?confirm=clean`).
 - **Permissions**: label column (140px) and controls; capabilities as rows (a CSS switch made of a checkbox, the
   label, what it gives, "not set up here"), a capability's parameters under it while it is on; the always-on ones
   as one line under the list. A refused form comes back with a pink Notice and the field it is about marked with a
   pink edge. Review shows the fieldset dimmed and an accent-edged panel with the diff, Save and Back.
+- **Schedules** (chat-extras.ts): a row per schedule, soonest first: what it is in words (the cron in mono when it
+  cannot be said simply) and when it runs next, the note, a faint meta line (recurring or one-off, the expression,
+  who set it, when it last ran, its #id); Pause or Resume and a ghost Cancel on the right. A paused row is dimmed
+  with a PAUSED tag; a paused one-off whose time has passed carries a pink row note. Cancel opens a Confirm in
+  place under the row (`?confirm=schedule:<id>`). Results are a Notice at the top of the section.
+- **Secrets**: a row per live grant, as Conversation's rows: the profile in mono with the time left, its variable
+  names, until when and who asked; Revoke now (danger, not solid) on the right. An unusable secrets file is a red
+  Notice above the rows.
+- **Computer**: a state line (a dot and the state, its size or its boost) and a label column (140px) of facts:
+  When idle, Disk (fetched after the page loads: `hx-get` on load, "asking Hangar…" until then), Background jobs
+  (`#id`, the command in mono cut with an ellipsis, a running dot and how long), ~/.computer.yaml (ok, or the
+  failure with its output in a small scrolling block). Nothing in it is a button.
 - Under 760px: one column throughout, labels above controls, buttons full width.
 
 ## Deleting messages
@@ -321,7 +362,7 @@ are GitHub's, as in the diff.
 | Pickable | a deletable bubble: its check slot (left, while selecting), the bubble, its ⋯ menu (top right, on hover) |
 | SelPill | while selecting: "3 selected · Delete · ✕", a refusal under it; fixed at the bottom centre |
 | Snackbar | after a delete: "Deleted 3 · Undo", a thin line running out with the 10 s; fixed at the bottom left |
-| SwitchBox | a chat's settings: the mode step under the model picked (Lossless / Lossy cards, the note, Cancel) |
+| SwitchBox | a chat's settings: the mode step under the model picked (Lossless / Lossy / Clean start cards, the note, Cancel) |
 | CapRow | a chat's settings: a capability as a switch, its label and what it gives, its parameters under it while on |
 | FileRow | Home: path · when · who-dot, who and a hint; selected like a list row |
 | WhoDot | 7px: her (accent), you (amber), anyone else (grey) |

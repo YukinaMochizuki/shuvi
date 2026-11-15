@@ -645,6 +645,15 @@ details.group .more-link {
 .tdiv .tabs-link:hover {
   color: var(--accent);
 }
+/* The model a turn ran on, quiet like the rest of the line; a switch from the turn before, in the accent. */
+.tmodel {
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.tmodel.switched {
+  color: var(--accent);
+  font-weight: 600;
+}
 .tdiv.match {
   box-shadow: inset 2px 0 0 var(--accent);
   background: rgb(122 162 247 / 0.06);
@@ -3317,7 +3326,7 @@ body.offline .topbar .who {
   }
 }
 
-.cjump {
+.ctabs {
   position: sticky;
   top: 0;
   z-index: 2;
@@ -3550,16 +3559,7 @@ span.mrow {
   animation: spin 0.7s linear infinite;
 }
 
-/* Conversation. */
-.sline {
-  margin: 0;
-  font-size: var(--t-small);
-  color: var(--ink-dim);
-}
-.sline b {
-  color: var(--ink);
-  font-weight: 500;
-}
+/* Conversation (its facts line is `.xline`, below: `.sline` is the snackbar's countdown). */
 .crow {
   display: flex;
   align-items: center;
@@ -3906,4 +3906,196 @@ span.sw {
     margin-right: calc(-1 * var(--s2));
     padding: var(--s3);
   }
+}
+
+/* A chat's settings: Schedules, Secrets, Computer (chat-extras.ts). */
+.ctabs {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ctabs a {
+  flex: none;
+}
+.srow2 {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s4);
+  padding: var(--s3) 0;
+  border-bottom: 1px solid var(--line-soft);
+  scroll-margin-top: 56px;
+}
+.srow2.confirming {
+  border-bottom: 0;
+}
+.smain {
+  flex: 1;
+  min-width: 0;
+}
+.swhat {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s3);
+  font-size: var(--t-ui);
+}
+.swhat b {
+  font-weight: 500;
+  color: var(--ink);
+}
+.swhen {
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.swhen b {
+  font-weight: 500;
+  color: var(--ink);
+}
+.srow2.paused .swhat > b,
+.srow2.paused .snote {
+  color: var(--ink-dim);
+}
+.ptag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: var(--t-meta);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--surface-3);
+  color: var(--ink-dim);
+}
+.snote {
+  margin: var(--s1) 0 0;
+  font-size: var(--t-small);
+  line-height: 1.45;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.smeta {
+  margin-top: var(--s1);
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+}
+.sacts {
+  flex: none;
+  display: flex;
+  gap: var(--s2);
+}
+.srow2 + .confirm {
+  margin: 0 0 var(--s2);
+}
+.grow2 .stext span {
+  word-break: break-word;
+}
+.cstate {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 var(--s2);
+}
+.kvs {
+  margin-top: var(--s2);
+}
+.kv {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: var(--s3);
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: var(--t-small);
+  line-height: 1.45;
+}
+.kv .k {
+  color: var(--ink-faint);
+}
+.kv .v {
+  color: var(--ink-dim);
+  min-width: 0;
+}
+.kv .v b {
+  color: var(--ink);
+  font-weight: 500;
+}
+.cjobs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.cjob {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--s2);
+}
+.cjob .jcmd {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+.cjob .num {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+}
+.capply {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s1);
+}
+.cout {
+  align-self: stretch;
+  margin: var(--s1) 0;
+  padding: var(--s2) var(--s3);
+  max-height: 180px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--surface-2);
+  font-size: var(--t-meta);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+@media (max-width: 760px) {
+  .srow2 {
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  .sacts {
+    align-self: stretch;
+  }
+  .sacts > form,
+  .sacts > a {
+    flex: 1;
+  }
+  .sacts .btn {
+    width: 100%;
+    height: 36px;
+    justify-content: center;
+  }
+  .kv {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .kv .k {
+    font-weight: 600;
+    color: var(--ink-dim);
+  }
+  .cjob {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .cjob .num {
+    grid-column: 2;
+  }
+}
+/* A line of facts in a chat's settings. Not `.sline`: that is the delete snackbar's countdown line. */
+.xline {
+  margin: 0;
+  font-size: var(--t-small);
+  line-height: 1.45;
+  color: var(--ink-dim);
+}
+.xline b {
+  color: var(--ink);
+  font-weight: 500;
 }

@@ -12,7 +12,7 @@ bun run typecheck
 bun test                    # fresh in-memory DB per test
 bun scripts/e2e-fake.ts     # server + runner child + real Claude Code CLI, fake Telegram and Anthropic
 bun scripts/e2e-openai-compat.ts # the same on an OpenAI-compatible model, against a fake Chat Completions endpoint
-bun scripts/e2e-switch.ts   # one chat switched between Claude and an endpoint, lossless and lossy, on the wire
+bun scripts/e2e-switch.ts   # one chat switched between Claude and an endpoint, lossless, lossy and clean, on the wire
 bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
 bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
@@ -35,7 +35,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | a capability's hook on each new inbound message, a tool owner-only in some calls, a capability's own credential | `src/capabilities/types.ts` (`inbound`, `ownerOnlyWhen` / `ownerOnlyNote`, `secrets`) |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
 | which models exist, which one a chat runs on, the driver a turn runs on | `src/store/models.ts`, `src/agent/backend.ts` |
-| switching a chat's model: a conversation per model, lossless and lossy, what is carried, switch requests | `src/agent/switch.ts` (the conversion: agent-runtime/convert) |
+| switching a chat's model: a conversation per model, lossless, lossy and clean start, what is carried, switch requests | `src/agent/switch.ts` (the conversion: agent-runtime/convert; a clean start's first turn: `opensClean`) |
 | an OpenAI-compatible conversation: its rows, positions, retention | `src/store/conversations.ts` |
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |
 | what goes into the system prompt, and in what order | `src/agent/prompt.ts` |
@@ -67,7 +67,8 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | what a turn's transcript records, image references | `src/agent/transcript.ts`, `src/store/transcripts.ts` |
 | secret redaction (transcripts and a chat computer's output) | `src/secrets/redaction.ts` (requests and grants: `src/capabilities/computer/secrets.ts`) |
 | the console: who may look (loopback, Host, tailnet login, token), its pages and design | `src/console/server.ts`, `pages.ts`, `DESIGN.md`; docs/console.md |
-| a chat's settings page in the console: its model (the bot's switch), profile, `/new` / `/stop`, its policy entry as a form | `src/console/chat-settings.ts` (draws), `chat-settings-data.ts` (reads), `chat-settings-write.ts` (the writes), `policy-form.ts` (form ↔ entry); `src/control/model-cards.ts` (`consoleSwitch`) |
+| a chat's settings pages in the console (Chat, Permissions, Automation & machine): its model (the bot's switch), profile, `/new` / `/stop`, its policy entry as a form | `src/console/chat-settings.ts` (draws, `CATEGORIES`), `chat-settings-data.ts` (reads), `chat-settings-write.ts` (the writes), `policy-form.ts` (form ↔ entry); `src/control/model-cards.ts` (`consoleSwitch`) |
+| a chat's schedules (pause, resume, cancel), secret grants (revoke) and computer (read only) in the console | `src/console/chat-extras.ts` (draws), `chat-extras-data.ts` (reads; the disk from Hangar), the writes in `chat-settings-write.ts`; `src/store/schedules.ts` (paused), `src/capabilities/computer/secrets.ts` (`revokeGrant`), `declared.ts` (`last_apply`) |
 | the console's Home page: editing her files, their history (who changed what, in which turn and call), undo, merge on save | `src/console/home.ts` (draws), `home-data.ts` (reads), `home-write.ts` (the save); the editor: `editor/`; the trailers: `src/capabilities/memory/home.ts`, `src/agent/call-context.ts` |
 | how the console groups turns: conversations (backend session, `/new`, lost), 30-minute segments, compaction | `src/console/sessions.ts`; what a turn records: `turns.opening` / `backend_session_id` (`src/agent/turn.ts`) |
 

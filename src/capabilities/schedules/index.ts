@@ -19,6 +19,9 @@ import { defineCapability, policyDelegates } from "../types.ts";
  * for them, for delegated tools only, while policy still names them. An operator cannot cancel a schedule
  * the owner set.
  *
+ * The owner may also pause and resume a schedule from the console (store/schedules.ts): a paused one is listed as
+ * paused, never fires, and can still be cancelled here.
+ *
  *   SHUVI_SCHEDULES   "off" disables schedules (default on). Cron and wall-clock times are read in SHUVI_TZ.
  */
 
@@ -37,7 +40,16 @@ export function fullTime(iso: string, timeZone: string): string {
   return `${get("weekday")} ${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
 }
 
-function describe(s: Schedule, timeZone: string): string {
+function describe(s: Schedule, timeZone: string, now = Date.now()): string {
+  if (s.state === "paused") {
+    const due = s.at ?? s.nextAt;
+    // A one-off whose time passed while paused is not run late: resuming cancels it (store/schedules.ts).
+    const passed = !s.cron && !!due && Date.parse(due) <= now;
+    const when = s.cron
+      ? `cron "${s.cron}" (${s.timeZone})`
+      : `once, due ${due ? fullTime(due, timeZone) : "?"}${passed ? "; its time passed while paused, so resuming cancels it" : ""}`;
+    return `#${s.id}: PAUSED by the owner (does not run until he resumes it): ${when}: ${s.note}`;
+  }
   const when = s.cron ? `cron "${s.cron}" (${s.timeZone}), next ${s.nextAt ? fullTime(s.nextAt, timeZone) : "never"}` : `once, ${s.nextAt ? fullTime(s.nextAt, timeZone) : "?"}`;
   return `#${s.id}: ${when}: ${s.note}`;
 }
@@ -76,10 +88,11 @@ export const schedules = defineCapability<true>({
     };
     const list: ToolDef<Record<string, never>> = {
       name: "list_schedules",
-      description: "List this chat's active schedules, soonest first.",
+      description: "List this chat's active schedules, soonest first, then its paused ones.",
       inputSchema: {},
       async handler() {
-        const all = activeSchedules(db, chat.id);
+        // The active ones first, soonest first; the paused ones after them.
+        const all = activeSchedules(db, chat.id).sort((a, b) => Number(a.state === "paused") - Number(b.state === "paused"));
         return ok(all.length ? all.map((s) => describe(s, timeZone)).join("\n") : "No active schedules in this chat.");
       },
     };

@@ -367,7 +367,7 @@ pressButton(buttonOf(switchCard, "claude/opus"));
 await until("the mode step", () => cardNow("Model for chat 1")!.text.startsWith("Switch chat 1"));
 switchCard = cardNow("Model for chat 1")!;
 check(
-  /^Switch chat 1 \(tg 1001\) to claude\/opus:\nLossless: copies the whole conversation \(\d+ messages\) to claude\/opus\nLossy: claude\/opus starts fresh with the last 10 messages\nturn \d+ is running and will be stopped$/.test(switchCard.text) && switchCard.text.endsWith(`turn ${stalledTurn} is running and will be stopped`),
+  /^Switch chat 1 \(tg 1001\) to claude\/opus:\nLossless: copies the whole conversation \(\d+ messages\) to claude\/opus\nLossy: claude\/opus starts fresh with the last 10 messages\nClean start: starts claude\/opus fresh, with no messages\nturn \d+ is running and will be stopped$/.test(switchCard.text) && switchCard.text.endsWith(`turn ${stalledTurn} is running and will be stopped`),
   `the mode step says what each mode does here, and that the running turn will be stopped (${JSON.stringify(switchCard.text)})`,
 );
 const requestsBefore = turnModels.length;

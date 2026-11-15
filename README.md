@@ -55,7 +55,7 @@ bun run typecheck
 bun test
 bun scripts/e2e-fake.ts      # the whole path against a fake Telegram and a fake Anthropic API
 bun scripts/e2e-openai-compat.ts  # the same on an OpenAI-compatible model, against a fake Chat Completions endpoint
-bun scripts/e2e-switch.ts    # one chat switched between Claude and an endpoint, lossless and lossy, checked on the wire
+bun scripts/e2e-switch.ts    # one chat switched between Claude and an endpoint, lossless, lossy and clean, checked on the wire
 bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
 bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
 bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
@@ -80,8 +80,9 @@ them the default; each chat runs on its own model or the default. A first start 
 login of the user the server runs as (or `SHUVI_CLAUDE_CONFIG_DIR`) and `SHUVI_MODEL`, which is what turns
 ran on before. A chat keeps one conversation per model, and its model can be switched (`src/agent/switch.ts`;
 one asked for during a turn stops the turn first): on every switch, between any two models, the owner chooses
-whether what was said since is carried into the other model's conversation (lossless) or that model's own
-conversation resumes as it was left (lossy). The model is never told.
+whether what was said since is carried into the other model's conversation (lossless), that model's own
+conversation resumes as it was left (lossy), or that model starts over with nothing (clean start). The model
+is never told.
 
 ## Data
 

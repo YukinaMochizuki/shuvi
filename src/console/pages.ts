@@ -17,6 +17,7 @@ import { OUTBOUND_KINDS, TRIGGER_KINDS, type TranscriptPart } from "../store/sch
 import { getPromptText, getTranscript, previousPrompt, stepsOf, transcriptAbsence, type PromptText, type Step, type Transcript } from "../store/transcripts.ts";
 import type { Turn } from "../store/turns.ts";
 import { DELETABLE_KINDS } from "../store/deletions.ts";
+import { listModels } from "../store/models.ts";
 import { diffLines, hunks } from "./diff.ts";
 import { ago, badge, block, clock, dot, empty, excerpt, href, html, markdown, page, raw, resetBlocks, secs, short, size, tokens, usd, wall, when, type Raw } from "./html.ts";
 import { conversationOf, matchingTurns, segmentList, segmentOf, type Conversation, type SegmentRow, type Span } from "./sessions.ts";
@@ -799,6 +800,40 @@ ${turn.error ? html`<div class="banner">${turn.status === "stopped" ? "Stopped" 
   return html`<div class="detail">${head}${tabs}${del ? (ctx.notice ?? "") : ""}<div class="panel">${body}</div>${del ? deleteBar(ctx) : ""}</div>`;
 }
 
+// ---- the model a turn ran on, on its divider ---------------------------------------------------------------------
+
+/**
+ * Names the model of each turn on a page's dividers, and marks a switch: a turn's model (its transcript's
+ * `model`, as the driver reported it) by its catalog label when the catalog still has THAT model: matched by the
+ * catalog id, the provider's own model name, or that name with only a version suffix an API adds to it (a date,
+ * `-20250929`, or `-latest`: `claude-sonnet-4-5` for `claude-sonnet-4-5-20250929`). Any other suffix is another
+ * model (`gpt-4o-mini` is not `gpt-4o`), shown as recorded; so is a model the catalog no longer has. Nothing for a
+ * turn without a transcript. When it differs from the model of the turn before it on the same page (the last one
+ * that had one), it is shown as "→ name" in the accent, so a switch is seen at a glance. One per page: it reads the
+ * catalog once and remembers the last model.
+ *
+ * Not handled, on purpose: a switch is marked within a page only (the first turn of a page is never marked, even
+ * when the turn before it, on the previous page, ran on another model); and the transcript records only the
+ * provider's model name, so the same name on two providers (two Claude logins, say) reads as the first provider's
+ * entry, and a switch between them is not seen.
+ */
+export function turnModels(db: Db): (model: string | null | undefined) => Raw {
+  const catalog = listModels(db);
+  let last: string | null = null;
+  return (model) => {
+    if (!model) return html``;
+    const versionOf = (c: (typeof catalog)[number]) => model.startsWith(`${c.model.model}-`) && /^-(\d{8}|latest)$/.test(model.slice(c.model.model.length));
+    const m = catalog.find((c) => c.id === model) ?? catalog.find((c) => c.model.model === model) ?? catalog.find(versionOf);
+    const name = m ? (m.model.label ?? m.id) : model;
+    const switched = last !== null && last !== model;
+    const from = last;
+    last = model;
+    return switched
+      ? html`<span class="tmodel switched" title="${model}; the turn before ran on ${from}">→ ${name}</span>`
+      : html`<span class="tmodel" title="${model}">${name}</span>`;
+  };
+}
+
 // ---- a segment, or a whole conversation ------------------------------------------------------------------------
 
 /**
@@ -867,6 +902,7 @@ ${missing.length ? html`<p class="note left">${absenceOf(ctx, missing, turns.len
   const group = chat.kind === "group";
   const seen = new Set<number>();
   const rows: Raw[] = [];
+  const modelOf = turnModels(ctx.db);
   let prevTurn: Turn | null = null;
   for (const t of turns) {
     if (prevTurn && sp.segmentOf.get(t.id) !== sp.segmentOf.get(prevTurn.id)) {
@@ -879,7 +915,7 @@ ${missing.length ? html`<p class="note left">${absenceOf(ctx, missing, turns.len
     rows.push(
       html`<div class="tdiv${matches.has(t.id) ? " match" : ""}"><a href="${href(`/turns/${t.id}`, f)}">${dot(t.status)}turn ${t.id}</a><span class="c-${t.status}">${t.status}</span>${w !== null ? html`<span>${secs(w)}</span>` : ""}${
         t.costMicroUsd ? html`<span>${usd(t.costMicroUsd / 1e6)}</span>` : ""
-      }${retry ? html`<span class="tag">retry</span>` : ""}${transcript ? "" : html`<span class="tag" title="${absenceText(ctx, t)}">messages only</span>`}${matches.has(t.id) ? html`<span class="tag trig">match</span>` : ""}<span class="tlinks"><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "prompt" })}">prompt</a><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "raw" })}">raw</a></span></div>`,
+      }${modelOf(transcript?.model)}${retry ? html`<span class="tag">retry</span>` : ""}${transcript ? "" : html`<span class="tag" title="${absenceText(ctx, t)}">messages only</span>`}${matches.has(t.id) ? html`<span class="tag trig">match</span>` : ""}<span class="tlinks"><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "prompt" })}">prompt</a><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "raw" })}">raw</a></span></div>`,
     );
     rows.push(...turnTrace(ctx, t, transcript, steps, group, { seen }));
     prevTurn = t;
@@ -946,13 +982,16 @@ export function chatPage(ctx: PageContext, chatId: number, q: URLSearchParams = 
   // after a failure answers it again, and its own divider follows the failed turn's.
   const turnOf = (e: ChatEvent) => ((OUTBOUND_KINDS as string[]).includes(e.kind) ? e.turnId : spans.find((t) => t.fromSeq < e.seq && e.seq <= t.toSeq)?.id) ?? null;
   const items: Raw[] = [];
+  const modelOf = turnModels(ctx.db);
   let current: number | null = null;
   for (const e of events) {
     const t = turnOf(e);
     if (t !== null && t !== current) {
       const s = byId.get(t);
       const w = s ? wall(s.startedAt, s.endedAt) : null;
-      items.push(html`<div class="divider"><a href="${href(`/turns/${t}`, currentFilters(q))}">${dot(s?.status ?? "")}turn ${t}${s ? ` · ${s.status}` : ""}${w !== null ? ` · ${secs(w)}` : ""}${s?.costMicroUsd ? ` · ${usd(s.costMicroUsd / 1e6)}` : ""}</a></div>`);
+      items.push(
+        html`<div class="divider"><a href="${href(`/turns/${t}`, currentFilters(q))}">${dot(s?.status ?? "")}turn ${t}${s ? ` · ${s.status}` : ""}${w !== null ? ` · ${secs(w)}` : ""}${s?.costMicroUsd ? ` · ${usd(s.costMicroUsd / 1e6)}` : ""}</a>${modelOf(getTranscript(ctx.db, t)?.model)}</div>`,
+      );
     }
     if (t !== null) current = t;
     const out = (OUTBOUND_KINDS as string[]).includes(e.kind);

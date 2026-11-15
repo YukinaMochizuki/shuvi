@@ -13,10 +13,13 @@ import { HOME_WRITES, homeSave, PROFILE_WRITES, profileWrite, takeResult } from 
 import { HomeLayers } from "../capabilities/memory/layers.ts";
 import { cardPage, html } from "./html.ts";
 import { chatListPane, chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
-import { chatSettingsPage, switchingLine } from "./chat-settings.ts";
+import { chatSettingsPage, switchingLine, type SettingsCategory } from "./chat-settings.ts";
 import { loadChatSettings, switchResultFlash, type ChatSettingsDeps } from "./chat-settings-data.ts";
 import { CHAT_SETTINGS_WRITE, chatSettingsWrite, keepResult, takeSettingsResult } from "./chat-settings-write.ts";
 import { getSwitchRequest } from "../agent/switch.ts";
+import type { ComputerConfig } from "../capabilities/computer/config.ts";
+import { diskLine } from "./chat-extras.ts";
+import { diskFacts } from "./chat-extras-data.ts";
 import type { SignalTurn } from "../server/spawn.ts";
 import { CAPABILITIES } from "../capabilities/index.ts";
 import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
@@ -49,7 +52,8 @@ import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } 
  * routes (`/settings/<area>/<verb>`, settings-write.ts `SETTINGS_WRITES`), to the Home page's (`/home/save`,
  * home-write.ts `HOME_WRITES`: saving one of her files in home/; `/home/profile/<verb>`, `PROFILE_WRITES`: her
  * profiles, capabilities/memory/layers.ts), to a chat's settings page's (`/chats/<id>/settings/<verb>`,
- * chat-settings-write.ts `CHAT_SETTINGS_WRITE`: its model, profile, conversation and its entry in policy.yaml), and
+ * chat-settings-write.ts `CHAT_SETTINGS_WRITE`: its model, profile, conversation, its entry in policy.yaml, its
+ * schedules (cancel, pause, resume) and revoking a secret granted to its computer), and
  * to the delete of chat messages (`/messages/delete`, `/messages/undo`: delete-write.ts, store/deletions.ts), and to
  * nothing else. A
  * POST anywhere else, or any other method, gets 405; a GET to a write route gets 405 too. A write must pass,
@@ -110,6 +114,11 @@ export interface ConsoleDeps {
   prompt?: PromptDeps;
   /** How a chat's settings page stops a running turn (server/spawn.ts `signalTurn`; a test passes its own). */
   signalTurn?: SignalTurn;
+  /**
+   * The computer's configuration, for a chat's settings page (its Secrets and Computer sections). Default: the one
+   * `prompt` has, when the computer capability is set up in this process.
+   */
+  computer?: ComputerConfig | null;
   now?: () => number;
 }
 
@@ -266,7 +275,14 @@ function settingsDeps(deps: ConsoleDeps): ChatSettingsDeps {
     registry: CAPABILITIES,
     ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}),
     ...(deps.prompt ? { enabled: new Set(deps.prompt.capabilities.map((c) => c.capability.id)) } : {}),
+    computer: computerOf(deps),
   };
+}
+
+/** The computer's configuration, when it is set up in this process. */
+function computerOf(deps: ConsoleDeps): ComputerConfig | null {
+  if (deps.computer !== undefined) return deps.computer;
+  return (deps.prompt?.capabilities.find((c) => c.capability.id === "computer")?.config as ComputerConfig | undefined) ?? null;
 }
 
 /** The Host a request names (Bun.serve builds `req.url` from it; a test's Request carries it in the URL). */
@@ -317,7 +333,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
       if (PROFILE_WRITES.has(path)) return respond(null, 303, "text/plain", { location: profileWrite(deps.db, homeOf(deps), path, form, auth.who, ctx.now!) });
       const chatWrite = CHAT_SETTINGS_WRITE.exec(path);
       if (chatWrite) {
-        const wdeps = { ...settingsDeps(deps), now: ctx.now!, ...(auth.who ? { login: auth.who } : {}), ...(deps.signalTurn ? { signal: deps.signalTurn } : {}) };
+        const wdeps = { ...settingsDeps(deps), now: ctx.now!, timeZone: deps.timeZone, ...(auth.who ? { login: auth.who } : {}), ...(deps.signalTurn ? { signal: deps.signalTurn } : {}) };
         return respond(null, 303, "text/plain", { location: chatSettingsWrite(wdeps, Number(chatWrite[1]), chatWrite[2]!, form) });
       }
       return respond(null, 303, "text/plain", { location: homeSave(deps.db, homeOf(deps), form, auth.who, ctx.now!) });
@@ -362,10 +378,20 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
       const r = keepResult(ctx.now!, { chatId, section: "model", flash: switchResultFlash(deps.db, req) });
       return htmlResponse("", 200, { "hx-redirect": `/chats/${chatId}/settings?r=${r}#model` });
     }
-    const settings = /^\/chats\/(\d+)\/settings$/.exec(path);
+    // The Computer section's disk, fetched by the page after it has loaded (chat-extras.ts `diskLine`): a read with
+    // one Hangar call, which waits at most DISK_TIMEOUT_MS.
+    const disk = /^\/chats\/(\d+)\/settings\/disk$/.exec(path);
+    if (disk) {
+      const cfg = computerOf(deps);
+      const chatId = Number(disk[1]);
+      return htmlResponse(diskLine(chatId, cfg ? await diskFacts(deps.db, cfg, chatId) : { error: "the computer is off in this process" }).s);
+    }
+    // A chat's settings, by category (chat-settings.ts `CATEGORIES`): Chat, Permissions, Automation & machine.
+    const settings = /^\/chats\/(\d+)\/settings(?:\/(permissions|automation))?$/.exec(path);
     if (settings) {
+      const category = (settings[2] ?? "chat") as SettingsCategory;
       const result = takeSettingsResult(url.searchParams.get("r"), Number(settings[1]), ctx.now!);
-      const v = loadChatSettings(settingsDeps(deps), Number(settings[1]), url.searchParams, { timeZone: ctx.timeZone, now: ctx.now!, csrf, ...(ctx.who ? { who: ctx.who } : {}) }, result);
+      const v = loadChatSettings(settingsDeps(deps), Number(settings[1]), url.searchParams, { timeZone: ctx.timeZone, now: ctx.now!, csrf, category, ...(ctx.who ? { who: ctx.who } : {}) }, result);
       return v ? htmlResponse(chatSettingsPage(v, chatListPane(ctx, v.chat.id))) : notFound(ctx.who);
     }
     const chat = /^\/chats\/(\d+)$/.exec(path);
