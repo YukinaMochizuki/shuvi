@@ -399,12 +399,15 @@ Where a forward came from and the text being replied to are recorded as event fi
   assistant says it is busy and roughly how long. Anyone may have the assistant LOOK at a video in a chat
   whose policy enables media; a download onto the computer (`video_fetch`) is the owner's, or in a group
   that delegates media, its operators' too (§8).
-- **The prewarm** is the one prefetch: a link to a known video site in an OWNER's message is probed as
-  soon as the message is recorded, alongside spawning the turn. Probe only, never a download; best effort
-  (a failure is logged and ignored; porchkit refuses it when the site's budget is half used); it never
-  delays the turn. The framework never puts what was fetched into the turn's input: it only says what is
-  ready ("(Prepared: #53's link — video_probe returns at once.)"), and the assistant asks when it wants it.
-  Each prewarm is recorded with whether the turn then used it.
+- **The prewarm** is the one prefetch: every http(s) link of a message that starts a turn (from anyone:
+  the waker's own decision, §7; every message in the owner's DM), then of the message it replies to, at
+  most 3, is read through porchkit's `/read` as soon as the message is recorded, alongside spawning the
+  turn. There is no host list: `/read` reads any link, and for a video site probes the video itself. A
+  speculative read, never a download; best effort (a failure is logged and ignored; porchkit refuses it
+  when the site's budget is half used); it never delays the turn, and a chat whose policy leaves media out
+  gets none. The framework never puts what was fetched into the turn's input: it only says what is ready
+  ("(Prepared: #53's link — read_link returns at once.)"), and the assistant asks when it wants it. Each
+  prewarm is recorded with whether the turn then used it.
 - **Images**: photos and static stickers go to the model as images. Animated (tgs) and video (webm)
   stickers become a thumbnail or one frame, with their emoji and pack. The server downloads them
   (`media/<file_unique_id>`, once per file); a turn waits a few seconds at most for one still downloading
