@@ -302,18 +302,16 @@ export function profileWrite(db: Db, home: string, path: string, form: Form, log
   }
 }
 
-/** Where a chat page's Profile select posts: `/chats/<id>/profile`. */
-export const CHAT_PROFILE_WRITE = /^\/chats\/(\d+)\/profile$/;
-
-/** Switch a chat's profile (store/profiles.ts); answers 303 to the chat's page with the result, once. */
-export function chatProfileWrite(db: Db, home: string, chatId: number, form: Form, now: number): string {
-  const back = (flash: Flash) => href(`/chats/${chatId}`, { r: keep(now, { path: "", flash }) });
+/**
+ * Switch chat `chatId` to profile `name` (null: Base; store/profiles.ts), as a chat's settings page asks
+ * (chat-settings-write.ts). Returns what to tell the owner. A running turn finishes on what it began with.
+ */
+export function switchChatProfile(db: Db, home: string, chatId: number, name: string | null): Flash {
   const chat = chatById(db, chatId);
-  if (!chat) return back({ tone: "refused", text: "There is no such chat." });
-  const name = field(form, "profile") || null;
-  if (name && !readProfile(home, name)) return back({ tone: "refused", text: `There is no profile ${name}.` });
+  if (!chat) return { tone: "refused", text: "There is no such chat." };
+  if (name && !readProfile(home, name)) return { tone: "refused", text: `There is no profile ${name}.` };
   const label = chatName(chat);
-  if (name === chat.profile) return back({ tone: "ok", text: `${label} is already on ${name ?? "Base"}.` });
+  if (name === chat.profile) return { tone: "ok", text: `${label} is already on ${name ?? "Base"}.` };
   setChatProfile(db, chatId, name);
-  return back({ tone: "ok", text: `${label} now runs on ${name ?? "Base"}, from its next turn.` });
+  return { tone: "ok", text: `${label} now runs on ${name ?? "Base"}, from its next turn.` };
 }

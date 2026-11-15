@@ -9,11 +9,16 @@ import { sniffImage } from "../store/media.ts";
 import { editorBundle } from "./editor/bundle.ts";
 import { activityPage, changedBanner, homePage } from "./home.ts";
 import { allHistory, loadHome, watch, type PromptDeps } from "./home-data.ts";
-import { CHAT_PROFILE_WRITE, chatProfileWrite, HOME_WRITES, homeSave, PROFILE_WRITES, profileWrite, takeResult } from "./home-write.ts";
-import { HomeLayers, listProfiles } from "../capabilities/memory/layers.ts";
-import { chatById } from "./queries.ts";
+import { HOME_WRITES, homeSave, PROFILE_WRITES, profileWrite, takeResult } from "./home-write.ts";
+import { HomeLayers } from "../capabilities/memory/layers.ts";
 import { cardPage, html } from "./html.ts";
-import { chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
+import { chatListPane, chatPage, conversationPage, segmentPage, turnsPage, type PageContext } from "./pages.ts";
+import { chatSettingsPage, switchingLine } from "./chat-settings.ts";
+import { loadChatSettings, switchResultFlash, type ChatSettingsDeps } from "./chat-settings-data.ts";
+import { CHAT_SETTINGS_WRITE, chatSettingsWrite, keepResult, takeSettingsResult } from "./chat-settings-write.ts";
+import { getSwitchRequest } from "../agent/switch.ts";
+import type { SignalTurn } from "../server/spawn.ts";
+import { CAPABILITIES } from "../capabilities/index.ts";
 import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
 import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
 import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } from "./delete-write.ts";
@@ -43,9 +48,10 @@ import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } 
  * READ ONLY, but for a few writes: GET and HEAD everywhere, plus POST /login, plus POST to the Settings page's write
  * routes (`/settings/<area>/<verb>`, settings-write.ts `SETTINGS_WRITES`), to the Home page's (`/home/save`,
  * home-write.ts `HOME_WRITES`: saving one of her files in home/; `/home/profile/<verb>`, `PROFILE_WRITES`: her
- * profiles, capabilities/memory/layers.ts), to a chat page's Profile select (`/chats/<id>/profile`,
- * `CHAT_PROFILE_WRITE`), and to the delete of chat messages (`/messages/delete`, `/messages/undo`:
- * delete-write.ts, store/deletions.ts), and to nothing else. A
+ * profiles, capabilities/memory/layers.ts), to a chat's settings page's (`/chats/<id>/settings/<verb>`,
+ * chat-settings-write.ts `CHAT_SETTINGS_WRITE`: its model, profile, conversation and its entry in policy.yaml), and
+ * to the delete of chat messages (`/messages/delete`, `/messages/undo`: delete-write.ts, store/deletions.ts), and to
+ * nothing else. A
  * POST anywhere else, or any other method, gets 405; a GET to a write route gets 405 too. A write must pass,
  * after the Host check and the sign-in above, BOTH:
  *   - ORIGIN: an `Origin` header naming one of `allowedOrigins` (index.ts: SHUVI_CONSOLE_URL's origin, and
@@ -101,6 +107,8 @@ export interface ConsoleDeps {
   transcriptDays?: number;
   /** What Home's Preview builds a chat's prompt with: the enabled capabilities, the policy, the owner. */
   prompt?: PromptDeps;
+  /** How a chat's settings page stops a running turn (server/spawn.ts `signalTurn`; a test passes its own). */
+  signalTurn?: SignalTurn;
   now?: () => number;
 }
 
@@ -254,6 +262,17 @@ function media(deps: ConsoleDeps, ref: string | null): Response {
 
 const homeOf = (deps: ConsoleDeps) => deps.home ?? join(deps.dataDir, "home");
 
+/** What a chat's settings page reads with: the store, home/, the registry and what this process set up. */
+function settingsDeps(deps: ConsoleDeps): ChatSettingsDeps {
+  return {
+    db: deps.db,
+    home: homeOf(deps),
+    registry: CAPABILITIES,
+    ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}),
+    ...(deps.prompt ? { enabled: new Set(deps.prompt.capabilities.map((c) => c.capability.id)) } : {}),
+  };
+}
+
 /** The Host a request names (Bun.serve builds `req.url` from it; a test's Request carries it in the URL). */
 function hostOf(req: Request, url: URL): string {
   return (req.headers.get("host") ?? url.host).toLowerCase();
@@ -266,7 +285,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   const path = url.pathname.replace(/\/+$/, "") || "/";
   // Only a Home save and a delete may be large (`MAX_BODY`, Bun's own limit); anything else keeps the small one.
   if (!LARGE_BODY_WRITES.has(path) && Number(req.headers.get("content-length") ?? 0) > MAX_SMALL_BODY) return respond("too large", 413, "text/plain");
-  const write = isSettingsWrite(path) || HOME_WRITES.has(path) || isDeleteWrite(path) || PROFILE_WRITES.has(path) || CHAT_PROFILE_WRITE.test(path);
+  const write = isSettingsWrite(path) || HOME_WRITES.has(path) || isDeleteWrite(path) || PROFILE_WRITES.has(path) || CHAT_SETTINGS_WRITE.test(path);
   if (write ? req.method !== "POST" : !["GET", "HEAD"].includes(req.method) && !(req.method === "POST" && path === "/login")) {
     return write ? respond("a write: POST only", 405, "text/plain", { allow: "POST" }) : respond("read only", 405, "text/plain", { allow: "GET, HEAD" });
   }
@@ -299,8 +318,11 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
       }
       if (isSettingsWrite(path)) return respond(null, 303, "text/plain", { location: settingsWrite(deps.db, path, form, ctx.now) });
       if (PROFILE_WRITES.has(path)) return respond(null, 303, "text/plain", { location: profileWrite(deps.db, homeOf(deps), path, form, auth.who, ctx.now!) });
-      const chatWrite = CHAT_PROFILE_WRITE.exec(path);
-      if (chatWrite) return respond(null, 303, "text/plain", { location: chatProfileWrite(deps.db, homeOf(deps), Number(chatWrite[1]), form, ctx.now!) });
+      const chatWrite = CHAT_SETTINGS_WRITE.exec(path);
+      if (chatWrite) {
+        const wdeps = { ...settingsDeps(deps), now: ctx.now!, ...(auth.who ? { login: auth.who } : {}), ...(deps.signalTurn ? { signal: deps.signalTurn } : {}) };
+        return respond(null, 303, "text/plain", { location: chatSettingsWrite(wdeps, Number(chatWrite[1]), chatWrite[2]!, form) });
+      }
       return respond(null, 303, "text/plain", { location: homeSave(deps.db, homeOf(deps), form, auth.who, ctx.now!) });
     }
     if (path === "/home" || path === "/home/history" || path === "/home/watch") {
@@ -332,13 +354,26 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
       const view = loadSettings(deps.db, url.searchParams, flash);
       return htmlResponse(settingsPage(sctx, view));
     }
+    // A switch asked for from a chat's settings page, followed until it is done (chat-settings.ts `switchingLine`):
+    // while pending, the line again; once done, the page is loaded again with the result, shown once.
+    const switching = /^\/chats\/(\d+)\/settings\/switching$/.exec(path);
+    if (switching) {
+      const chatId = Number(switching[1]);
+      const req = getSwitchRequest(deps.db, Number(url.searchParams.get("req")));
+      if (!req || req.chatId !== chatId) return notFound(ctx.who);
+      if (req.status === "pending") return htmlResponse(switchingLine({ chat: { id: chatId } as never }, { to: req.toModel, mode: req.mode, requestId: req.id, stopping: req.stoppedTurnId }).s);
+      const r = keepResult(ctx.now!, { chatId, section: "model", flash: switchResultFlash(deps.db, req) });
+      return htmlResponse("", 200, { "hx-redirect": `/chats/${chatId}/settings?r=${r}#model` });
+    }
+    const settings = /^\/chats\/(\d+)\/settings$/.exec(path);
+    if (settings) {
+      const result = takeSettingsResult(url.searchParams.get("r"), Number(settings[1]), ctx.now!);
+      const v = loadChatSettings(settingsDeps(deps), Number(settings[1]), url.searchParams, { timeZone: ctx.timeZone, now: ctx.now!, csrf, ...(ctx.who ? { who: ctx.who } : {}) }, result);
+      return v ? htmlResponse(chatSettingsPage(v, chatListPane(ctx, v.chat.id))) : notFound(ctx.who);
+    }
     const chat = /^\/chats\/(\d+)$/.exec(path);
     if (chat) {
-      // The Profile select (pages.ts): the profiles there are, the chat's, and the result of a switch, once.
-      const c = chatById(deps.db, Number(chat[1]));
-      const flash = takeResult(url.searchParams.get("r"), ctx.now!)?.flash;
-      const profiles = { names: listProfiles(homeOf(deps)).map((p) => ({ name: p.name, ...(p.label ? { label: p.label } : {}) })), ...(c?.profile ? { current: c.profile } : {}), ...(flash ? { flash } : {}) };
-      const out = chatPage({ ...ctx, csrf, profiles }, Number(chat[1]), url.searchParams);
+      const out = chatPage({ ...ctx, csrf }, Number(chat[1]), url.searchParams);
       return out ? htmlResponse(out) : notFound(ctx.who);
     }
     // Segments were first served at /sessions/<id>; an old link still finds its segment.

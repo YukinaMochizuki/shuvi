@@ -60,13 +60,14 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | the control bot's model cards (`/model`, `/models`, `/provider`), and probing models in the background | `src/control/model-cards.ts`, `src/server/probes.ts` |
 | the sticker library: its format and index, ranking, the rules `sticker` enforces | `src/capabilities/stickers/` (`library.ts`, `find.ts`, `rules.ts`) |
 | each chat's computer (Hangar), exec, secrets, files | `src/capabilities/computer/index.ts`, then `state.ts` (who may touch it when) and `secrets.ts` (redaction: `src/secrets/`) |
-| what each chat may do (policy.yaml), and changing it only by approval | `src/policy/policy.ts`, `src/policy/load.ts`, `src/policy/write.ts` |
+| what each chat may do (policy.yaml), and changing it: by the owner's approval of a proposal, or his own edit in the console | `src/policy/policy.ts`, `src/policy/load.ts`, `src/policy/write.ts`; the owner's own edit from the console, one entry in place: `src/policy/edit.ts` |
 | how policy is described: the owner's `/policy`, the model's `explain_policy` and the check on a proposal | `src/policy/view.ts`, `src/policy/explain.ts` |
 | which group messages start a turn (mention, reply, follow-up) | `src/agent/triggers.ts`, `src/server/waker.ts` |
 | what a chat may see or send to | `src/capabilities/access.ts` |
 | what a turn's transcript records, image references | `src/agent/transcript.ts`, `src/store/transcripts.ts` |
 | secret redaction (transcripts and a chat computer's output) | `src/secrets/redaction.ts` (requests and grants: `src/capabilities/computer/secrets.ts`) |
 | the console: who may look (loopback, Host, tailnet login, token), its pages and design | `src/console/server.ts`, `pages.ts`, `DESIGN.md`; docs/console.md |
+| a chat's settings page in the console: its model (the bot's switch), profile, `/new` / `/stop`, its policy entry as a form | `src/console/chat-settings.ts` (draws), `chat-settings-data.ts` (reads), `chat-settings-write.ts` (the writes), `policy-form.ts` (form ↔ entry); `src/control/model-cards.ts` (`consoleSwitch`) |
 | the console's Home page: editing her files, their history (who changed what, in which turn and call), undo, merge on save | `src/console/home.ts` (draws), `home-data.ts` (reads), `home-write.ts` (the save); the editor: `editor/`; the trailers: `src/capabilities/memory/home.ts`, `src/agent/call-context.ts` |
 | how the console groups turns: conversations (backend session, `/new`, lost), 30-minute segments, compaction | `src/console/sessions.ts`; what a turn records: `turns.opening` / `backend_session_id` (`src/agent/turn.ts`) |
 

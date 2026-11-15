@@ -10,8 +10,9 @@ import { POLICY_FILE, readPolicyText } from "./load.ts";
 import { DM_DEFAULT, entryToDoc, parsePolicy } from "./policy.ts";
 
 /**
- * Changing `home/policy.yaml`: ONLY through the owner's approval (docs/design.md §8). Nothing else in
- * shuvi writes it; memory's `edit_home` cannot reach it (capabilities/memory/home.ts).
+ * Changing `home/policy.yaml`: ONLY through the owner's approval (docs/design.md §8), or by the owner himself on a
+ * chat's settings page in the console (./edit.ts, console/chat-settings-write.ts). Nothing else in shuvi writes
+ * it; memory's `edit_home` cannot reach it (capabilities/memory/home.ts).
  *
  *   requestPolicyChange   computes the file as it would be with one chat's entry replaced (or removed),
  *                         and puts it to the owner as a card in the control bot (control/approvals.ts,

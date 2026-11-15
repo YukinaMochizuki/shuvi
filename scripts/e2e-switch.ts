@@ -24,6 +24,9 @@
  *   → lossy    → T12 on sonnet; T13 there is held at the API, and a lossless switch to the endpoint's first
  *                model is REQUESTED meanwhile: the server stops T13, applies the switch (T12 carried, not
  *                T13's prompt, which the CLI already wrote), and the endpoint answers T13, sent its prompt once
+ *   → lossy    → T14 on sonnet, switched FROM THE CONSOLE: the chat's settings page (console/chat-settings*.ts),
+ *                signed in as a tailnet user, its Origin and CSRF token, posts the switch; the page follows the
+ *                request to its result, the bot's own words; T14 then runs on sonnet, its own session resumed
  *
  * What each model was sent is checked on the wire, and that nothing in it says a switch happened.
  *
@@ -36,7 +39,7 @@ import { findClaudeSession } from "agent-runtime/convert";
 import { requestSwitch, switchModel } from "../src/agent/switch.ts";
 import { openDb } from "../src/store/db.ts";
 import { addModel, addProvider } from "../src/store/models.ts";
-import { dmUpdate, FakeTelegram, OWNER } from "../test/helpers.ts";
+import { consolePortIn, dmUpdate, FakeTelegram, OWNER, tapLines } from "../test/helpers.ts";
 
 const t0 = Date.now();
 const log = (m: string) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`);
@@ -149,10 +152,14 @@ const env = {
   SHUVI_TZ: "Asia/Taipei",
   SHUVI_WEB: "off",
   SHUVI_CONSOLE_LISTEN: "127.0.0.1:0",
+  SHUVI_CONSOLE_USERS: "owner@example.com",
   ANTHROPIC_BASE_URL: `http://localhost:${anthropic.port}`,
   ANTHROPIC_API_KEY: "sk-ant-fake",
 };
-const server = Bun.spawn([process.execPath, "src/server/main.ts"], { env, stdout: "ignore", stderr: "inherit", detached: true });
+const server = Bun.spawn([process.execPath, "src/server/main.ts"], { env, stdout: "pipe", stderr: "inherit", detached: true });
+// The console binds any free port (0); the server's log says which.
+let consolePort = 0;
+tapLines(server.stdout, (line) => (consolePort = consolePortIn(line) ?? consolePort));
 function cleanup() {
   try {
     process.kill(-server.pid, "SIGKILL");
@@ -291,9 +298,38 @@ try {
   const r13 = JSON.stringify(openaiSeen.at(-1));
   check(inOrder(r13, ["T11-ANSWER", "T12-PROMPT", "T12-ANSWER", "T13-PROMPT"]).length === 0 && count(r13, "T13-PROMPT") === 1, "the endpoint was sent T12 carried, then T13's prompt once, as its input");
 
+  // → lossy → T14 on sonnet, switched from the console's settings page for the chat.
+  await until("the console to be listening", () => consolePort > 0);
+  const base = `http://127.0.0.1:${consolePort}`;
+  const as = { "tailscale-user-login": "owner@example.com" };
+  const settings = `${base}/chats/${chat().id}/settings`;
+  const pageNow = async (path: string) => (await fetch(`${base}${path}`, { headers: as })).text();
+  const picked = await pageNow(`/chats/${chat().id}/settings?to=claude/claude-sonnet-4-5`);
+  check(picked.includes("Switch from <span class=\"mono\">fake/fake-model</span> to <span class=\"mono\">claude/claude-sonnet-4-5</span>. How?"), "the page offers Lossless / Lossy for the model picked");
+  const csrf = /name="csrf" value="([^"]+)"/.exec(picked)![1]!;
+  const refused = await fetch(`${settings}/switch`, { method: "POST", headers: as, body: new URLSearchParams({ csrf, to: "claude/claude-sonnet-4-5", mode: "lossy" }), redirect: "manual" });
+  check(refused.status === 403, "a switch without the console's Origin is refused");
+  const posted = await fetch(`${settings}/switch`, { method: "POST", headers: { ...as, origin: base }, body: new URLSearchParams({ csrf, to: "claude/claude-sonnet-4-5", mode: "lossy" }), redirect: "manual" });
+  const back = posted.headers.get("location") ?? "";
+  check(posted.status === 303 && back.startsWith(`/chats/${chat().id}/settings?r=`), "the switch is a POST answered 303 back to the page");
+  const consoleReq = store.$client.query("select id from model_switch_requests order by id desc limit 1").get() as { id: number };
+  check((store.$client.query("select count(*) as n from control_cards where idem_key like 'console-switch:%' and switch_request_id = ?").get(consoleReq.id) as { n: number }).n === 1, "asked through a switch card of the console's, as the bot asks");
+  const followed = await pageNow(back);
+  check(followed.includes("Switching to") || followed.includes("→ claude/claude-sonnet-4-5"), "the page follows the request");
+  await until("the console's request to be applied", () => (store.$client.query("select status from model_switch_requests where id = ?").get(consoleReq.id) as { status: string }).status !== "pending");
+  const done = await fetch(`${settings}/switching?req=${consoleReq.id}`, { headers: as });
+  const result = await pageNow(done.headers.get("hx-redirect") ?? "/none");
+  check(result.includes("→ claude/claude-sonnet-4-5 (lossy, its own conversation resumed)"), "once applied, the page shows the result in the bot's words");
+  check(chat().model === "claude/claude-sonnet-4-5" && chat().session === claudeSession, "the chat is on sonnet, its own session active again");
+  const claudeBefore = claudeSeen.length;
+  await turn(14);
+  const r14 = JSON.stringify(claudeSeen.at(-1));
+  check(claudeSeen.length > claudeBefore && r14.includes("T14-PROMPT") && !JSON.stringify(openaiSeen.at(-1)).includes("T14-PROMPT"), "T14 ran on sonnet, not on the endpoint");
+  check(inOrder(r14, ["T12-PROMPT", "T12-ANSWER", "T14-PROMPT"]).length === 0 && !r14.includes("T13-ANSWER"), "T14's request is sonnet's own conversation (T12), without what the endpoint said in T13");
+
   const said = [...claudeSeen, ...openaiSeen].map((m) => JSON.stringify(m)).join("");
   check(!/switch(ed)? (from|to)|lossless|lossy/i.test(said), "nothing any model was sent says a switch happened");
-  check((store.$client.query("select count(*) as n from model_switches where turn_id is not null").get() as { n: number }).n === 12, "every switch was recorded by the turn after it");
+  check((store.$client.query("select count(*) as n from model_switches where turn_id is not null").get() as { n: number }).n === 13, "every switch was recorded by the turn after it");
   log("PASS");
 } finally {
   cleanup();

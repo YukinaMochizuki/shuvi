@@ -307,9 +307,12 @@ unknown_chat: ignore      # a group not listed: no response, and the owner is to
   as the owner's (`approvals.requested_by`), so pressing it lends them nothing more. What the owner
   started (a schedule, a job) only he can cancel. Lines from operators named by id carry
   `⚙ operator`. Operators are for groups only: the owner's DM is his alone.
-- **Policy changes are proposed by the assistant and approved by the owner.** `propose_policy` produces
-  a diff; the framework writes and commits it only when the owner's user id agrees (or presses the inline
-  button).
+- **Policy changes are proposed by the assistant and approved by the owner, or made by the owner himself.**
+  `propose_policy` produces a diff; the framework writes and commits it only when the owner's user id agrees
+  (or presses the inline button). The owner may also change a chat's entry himself on that chat's settings
+  page in the console (docs/console.md): he sees the diff first, the change is checked by the same parser (a
+  private layer is refused in a group however the form is posted), only that entry is rewritten (the file's
+  comments and the other entries are kept), and it is committed as his, from the console.
 
 The other files in `home/` (persona, directives, memory, playbooks, stickers) are edited by the assistant
 directly when the owner asks, with a commit per edit and a one-line note in the chat. Each of her commits records

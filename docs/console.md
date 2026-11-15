@@ -1,10 +1,10 @@
 # The console
 
 A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
-timeline. It is for the owner, to debug and tune her. It is read-only, except for three things: **Settings**,
-which manages the model catalog, **Home**, where her files are edited, and **deleting chat messages** (all
-below). Nothing else in it can change
-anything.
+timeline. It is for the owner, to debug and tune her. It is read-only, except for four things: **Settings**,
+which manages the model catalog, **Home**, where her files are edited, **a chat's settings** (its model,
+profile, conversation and permissions), and **deleting chat messages** (all below). Nothing else in it can
+change anything.
 
 ## What it shows
 
@@ -31,6 +31,7 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
     index, memory), each with its size, and a diff against the previous turn's prompt in the chat.
   - *Raw input*: the exact text and images the model received.
 - **A chat** (`/chats/<id>`): the chat's whole log, each turn's boundary a divider linking to it.
+- **A chat's settings** (`/chats/<id>/settings`): its model, profile, conversation and permissions. See below.
 - **Home** (`/home`): her files in `home/`, edited by hand, with each file's history. See below.
 - **Settings** (`/settings`): the model catalog. See below.
 
@@ -129,23 +130,55 @@ playbook it hides) or `only in <profile>`.
 - **Preview**, a tab beside the file: pick a chat and see the system prompt it would get now, section by section,
   each labelled with where it came from (`· base`, `· <profile>`, or `· code` for a section written in code).
 
-A chat's page has a **Profile** select next to its title: changing it switches the chat at once (one POST), from
-its next turn, and the page says so once. A turn's System prompt tab says which profile it ran under, and each
-section's layer. The control bot's `/profile` does the same as the chat page's select.
+A chat's profile is switched on its settings page (below), from its next turn. A turn's System prompt tab says
+which profile it ran under, and each section's layer. The control bot's `/profile` does the same.
 
 How a commit says who made it is in `src/capabilities/memory/home.ts`'s header: hers carry the turn, the chat and the
 tool call as trailers (`Turn:`, `Tool-Call:`, `Chat:`, `Tool:`); yours are authored `owner (console)` with your
 login. Her commits from before trailers are matched to their call through the `commit <id>` her tool's result names,
 while that turn's transcript is kept, and say "inferred".
 
-`policy.yaml` and `inbound.yaml` are not here: policy changes only by approval.
+`policy.yaml` and `inbound.yaml` are not here: a chat's permissions are edited on its settings page (below), one
+chat's entry at a time, and the assistant's own proposals still need your approval.
+
+## A chat's settings
+
+`/chats/<id>/settings`, reached from "⚙ Settings" next to the chat's name on every page about it (its log, a
+segment, a conversation, a turn) and from the ⚙ on its header in the list (shown on hover; always on a touch
+screen). A facts line (its model, profile, how old its conversation is, a link to its log), jumps to the four
+sections, then:
+
+- **Model**: the catalog as a radio list by provider: the chat's model marked current, ★ the default, ⚠ a model
+  whose last probe got no tool call, each one's context window. Picking another opens **Lossless** / **Lossy**
+  under it, each with what it would do in this chat now, and the running turn it would stop: the control bot's
+  `/model` card's own lines. Pressing one asks for the switch through the same code as the card
+  (`src/control/model-cards.ts` `consoleSwitch`, `src/agent/switch.ts` `requestSwitch`): the server stops a running
+  turn, then switches, and the chat's open `/model` cards in the control bot are closed as superseded. The page
+  says "Switching…" until it is done, then shows the result once, in the card's words. A switch already pending for the
+  chat (asked in the control bot, or in another tab) shows the same way; a button pressed twice asks once.
+- **Profile**: Base and every profile, with its label and how many files it has of its own; a press switches the
+  chat, from its next turn. A link leads to Profiles in Home.
+- **Conversation**: when the current one began, its segments and its context. **Stop the turn** (only while one
+  runs) does what `/stop` does. **New conversation** does what `/new` does, after asking: a running turn is
+  stopped, every model's conversation of the chat is forgotten, and her next turn opens with the chat's last 10
+  messages. Her files and notes stay either way.
+- **Permissions**: the chat's entry in `home/policy.yaml` as a form: what wakes her (every message, or mentions,
+  replies and follow-ups within some minutes), what she sees (the private persona and memory are offered only for
+  your DM, as the policy parser requires), each capability on or off with its parameters (a workstream's
+  products), and in a group its operators and what is delegated to them. **Review changes** shows the change as a
+  diff of `policy.yaml`; nothing is written until **Save to policy.yaml**, which commits it as you, from the
+  console, in one commit. A form the parser refuses comes back as you typed it, with its reason, and nothing is
+  written. Only this chat's entry is rewritten: the file's comments and the other chats' entries are kept as they
+  are (a file laid out so that the entry cannot be edited in place is written whole, and the review says its
+  comments would not survive). If the file changed after you reviewed, Save shows the diff against the file as it
+  is now instead of writing. The server reloads the file within seconds.
 
 ### The write boundary
 
-The console has four ways in for a write: Settings, Home, a chat page's Profile select, and deleting messages.
+The console has four ways in for a write: Settings, Home, a chat's settings, and deleting messages.
 Every other page answers GET and HEAD only (and `/login` its POST); a POST to it is refused with 405. Settings'
 buttons POST to `/settings/<area>/<verb>`, Home's Save to `/home/save` and its profile actions to
-`/home/profile/<verb>`, a chat's Profile select to `/chats/<id>/profile`, a delete to `/messages/delete` and its
+`/home/profile/<verb>`, a chat's settings to `/chats/<id>/settings/<verb>` (switch, profile, stop, new, policy), a delete to `/messages/delete` and its
 undo to `/messages/undo`, and a GET to any of them is refused too. A POST there is carried out only if it passes,
 on top of the sign-in and the Host check:
 

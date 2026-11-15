@@ -319,31 +319,6 @@ describe("profiles on the Home page", () => {
   });
 });
 
-describe("the chat page's Profile select", () => {
-  test("one POST switches the chat; the result shows once; 405 on GET; refused without the token", async () => {
-    const { db, home, dm } = world();
-    await act(db, home, "/home/profile/new", { name: "work", label: "Work hours" });
-    const page = (await get(db, home, `/chats/${dm}`)).text;
-    expect(page).toContain(`action="/chats/${dm}/profile"`);
-    expect(page).toContain('<option value="" selected>Base</option>');
-    const res = await post(db, home, `/chats/${dm}/profile`, { profile: "work" });
-    expect(res.status).toBe(303);
-    const loc = res.headers.get("location")!;
-    expect(loc).toMatch(new RegExp(`^/chats/${dm}\\?r=`));
-    expect(getChat(db, dm)!.profile).toBe("work");
-    const after = (await get(db, home, loc)).text;
-    expect(after).toContain("DM · Owner now runs on work, from its next turn.");
-    expect(after).toContain('<option value="work" selected>work · Work hours</option>');
-    expect((await get(db, home, loc)).text).not.toContain("now runs on work");
-    expect((await get(db, home, `/chats/${dm}/profile`)).status).toBe(405);
-    expect((await post(db, home, `/chats/${dm}/profile`, { profile: "" }, { csrf: "wrong" })).status).toBe(403);
-    expect(getChat(db, dm)!.profile).toBe("work");
-    await act(db, home, `/chats/${dm}/profile`, { profile: "" });
-    expect(getChat(db, dm)!.profile).toBeNull();
-    expect(await act(db, home, `/chats/${dm}/profile`, { profile: "nope" })).toContain("There is no profile nope.");
-  });
-});
-
 describe("the control bot's /profile card", () => {
   test("it lists Base and the profiles, the current one marked; a press switches the chat and the card says so", async () => {
     const { db, home, dm } = world();
