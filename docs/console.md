@@ -19,7 +19,8 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
   results, errors, the input) keep the segments holding a matching turn; a chat with none is hidden. `j` / `k`
   move through the segments.
 - **A segment** (`/segments/<id>`) or **a whole conversation** (`/conversations/<id>`): one continuous
-  exchange, a thin divider at each turn (its outcome, duration, cost, links to the turn and its tabs), a
+  exchange, a thin divider at each turn (its outcome, duration, cost, the model it ran on, links to the turn and
+  its tabs; a turn on another model than the one before it is marked "→ model" in the accent), a
   dashed one where a conversation went quiet, and a prominent one where it was **compacted** (after which she
   saw only a summary of what came before).
 - **One turn**, in three tabs:
@@ -30,7 +31,8 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
   - *System prompt*: by section (persona, directives, this chat, each capability's section, the playbook
     index, memory), each with its size, and a diff against the previous turn's prompt in the chat.
   - *Raw input*: the exact text and images the model received.
-- **A chat** (`/chats/<id>`): the chat's whole log, each turn's boundary a divider linking to it.
+- **A chat** (`/chats/<id>`): the chat's whole log, each turn's boundary a divider linking to it, with the model
+  it ran on (a switch marked as on a segment).
 - **A chat's settings** (`/chats/<id>/settings`, `/permissions`, `/automation`): its model, profile and
   conversation; its permissions; its schedules, secrets and computer. See below.
 - **Home** (`/home`): her files in `home/`, edited by hand, with each file's history. See below.

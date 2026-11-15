@@ -64,7 +64,10 @@ page marks those turns. `j` / `k` move between segments.
   one continuous exchange. The header places it ("Segment 2 of 3 of the chat's first conversation, which
   began …"; a conversation: when it began, its session id, segments, compactions) and sums it up (span, turns,
   tokens, cost, tool calls). Each turn opens with a thin divider: its number (a link to the turn), outcome,
-  duration, cost, tags (retry, messages only, match) and links to its prompt and raw tabs. Between segments of
+  duration, cost, the model it ran on (TurnModel: its catalog label, else the recorded id; faint like the rest;
+  nothing for a turn without a transcript; where it differs from the last turn before it on the page, "→ label"
+  in the accent and semibold, so a switch stands out), tags (retry, messages only, match) and links to its
+  prompt and raw tabs. A chat's log has the same model on its dividers. Between segments of
   a conversation, a dashed divider says how long the silence was. The badge: a segment shows its worst
   outcome, a conversation its last turn's (an old failure that was retried is history, not its state).
 - **The turn** (`/turns/:id`), three tabs (`?tab=`): *Conversation* (default), *System prompt*, *Raw input*,

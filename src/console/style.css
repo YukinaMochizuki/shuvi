@@ -645,6 +645,15 @@ details.group .more-link {
 .tdiv .tabs-link:hover {
   color: var(--accent);
 }
+/* The model a turn ran on, quiet like the rest of the line; a switch from the turn before, in the accent. */
+.tmodel {
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.tmodel.switched {
+  color: var(--accent);
+  font-weight: 600;
+}
 .tdiv.match {
   box-shadow: inset 2px 0 0 var(--accent);
   background: rgb(122 162 247 / 0.06);

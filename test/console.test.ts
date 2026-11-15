@@ -12,6 +12,10 @@ import { consoleTurnUrl, controlMessagesOf, raiseAlert } from "../src/store/cont
 import { ensureChat, recordInbound } from "../src/store/events.ts";
 import { ALICE, buildConsoleFixture, FIXTURE_GROUP, type ConsoleFixture } from "./console-fixture.ts";
 import { memDb, OWNER } from "./helpers.ts";
+import { chatGrouping } from "../src/console/sessions.ts";
+import { turnModels } from "../src/console/pages.ts";
+import { addModel, addProvider } from "../src/store/models.ts";
+import { setTranscriptModel } from "../src/store/transcripts.ts";
 
 const HOST = "127.0.0.1:8787";
 const BASE = `http://${HOST}`;
@@ -480,5 +484,66 @@ describe("control bot links", () => {
     const update = { update_id: 1, message: { message_id: 1, date: 0, chat: { id: OWNER, type: "private" }, from: { id: OWNER, is_bot: false, first_name: "Owner" }, text: "/turn 42" } };
     recordControlBatch(db, [update as never], { ownerId: OWNER, commit: "test", timeZone: "UTC" });
     expect(controlMessagesOf(db, "reply").map((m) => m.text)).toEqual(["No turn 42."]);
+  });
+});
+
+describe("the model on each turn's divider", () => {
+  /** The owner's DM in a fresh fixture: one segment of turns 1 (model "fake"), 2 (none recorded) and 3. */
+  async function fixtureWith(third: string) {
+    const x = await buildConsoleFixture();
+    addProvider(x.db, { name: "claude", kind: "claude", configDir: x.home });
+    addModel(x.db, { provider: "claude", model: "claude-sonnet-4-5", label: "Sonnet" });
+    setTranscriptModel(x.db, 3, third);
+    const dm = (x.db.$client.query("select id from chats where kind = 'private'").get() as { id: number }).id;
+    const places = chatGrouping(x.db, dm);
+    expect(places.map((p) => p.turnId)).toEqual([1, 2, 3]);
+    return { x, dm, segment: places[0]!.sessionId, conversation: places[0]!.conversationId };
+  }
+  const dividers = (html: string, cls: string) => [...html.matchAll(new RegExp(`<div class="${cls}[^"]*">[\\s\\S]*?</div>`, "g"))].map((m) => m[0]);
+
+  test("its catalog label when the catalog has it (a dated API name included), else as recorded; nothing without a transcript; a switch marked", async () => {
+    const { x, dm, segment, conversation } = await fixtureWith("claude-sonnet-4-5-20250929");
+    for (const path of [`/segments/${segment}`, `/conversations/${conversation}`]) {
+      const [t1, t2, t3] = dividers(await page(path, x), "tdiv");
+      expect(t1).toContain('<span class="tmodel" title="fake">fake</span>');
+      expect(t2).not.toContain("tmodel");
+      // Turn 3 ran on another model than turn 1 (the last turn before it with one): a switch, in the accent.
+      expect(t3).toContain('<span class="tmodel switched" title="claude-sonnet-4-5-20250929; the turn before ran on fake">→ Sonnet</span>');
+    }
+    const chat = dividers(await page(`/chats/${dm}`, x), "divider");
+    expect(chat.find((d) => d.includes(">turn 1 ·"))).toContain('<span class="tmodel" title="fake">fake</span>');
+    expect(chat.find((d) => d.includes(">turn 3 ·"))).toContain("→ Sonnet</span>");
+    // The turn page's header keeps the model as it is.
+    expect(await page("/turns/3", x)).toContain('<span class="mono">claude-sonnet-4-5-20250929</span>');
+  });
+
+  test("a catalog model's label never names another model that only shares its prefix; a date or -latest is the same model", () => {
+    const db = memDb();
+    addProvider(db, { name: "claude", kind: "claude", configDir: "/nonexistent" });
+    addModel(db, { provider: "claude", model: "claude-sonnet-4", label: "Sonnet 4" });
+    addProvider(db, { name: "oa", kind: "openai-compat", baseUrl: "http://127.0.0.1:9/v1" });
+    addModel(db, { provider: "oa", model: "gpt-4o", label: "GPT-4o", contextWindow: 128_000 });
+    const name = (m: string) => {
+      const s = turnModels(db)(m).s;
+      return />(?:→ )?([^<]+)<\/span>$/.exec(s)![1];
+    };
+    // Gone from the catalog, sharing a catalog model's prefix: shown as recorded.
+    expect(name("gpt-4o-mini")).toBe("gpt-4o-mini");
+    expect(name("claude-sonnet-4-5-20250929")).toBe("claude-sonnet-4-5-20250929");
+    expect(name("claude-sonnet-4-5")).toBe("claude-sonnet-4-5");
+    expect(name("gpt-4o-2024")).toBe("gpt-4o-2024");
+    // The same model with an API's version suffix, or by name or id: its label.
+    expect(name("claude-sonnet-4-20250514")).toBe("Sonnet 4");
+    expect(name("gpt-4o-latest")).toBe("GPT-4o");
+    expect(name("gpt-4o")).toBe("GPT-4o");
+    expect(name("oa/gpt-4o")).toBe("GPT-4o");
+  });
+
+  test("the same model turn after turn is not marked", async () => {
+    const { x, dm, segment } = await fixtureWith("fake");
+    const html = await page(`/segments/${segment}`, x);
+    expect(html.match(/class="tmodel"/g)).toHaveLength(2);
+    expect(html).not.toContain("tmodel switched");
+    expect(await page(`/chats/${dm}`, x)).not.toContain("tmodel switched");
   });
 });
