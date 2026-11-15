@@ -5,6 +5,7 @@
  * in one place.
  */
 
+import { createHash } from "node:crypto";
 import { assetUrl, assetsVersion, type Asset } from "./assets.ts";
 
 export class Raw {
@@ -110,6 +111,37 @@ export function cardPage(title: string, body: Raw, who?: string): string {
   return page(title, html`<main class="card"><h1>${title}</h1>${body}</main>`, who);
 }
 
+/**
+ * A part of a page the live stream keeps current (live.ts): `k` names it on the page (`head`, `count`, `g<chat>`,
+ * `t<turn>`, `c<seq>`), `html` is what it holds, `live` says it may still change (a running turn, a message not
+ * sent yet, the last run of a chat's log, the list), so a page reconnecting says what it has of it.
+ */
+export interface LivePart {
+  k: string;
+  html: string;
+  /** `partHash(html)`, computed once when it is drawn. */
+  h: string;
+  live: boolean;
+}
+
+export function livePart(k: string, inner: Raw | readonly Raw[], live: boolean): LivePart {
+  const s = html`${inner}`.s;
+  return { k, html: s, h: partHash(s), live };
+}
+
+/** A part's version: what the page and the stream compare (`data-h`). */
+export function partHash(s: string): string {
+  return createHash("sha1").update(s).digest("base64url").slice(0, 10);
+}
+
+/**
+ * A live part as the page draws it: its content in a wrapper that takes no box of its own (`.lb`, `display:
+ * contents`), so the page looks as it did without one, with its name and version for the stream.
+ */
+export function lb(p: LivePart): Raw {
+  return html`<div class="lb" data-k="${p.k}" data-h="${p.h}"${raw(p.live ? " data-live" : "")}>${raw(p.html)}</div>`;
+}
+
 export function dot(state: string): Raw {
   return html`<span class="dot ${state}" aria-hidden="true"></span>`;
 }
@@ -128,12 +160,13 @@ export const FOLD_LINES = 10;
 export const FOLD_CHARS = 1200;
 
 let blockId = 0;
+let blockScope = "";
 /**
  * A labelled block of text. Long text is folded (a faded preview that opens on click, with its size); every
  * block has a copy button (console.js, hidden without it). `prose`: sans-serif at a readable measure.
  */
 export function block(label: Value, text: string, opts: { prose?: boolean; open?: boolean; extra?: Raw; unfold?: boolean } = {}): Raw {
-  const id = `b${++blockId}`;
+  const id = `b${blockScope}${++blockId}`;
   const cls = opts.prose ? "prose" : "";
   const lines = text.split("\n").length;
   const long = lines > FOLD_LINES || text.length > FOLD_CHARS;
@@ -147,6 +180,23 @@ export function block(label: Value, text: string, opts: { prose?: boolean; open?
 /** Reset the block ids (one page at a time, so ids are stable for tests). */
 export function resetBlocks(): void {
   blockId = 0;
+  blockScope = "";
+}
+
+/**
+ * Draw `fn` with its block ids under `scope` (`b<scope>-1`, `b<scope>-2`, …), counted from 1 whatever was drawn
+ * before it: a part of a page that the live stream draws again by itself (live.ts, a turn's rows) gets the same
+ * ids as it had in the whole page, and never another part's.
+ */
+export function scopedBlocks<T>(scope: string, fn: () => T): T {
+  const saved = [blockId, blockScope] as const;
+  blockId = 0;
+  blockScope = `${scope}-`;
+  try {
+    return fn();
+  } finally {
+    [blockId, blockScope] = saved;
+  }
 }
 
 // ---- numbers ---------------------------------------------------------------------------------------------

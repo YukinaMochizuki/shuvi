@@ -19,7 +19,7 @@ import type { Turn } from "../store/turns.ts";
 import { DELETABLE_KINDS } from "../store/deletions.ts";
 import { listModels } from "../store/models.ts";
 import { diffLines, hunks } from "./diff.ts";
-import { ago, badge, block, clock, dot, empty, excerpt, href, html, markdown, page, raw, resetBlocks, secs, short, size, tokens, usd, wall, when, type Raw } from "./html.ts";
+import { ago, badge, block, clock, dot, empty, excerpt, href, html, lb, livePart, markdown, page, raw, resetBlocks, scopedBlocks, secs, short, size, tokens, usd, wall, when, type LivePart, type Raw } from "./html.ts";
 import { conversationOf, matchingTurns, segmentList, segmentOf, type Conversation, type SegmentRow, type Span } from "./sessions.ts";
 import {
   chatById,
@@ -420,6 +420,12 @@ function segmentRow(s: SegmentRow, f: Filters, on: { id?: number; auto: boolean 
  * paged). The chat holding the selection is open; with nothing selected, the first OPEN_GROUPS are.
  */
 function listPane(ctx: PageContext, q: URLSearchParams, sel: Selection): { pane: Raw; first?: number } {
+  const l = listParts(ctx, q, sel);
+  return { pane: html`${l.filters}${lb(l.count)}<nav class="tree" data-region="list">${l.groups.map(lb)}</nav>`, ...(l.first !== undefined ? { first: l.first } : {}) };
+}
+
+/** The left pane's parts: its filters (drawn once), and the count line and each chat's group, which the live stream draws again. */
+function listParts(ctx: PageContext, q: URLSearchParams, sel: Selection): { filters: Raw; count: LivePart; groups: LivePart[]; first?: number } {
   const f = currentFilters(q);
   const filter = toFilter(f, q, ctx.timeZone);
   const filtered = Object.keys(f).some((k) => k !== "chat");
@@ -488,12 +494,12 @@ ${f.outcome ? html`<input type="hidden" name="outcome" value="${f.outcome}">` : 
       : hidden > 0
         ? html`<a class="more-link" href="${href("/turns", { ...f, chat: c.id })}">${hidden} more in this chat</a>`
         : "";
-    return html`<details class="group${c.failed ? " has-failed" : ""}" ${open ? "open" : ""}>${head}${body}${more}</details>`;
+    return livePart(`g${c.id}`, html`<details class="group${c.failed ? " has-failed" : ""}" ${open ? "open" : ""}>${head}${body}${more}</details>`, true);
   });
   const n = tree.segments;
   const count = html`<div class="count">${single ? html`<a href="${href("/turns", { ...f, chat: undefined })}">← all chats</a> · ` : ""}${n} segment${n === 1 ? "" : "s"}, ${tree.turns} turn${tree.turns === 1 ? "" : "s"}${single ? "" : ` in ${tree.groups.length} chat${tree.groups.length === 1 ? "" : "s"}, by last activity`}</div>`;
-  const list = tree.groups.length ? html`${groups}` : empty("No turn matches that.");
-  return { pane: html`${filters}${count}<nav class="tree">${list}</nav>`, ...(first !== undefined ? { first } : {}) };
+  const list = tree.groups.length ? groups : [livePart("none", empty("No turn matches that."), true)];
+  return { filters, count: livePart("count", count, true), groups: list, ...(first !== undefined ? { first } : {}) };
 }
 
 // ---- one turn: the conversation ---------------------------------------------------------------------------
@@ -697,8 +703,14 @@ function turnTrace(ctx: PageContext, turn: Turn, transcript: Transcript | undefi
   return rows;
 }
 
-function conversation(ctx: PageContext, turn: Turn, transcript: Transcript | undefined, steps: Step[], group: boolean): Raw {
-  return html`<div class="trace">${turnTrace(ctx, turn, transcript, steps, group)}</div>`;
+/** A turn's rows on its own page, as one live part, its block ids its own (`scopedBlocks`). */
+function turnPart(ctx: PageContext, turn: Turn, transcript: Transcript | undefined, steps: Step[], group: boolean): LivePart {
+  return scopedBlocks(`t${turn.id}`, () => livePart(`t${turn.id}`, turnTrace(ctx, turn, transcript, steps, group), liveTurn(ctx.db, turn)));
+}
+
+/** May a turn's rows still change: it is running, or a message of hers in it is not sent yet. */
+function liveTurn(db: Db, turn: Turn): boolean {
+  return turn.status === "running" || outboundOf(db, turn.id).some((e) => e.status === "pending");
 }
 
 // ---- one turn: the system prompt and the raw input --------------------------------------------------------
@@ -756,7 +768,8 @@ const TABS = [
   { id: "raw", label: "Raw input" },
 ] as const;
 
-function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters): Raw {
+/** A turn's page: its detail (`raw`), and its header and rows as the live stream draws them again. */
+function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters): { raw: () => Raw; head: LivePart; trace: LivePart | null } {
   const chat = chatById(ctx.db, turn.chatId)!;
   const transcript = getTranscript(ctx.db, turn.id);
   const prompt = transcript?.promptHash ? getPromptText(ctx.db, transcript.promptHash) : undefined;
@@ -784,7 +797,7 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
       ? [html`<span class="prewarm" title="links in this turn's messages looked up ahead (media prewarm), and whether video_probe then used them">prewarmed: ${pre.used ? html`<b class="c-done">${pre.used} used</b>` : ""}${pre.used && pre.unused ? " / " : ""}${pre.unused ? html`<b class="c-stopped">${pre.unused} unused</b>` : ""}</span>`]
       : []),
   ];
-  const head = html`<div class="head">
+  const headRaw = html`<div class="head">
 <a class="back" href="${href("/turns", f)}">← All chats</a>
 <div class="title">${badge(turn.status)}<h1>Turn ${turn.id}</h1><a href="/chats/${chat.id}#e${turn.toSeq}">${chatName(chat)}</a>${settingsLink(chat.id)}<span class="meta" title="${when(turn.startedAt, ctx.timeZone, true)}">${when(turn.startedAt, ctx.timeZone)} · ${ago(turn.startedAt, ctx.now)}</span>
 <span class="nav">${prev ? html`<a href="${href(`/turns/${prev}`, f)}" title="the chat's previous turn">‹ turn ${prev}</a>` : ""}${next ? html`<a href="${href(`/turns/${next}`, f)}" title="the chat's next turn">turn ${next} ›</a>` : ""}</span></div>
@@ -793,11 +806,15 @@ ${place ? html`<p class="trigger context">In <a href="${href(`/segments/${place.
 <p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
 ${turn.error ? html`<div class="banner">${turn.status === "stopped" ? "Stopped" : "Why it ended that way"}<span class="mono">${turn.error}</span></div>` : ""}
 </div>`;
-  const tabs = html`<nav class="tabs">${TABS.map((t) => html`<a class="${t.id === tab ? "on" : ""}" href="${link(t.id === "conversation" ? {} : { tab: t.id })}">${t.label}${t.id === "prompt" && prompt ? html` <span class="meta">${size(prompt.text)}</span>` : ""}</a>`)}<span class="aside"><a href="${link(expandAll ? (tab === "conversation" ? {} : { tab }) : { ...(tab === "conversation" ? {} : { tab }), expand: "1" })}">${expandAll ? "collapse all" : "expand all"}</a> · j / k: next / previous turn</span></nav>`;
-  const body =
-    tab === "prompt" ? promptTab(ctx, turn, prompt, q.get("diff") === "1", link) : tab === "raw" ? rawTab(ctx, turn, transcript, steps) : conversation(ctx, turn, transcript, steps, chat.kind === "group");
-  const del = tab === "conversation";
-  return html`<div class="detail">${head}${tabs}${del ? (ctx.notice ?? "") : ""}<div class="panel">${body}</div>${del ? deleteBar(ctx) : ""}</div>`;
+  const head = livePart("head", headRaw, true);
+  const trace = tab === "conversation" ? turnPart(ctx, turn, transcript, steps, chat.kind === "group") : null;
+  const detail = () => {
+    const tabs = html`<nav class="tabs">${TABS.map((t) => html`<a class="${t.id === tab ? "on" : ""}" href="${link(t.id === "conversation" ? {} : { tab: t.id })}">${t.label}${t.id === "prompt" && prompt ? html` <span class="meta">${size(prompt.text)}</span>` : ""}</a>`)}<span class="aside"><a href="${link(expandAll ? (tab === "conversation" ? {} : { tab }) : { ...(tab === "conversation" ? {} : { tab }), expand: "1" })}">${expandAll ? "collapse all" : "expand all"}</a> · j / k: next / previous turn</span></nav>`;
+    const body = tab === "prompt" ? promptTab(ctx, turn, prompt, q.get("diff") === "1", link) : tab === "raw" ? rawTab(ctx, turn, transcript, steps) : html`<div class="trace" data-region="trace">${lb(trace!)}</div>`;
+    const del = tab === "conversation";
+    return html`<div class="detail">${lb(head)}${tabs}${del ? (ctx.notice ?? "") : ""}<div class="panel">${body}</div>${del ? deleteBar(ctx) : ""}</div>`;
+  };
+  return { raw: detail, head, trace };
 }
 
 // ---- the model a turn ran on, on its divider ---------------------------------------------------------------------
@@ -837,11 +854,28 @@ export function turnModels(db: Db): (model: string | null | undefined) => Raw {
 // ---- a segment, or a whole conversation ------------------------------------------------------------------------
 
 /**
+ * What the live stream keeps of a segment or conversation between two of its frames (live.ts): each turn's part,
+ * what it was drawn under, and the messages shown up to it (`seen`), so a frame draws again only the turns that
+ * changed and those after one whose `seen` did.
+ */
+export type SpanCache = Map<number, { key: string; part: LivePart; seenAfter: number[]; model: string | null }>;
+
+/**
  * A segment, or a conversation, as one continuous exchange: each turn opens with a thin divider (its number,
  * outcome, duration, cost, and a link to the turn's own view), then its rows; in a conversation, a time gap
- * between segments is a divider too, and a compaction is marked where it happened.
+ * between segments is a divider too, and a compaction is marked where it happened. Returns the detail (`raw`), and
+ * its header and each turn's part as the live stream draws them again; with `cache`, a turn not in `changed` is
+ * taken from it when nothing before it changed.
  */
-function spanDetail(ctx: PageContext, sp: Span, level: "segment" | "conversation", q: URLSearchParams, f: Filters): Raw {
+function spanDetail(
+  ctx: PageContext,
+  sp: Span,
+  level: "segment" | "conversation",
+  q: URLSearchParams,
+  f: Filters,
+  cache?: SpanCache,
+  changed: ReadonlySet<number> | "all" = "all",
+): { raw: () => Raw; head: LivePart; turns: LivePart[] } {
   const chat = chatById(ctx.db, sp.chatId)!;
   const turns = sp.turnIds.map((id) => turnById(ctx.db, id)!).filter(Boolean);
   const first = turns[0]!;
@@ -888,7 +922,7 @@ function spanDetail(ctx: PageContext, sp: Span, level: "segment" | "conversation
     ...(level === "segment" && compactions ? [html`<span class="c-lost">compacted</span>`] : []),
   ];
   const missing = turns.filter((t) => !getTranscript(ctx.db, t.id));
-  const head = html`<div class="head">
+  const headRaw = html`<div class="head">
 <a class="back" href="${href("/turns", f)}">← All chats</a>
 <div class="title">${badge(outcome)}<h1>${title}</h1><a href="${href(`/chats/${chat.id}`, f)}#e${first.toSeq}">${chatName(chat)}</a>${settingsLink(chat.id)}
 <span class="nav">${sp.prev ? html`<a href="${href(`${base}/${sp.prev}`, f)}" title="the chat's previous ${level}">‹ earlier</a>` : ""}${sp.next ? html`<a href="${href(`${base}/${sp.next}`, f)}" title="the chat's next ${level}">later ›</a>` : ""}</span></div>
@@ -897,30 +931,56 @@ ${context}
 ${filtered ? html`<p class="trigger context"><span class="c-accent">${matches.size} of ${turns.length} turns</span> match the filter; they are marked below.</p>` : ""}
 ${missing.length ? html`<p class="note left">${absenceOf(ctx, missing, turns.length)}</p>` : ""}
 </div>`;
+  const head = livePart("head", headRaw, true);
   const aside = html`<nav class="tabs"><span class="on">${level === "segment" ? "Segment" : "Conversation"}</span><span class="aside"><a href="${href(`${base}/${sp.id}`, expandAll ? f : { ...f, expand: "1" })}">${expandAll ? "collapse all" : "expand all"}</a> · j / k: next / previous segment</span></nav>`;
 
   const group = chat.kind === "group";
   const seen = new Set<number>();
-  const rows: Raw[] = [];
+  const parts: LivePart[] = [];
+  // The model on each divider, and "→ <model>" where it differs from the turn before's (`turnModels` keeps the last).
   const modelOf = turnModels(ctx.db);
+  let lastModel = "";
   let prevTurn: Turn | null = null;
+  // Whether `seen` is what it was when the cached parts were drawn (it is, until a turn drawn again adds others).
+  let same = true;
   for (const t of turns) {
-    if (prevTurn && sp.segmentOf.get(t.id) !== sp.segmentOf.get(prevTurn.id)) {
-      rows.push(html`<div class="gapdiv"><span>${span(Date.parse(t.startedAt) - Date.parse(endOf(prevTurn)))} later · ${when(t.startedAt, ctx.timeZone)}</span></div>`);
+    const gap =
+      prevTurn && sp.segmentOf.get(t.id) !== sp.segmentOf.get(prevTurn.id)
+        ? html`<div class="gapdiv"><span>${span(Date.parse(t.startedAt) - Date.parse(endOf(prevTurn)))} later · ${when(t.startedAt, ctx.timeZone)}</span></div>`
+        : null;
+    // What a turn's part depends on besides itself: a match, the gap before it, the model of the turn before.
+    const key = `${matches.has(t.id) ? "m" : ""}|${lastModel}|${gap?.s ?? ""}`;
+    const kept = cache?.get(t.id);
+    if (kept && same && kept.key === key && changed !== "all" && !changed.has(t.id)) {
+      modelOf(kept.model);
+      if (kept.model) lastModel = kept.model;
+      parts.push(kept.part);
+      for (const s of kept.seenAfter) seen.add(s);
+      prevTurn = t;
+      continue;
     }
-    const steps = allSteps.get(t.id) ?? [];
-    const transcript = getTranscript(ctx.db, t.id);
-    const w = wall(t.startedAt, t.endedAt);
-    const retry = eventsBetween(ctx.db, t.chatId, t.fromSeq, t.toSeq).some((e) => seen.has(e.seq));
-    rows.push(
-      html`<div class="tdiv${matches.has(t.id) ? " match" : ""}"><a href="${href(`/turns/${t.id}`, f)}">${dot(t.status)}turn ${t.id}</a><span class="c-${t.status}">${t.status}</span>${w !== null ? html`<span>${secs(w)}</span>` : ""}${
+    let model: string | null = null;
+    const part = scopedBlocks(`t${t.id}`, () => {
+      const steps = allSteps.get(t.id) ?? [];
+      const transcript = getTranscript(ctx.db, t.id);
+      model = transcript?.model ?? null;
+      const w = wall(t.startedAt, t.endedAt);
+      const retry = eventsBetween(ctx.db, t.chatId, t.fromSeq, t.toSeq).some((e) => seen.has(e.seq));
+      const divider = html`<div class="tdiv${matches.has(t.id) ? " match" : ""}"><a href="${href(`/turns/${t.id}`, f)}">${dot(t.status)}turn ${t.id}</a><span class="c-${t.status}">${t.status}</span>${w !== null ? html`<span>${secs(w)}</span>` : ""}${
         t.costMicroUsd ? html`<span>${usd(t.costMicroUsd / 1e6)}</span>` : ""
-      }${modelOf(transcript?.model)}${retry ? html`<span class="tag">retry</span>` : ""}${transcript ? "" : html`<span class="tag" title="${absenceText(ctx, t)}">messages only</span>`}${matches.has(t.id) ? html`<span class="tag trig">match</span>` : ""}<span class="tlinks"><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "prompt" })}">prompt</a><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "raw" })}">raw</a></span></div>`,
-    );
-    rows.push(...turnTrace(ctx, t, transcript, steps, group, { seen }));
+      }${modelOf(transcript?.model)}${retry ? html`<span class="tag">retry</span>` : ""}${transcript ? "" : html`<span class="tag" title="${absenceText(ctx, t)}">messages only</span>`}${matches.has(t.id) ? html`<span class="tag trig">match</span>` : ""}<span class="tlinks"><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "prompt" })}">prompt</a><a class="tabs-link" href="${href(`/turns/${t.id}`, { ...f, tab: "raw" })}">raw</a></span></div>`;
+      return livePart(`t${t.id}`, [...(gap ? [gap] : []), divider, ...turnTrace(ctx, t, transcript, steps, group, { seen })], liveTurn(ctx.db, t));
+    });
+    if (model) lastModel = model;
+    const seenAfter = [...seen];
+    if (kept && kept.seenAfter.join(",") !== seenAfter.join(",")) same = false;
+    if (!kept) same = false;
+    cache?.set(t.id, { key, part, seenAfter, model });
+    parts.push(part);
     prevTurn = t;
   }
-  return html`<div class="detail">${head}${aside}${ctx.notice ?? ""}<div class="panel"><div class="trace">${rows}</div></div>${deleteBar(ctx)}</div>`;
+  const raw = () => html`<div class="detail">${lb(head)}${aside}${ctx.notice ?? ""}<div class="panel"><div class="trace" data-region="trace">${parts.map(lb)}</div></div>${deleteBar(ctx)}</div>`;
+  return { raw, head, turns: parts };
 }
 
 /** A segment (`level` segment) or a conversation, by id or by any turn in it. Null: no such thing. */
@@ -933,15 +993,18 @@ function spanPage(ctx: PageContext, q: URLSearchParams, id: number, level: "segm
   if (!sp) return null;
   const f = currentFilters(q);
   const { pane } = listPane(ctx, q, level === "segment" ? { segment: sp.id, inChat: sp.chatId } : { conversation: sp.id, inChat: sp.chatId });
-  return page(level === "segment" ? "Segment" : "Conversation", split(pane, spanDetail(ctx, sp, level, q, f), true), ctx.who, "turns");
+  return page(level === "segment" ? "Segment" : "Conversation", split(ctx, pane, spanDetail(ctx, sp, level, q, f).raw(), true), ctx.who, "turns");
 }
 
 export const segmentPage = (ctx: PageContext, q: URLSearchParams, id: number) => spanPage(ctx, q, id, "segment");
 export const conversationPage = (ctx: PageContext, q: URLSearchParams, id: number) => spanPage(ctx, q, id, "conversation");
 
-/** The left pane beside `detail`, one pane at a time on a narrow screen (`selected`: the detail's). */
-function split(pane: Raw, detail: Raw, selected: boolean): Raw {
-  return html`<div class="split${selected ? " selected" : ""}"><aside class="list-pane">${pane}</aside><main class="detail-pane">${detail}</main></div>`;
+/**
+ * The left pane beside `detail`, one pane at a time on a narrow screen (`selected`: the detail's). `data-live-page`:
+ * the page's own address, which console.js opens the live stream for (live.ts).
+ */
+function split(ctx: PageContext, pane: Raw, detail: Raw, selected: boolean): Raw {
+  return html`<div class="split${selected ? " selected" : ""}"${ctx.here ? html` data-live-page="${ctx.here}"` : ""}><aside class="list-pane">${pane}</aside><main class="detail-pane">${detail}</main></div>`;
 }
 
 /** The turns page: the list, and the selected turn (`id`, else the newest in the list). Null: no such turn. */
@@ -953,71 +1016,250 @@ export function turnsPage(ctx: PageContext, q: URLSearchParams, id?: number): st
   const f = currentFilters(q);
   const { pane, first } = listPane(ctx, q, turn ? { turn } : {});
   let detail: Raw = empty("No turn to show.");
-  if (turn) detail = turnDetail(ctx, turn, q, f);
+  if (turn) detail = turnDetail(ctx, turn, q, f).raw();
   else if (first !== undefined) {
     // Nothing selected: the newest segment in the list, beside it.
     const t = turnById(ctx.db, first);
     const sp = t ? segmentOf(ctx.db, t.chatId, first) : null;
-    if (sp) detail = spanDetail(ctx, sp, "segment", q, f);
+    if (sp) detail = spanDetail(ctx, sp, "segment", q, f).raw();
   }
-  return page(turn ? `Turn ${turn.id}` : "Turns", split(pane, detail, !!turn), ctx.who, "turns");
+  return page(turn ? `Turn ${turn.id}` : "Turns", split(ctx, pane, detail, !!turn), ctx.who, "turns");
 }
 
 // ---- a chat ---------------------------------------------------------------------------------------------------
+
+/**
+ * What the live stream keeps of a chat's log between two frames (live.ts): each part as drawn, and what it was drawn
+ * from, so a frame draws again only what changed.
+ */
+export type ChatCache = Map<string, { sig: string; part: LivePart }>;
+
+/**
+ * A chat's log as live parts, one per row: each event (`e<seq>`) and each turn's divider (`d<turn>`; a turn whose
+ * divider shows again further down, `d<turn>x2`, …). So a part's name never depends on where the page's window of
+ * events begins, and a new message is a new part, not a change to a run. An event may still change while it is not sent yet, while its turn
+ * runs, or while no turn has taken it in (it may get a divider and lose its "unseen"); a divider while its turn runs.
+ * With `cache`, a part whose inputs are the same as when it was drawn is taken from it.
+ */
+function chatParts(ctx: PageContext, chat: ConsoleChat, q: URLSearchParams, events: ChatEvent[], cache?: ChatCache): LivePart[] {
+  const spans = chatTurnSpans(ctx.db, chat.id);
+  const byId = new Map(spans.map((s) => [s.id, s]));
+  // An inbound event is placed with the first turn that took it in, so the dividers stay in order; a retry
+  // after a failure answers it again, and its own divider follows the failed turn's.
+  const turnOf = (e: ChatEvent) => ((OUTBOUND_KINDS as string[]).includes(e.kind) ? e.turnId : spans.find((t) => t.fromSeq < e.seq && e.seq <= t.toSeq)?.id) ?? null;
+  // The model on each divider, in order ("→ <model>" where it changed).
+  const modelOf = turnModels(ctx.db);
+  const models = turnModelsOf(ctx.db, spans.map((s) => s.id));
+  const filters = currentFilters(q);
+  const parts: LivePart[] = [];
+  const take = (k: string, sig: string, live: boolean, draw: () => Raw) => {
+    const kept = cache?.get(k);
+    if (kept && kept.sig === sig) {
+      if (kept.part.live !== live) kept.part = { ...kept.part, live };
+      parts.push(kept.part);
+      return;
+    }
+    const part = scopedBlocks(k, () => livePart(k, draw(), live));
+    cache?.set(k, { sig, part });
+    parts.push(part);
+  };
+  let current: number | null = null;
+  const dividers = new Map<number, number>();
+  for (const e of events) {
+    const t = turnOf(e);
+    if (t !== null && t !== current) {
+      const nth = (dividers.get(t) ?? 0) + 1;
+      dividers.set(t, nth);
+      const s = byId.get(t);
+      const w = s ? wall(s.startedAt, s.endedAt) : null;
+      const model = modelOf(models.get(t));
+      const sig = JSON.stringify([t, s?.status, w, s?.costMicroUsd, model.s, filters]);
+      take(`d${t}${nth > 1 ? `x${nth}` : ""}`, sig, s?.status === "running", () =>
+        html`<div class="divider"><a href="${href(`/turns/${t}`, filters)}">${dot(s?.status ?? "")}turn ${t}${s ? ` · ${s.status}` : ""}${w !== null ? ` · ${secs(w)}` : ""}${s?.costMicroUsd ? ` · ${usd(s.costMicroUsd / 1e6)}` : ""}</a>${model}</div>`,
+      );
+    }
+    if (t !== null) current = t;
+    const out = (OUTBOUND_KINDS as string[]).includes(e.kind);
+    const unseen = t === null && e.seq > chat.cursorSeq;
+    const lookup = (seq: number) => events.find((x) => x.seq === seq) ?? eventBySeq(ctx.db, seq);
+    const quoted = out && e.kind === "bot_message" ? (e.payload as unknown as BotMessagePayload).replyToSeq : undefined;
+    const to = quoted ? lookup(quoted) : undefined;
+    const sig = JSON.stringify([e.kind, e.status, e.note, e.payload, unseen, to ? [to.kind, to.payload] : null]);
+    const live = e.status === "pending" || (t !== null && byId.get(t)?.status === "running") || unseen;
+    take(`e${e.seq}`, sig, live, () =>
+      out
+        ? outgoing(e, ctx.timeZone, { lookup })
+        : incoming(e, ctx.timeZone, {
+            ...(chat.kind === "group" && ctx.ownerId !== undefined ? { ownerId: ctx.ownerId } : {}),
+            ...(ctx.ownerId !== undefined ? { me: ctx.ownerId } : {}),
+            ...(unseen ? { tags: [html`<span class="tag">unseen</span>`] } : {}),
+          }),
+    );
+  }
+  // Parts that fell off the window are not kept.
+  if (cache && cache.size > parts.length * 2 + 64) for (const k of [...cache.keys()]) if (!parts.some((p) => p.k === k)) cache.delete(k);
+  return parts;
+}
+
+/** The model each turn's transcript names, in one query (`turnModels` draws it). */
+function turnModelsOf(db: Db, ids: number[]): Map<number, string | null> {
+  const out = new Map<number, string | null>();
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const rows = db.$client.query(`select turn_id as id, model from turn_transcripts where turn_id in (${chunk.map(() => "?").join(",")})`).all(...chunk) as { id: number; model: string | null }[];
+    for (const r of rows) out.set(r.id, r.model);
+  }
+  return out;
+}
+
+/** A chat's page: its detail (`raw`), and its header and parts as the live stream draws them again (none on an earlier page of it). */
+function chatDetail(ctx: PageContext, chat: ConsoleChat, q: URLSearchParams, cache?: ChatCache): { raw: () => Raw; head: LivePart; runs: LivePart[] | null } {
+  const b = q.get("before");
+  const before = b && /^\d+$/.test(b) ? Number(b) : undefined;
+  const { events, more } = chatEventsPage(ctx.db, chat.id, EVENTS_PER_PAGE, before);
+  const spans = chatTurnSpans(ctx.db, chat.id);
+  const runs = chatParts(ctx, chat, q, events, cache);
+  const first = events[0]?.seq;
+  const failed = spans.filter((t) => t.status === "failed").length;
+  const head = livePart(
+    "head",
+    html`<div class="head"><div class="title"><h1>${chatName(chat)}</h1><span class="meta">${chat.kind === "group" ? "group" : "direct chat"}</span>${settingsLink(chat.id)}</div>
+<p class="facts">telegram <span class="mono">${chat.tgChatId}</span><span class="sep"></span>cursor <span class="mono">#${chat.cursorSeq}</span><span class="sep"></span>${
+      chat.backendSessionId ? html`conversation with <b>${short(chat.contextTokens)}</b> tokens of context` : "a fresh conversation next"
+    }<span class="sep"></span><a href="${href("/turns", { chat: chat.id })}">${spans.length} turn${spans.length === 1 ? "" : "s"}</a>${failed ? html`, <span class="c-failed">${failed} failed</span>` : ""}</p></div>`,
+    true,
+  );
+  // An earlier page of the log does not grow: only the newest is live.
+  const live = before === undefined;
+  const raw = () => html`<div class="detail">
+<a class="back" href="${href("/turns", currentFilters(q))}">← All chats</a>
+${lb(head)}
+${ctx.notice ?? ""}
+<div class="panel">
+${more && first ? html`<p class="note"><a href="${href(`/chats/${chat.id}`, { ...currentFilters(q), before: first })}">Earlier events</a></p>` : ""}
+${events.length ? html`<div class="convo"${live ? html` data-region="trace"` : ""}>${runs.map(lb)}</div>` : html`${empty("Nothing recorded in this chat.")}${live ? html`<div class="convo" data-region="trace"></div>` : ""}`}
+</div>${deleteBar(ctx)}</div>`;
+  return { raw, head, runs: live ? runs : null };
+}
 
 /**
  * A chat as a conversation, on the right of the same list (its group open and marked): the chat's header in the
  * list leads here, each turn's divider leads back to that turn.
  */
 export function chatPage(ctx: PageContext, chatId: number, q: URLSearchParams = new URLSearchParams()): string | null {
-  const b = q.get("before");
-  const before = b && /^\d+$/.test(b) ? Number(b) : undefined;
   resetBlocks();
   const chat = chatById(ctx.db, chatId);
   if (!chat) return null;
-  const { events, more } = chatEventsPage(ctx.db, chatId, EVENTS_PER_PAGE, before);
-  const spans = chatTurnSpans(ctx.db, chatId);
-  const byId = new Map(spans.map((s) => [s.id, s]));
-  // An inbound event is placed with the first turn that took it in, so the dividers stay in order; a retry
-  // after a failure answers it again, and its own divider follows the failed turn's.
-  const turnOf = (e: ChatEvent) => ((OUTBOUND_KINDS as string[]).includes(e.kind) ? e.turnId : spans.find((t) => t.fromSeq < e.seq && e.seq <= t.toSeq)?.id) ?? null;
-  const items: Raw[] = [];
-  const modelOf = turnModels(ctx.db);
-  let current: number | null = null;
-  for (const e of events) {
-    const t = turnOf(e);
-    if (t !== null && t !== current) {
-      const s = byId.get(t);
-      const w = s ? wall(s.startedAt, s.endedAt) : null;
-      items.push(
-        html`<div class="divider"><a href="${href(`/turns/${t}`, currentFilters(q))}">${dot(s?.status ?? "")}turn ${t}${s ? ` · ${s.status}` : ""}${w !== null ? ` · ${secs(w)}` : ""}${s?.costMicroUsd ? ` · ${usd(s.costMicroUsd / 1e6)}` : ""}</a>${modelOf(getTranscript(ctx.db, t)?.model)}</div>`,
-      );
-    }
-    if (t !== null) current = t;
-    const out = (OUTBOUND_KINDS as string[]).includes(e.kind);
-    items.push(
-      out
-        ? outgoing(e, ctx.timeZone, { lookup: (seq) => events.find((x) => x.seq === seq) ?? eventBySeq(ctx.db, seq) })
-        : incoming(e, ctx.timeZone, {
-            ...(chat.kind === "group" && ctx.ownerId !== undefined ? { ownerId: ctx.ownerId } : {}),
-            ...(ctx.ownerId !== undefined ? { me: ctx.ownerId } : {}),
-            ...(t === null && e.seq > chat.cursorSeq ? { tags: [html`<span class="tag">unseen</span>`] } : {}),
-          }),
-    );
-  }
-  const first = events[0]?.seq;
-  const failed = spans.filter((t) => t.status === "failed").length;
-  const detail = html`<div class="detail">
-<a class="back" href="${href("/turns", currentFilters(q))}">← All chats</a>
-<div class="head"><div class="title"><h1>${chatName(chat)}</h1><span class="meta">${chat.kind === "group" ? "group" : "direct chat"}</span>${settingsLink(chat.id)}</div>
-<p class="facts">telegram <span class="mono">${chat.tgChatId}</span><span class="sep"></span>cursor <span class="mono">#${chat.cursorSeq}</span><span class="sep"></span>${
-    chat.backendSessionId ? html`conversation with <b>${short(chat.contextTokens)}</b> tokens of context` : "a fresh conversation next"
-  }<span class="sep"></span><a href="${href("/turns", { chat: chat.id })}">${spans.length} turn${spans.length === 1 ? "" : "s"}</a>${failed ? html`, <span class="c-failed">${failed} failed</span>` : ""}</p></div>
-${ctx.notice ?? ""}
-<div class="panel">
-${more && first ? html`<p class="note"><a href="${href(`/chats/${chat.id}`, { ...currentFilters(q), before: first })}">Earlier events</a></p>` : ""}
-${events.length ? html`<div class="convo">${items}</div>` : empty("Nothing recorded in this chat.")}
-</div>${deleteBar(ctx)}</div>`;
+  const detail = chatDetail(ctx, chat, q).raw();
   const { pane } = listPane(ctx, q, { chat: chat.id, inChat: chat.id });
-  return page(chatName(chat), split(pane, detail, true), ctx.who, "turns");
+  return page(chatName(chat), split(ctx, pane, detail, true), ctx.who, "turns");
+}
+
+// ---- the live stream's frames -----------------------------------------------------------------------------------
+
+/**
+ * What one frame of a live page holds (live.ts), of what it was asked to draw: its fixed parts (the detail's header,
+ * the list's count line), its trace's parts in order (a segment's or conversation's turns, a turn's rows, a chat's
+ * rows; absent: not drawn, or none is live here), and the list's groups in order (absent: not drawn). `newer`: on
+ * `/turns` with nothing selected, a newer segment is now the one a load would show (the page offers to load it; it
+ * never loads by itself).
+ */
+export interface LiveFrame {
+  fixed: LivePart[];
+  trace?: LivePart[];
+  list?: LivePart[];
+  newer?: boolean;
+}
+
+/** What a frame is to draw: the detail (with the turns that changed since the last one; "all": every one), the list. */
+export interface LiveWant {
+  detail?: ReadonlySet<number> | "all";
+  list?: boolean;
+}
+
+/** A page the live stream follows: the chat it is about (none: only the list changes), and how to draw a frame of it. */
+export interface LiveView {
+  chatId?: number;
+  frame(ctx: PageContext, want: LiveWant): LiveFrame | null;
+}
+
+/**
+ * The live view of the page at `path` (`?q`), drawn by the same functions as the page itself, so a live page and a
+ * reloaded one are the same. Null: a page that is not live (Home, Settings, a chat's settings, an unknown one).
+ */
+export function liveView(ctx: PageContext, path: string, q: URLSearchParams): LiveView | null {
+  const f = currentFilters(q);
+  const begin = (c: PageContext) => {
+    resetBlocks();
+    expandAll = q.get("expand") === "1";
+    return c;
+  };
+  /** The frame's list part, when asked for. */
+  const withList = (c: PageContext, want: LiveWant, sel: Selection, out: LiveFrame): LiveFrame => {
+    if (!want.list) return out;
+    const l = listParts(c, q, sel);
+    return { ...out, fixed: [...out.fixed, l.count], list: l.groups };
+  };
+  const span = /^\/(segments|conversations)\/(\d+)$/.exec(path);
+  const turn = /^\/turns\/(\d+)$/.exec(path);
+  const chat = /^\/chats\/(\d+)$/.exec(path);
+  if (span || path === "/turns") {
+    const level = span?.[1] === "conversations" ? "conversation" : "segment";
+    const cache: SpanCache = new Map();
+    // On /turns, the newest segment in the list, which the page shows. When another is the newest, the page keeps
+    // showing (and following) this one, marked in the list as chosen, and is told there is newer activity.
+    const shown = span ? undefined : listParts(begin(ctx), q, {}).first;
+    const id = span ? Number(span[2]) : shown;
+    const t0 = id !== undefined ? turnById(ctx.db, id) : undefined;
+    if (span && !t0) return null;
+    let newerSeen = false;
+    return {
+      ...(t0 ? { chatId: t0.chatId } : {}),
+      frame(c, want) {
+        begin(c);
+        const newer = !span && want.list && listParts(c, q, {}).first !== shown;
+        if (newer) newerSeen = true;
+        const sp = !t0 ? null : level === "segment" ? segmentOf(c.db, t0.chatId, t0.id) : conversationOf(c.db, t0.chatId, t0.id);
+        const sel: Selection = !sp ? {} : !span ? (newerSeen ? { segment: sp.id, inChat: sp.chatId } : {}) : level === "segment" ? { segment: sp.id, inChat: sp.chatId } : { conversation: sp.id, inChat: sp.chatId };
+        const out: LiveFrame = { fixed: [], ...(newer ? { newer: true } : {}) };
+        if (!sp || !want.detail) return withList(c, want, sel, out);
+        const d = spanDetail(c, sp, level, q, f, cache, want.detail);
+        return withList(c, want, sel, { ...out, fixed: [d.head], trace: d.turns });
+      },
+    };
+  }
+  if (turn) {
+    const id = Number(turn[1]);
+    const t0 = turnById(ctx.db, id);
+    if (!t0) return null;
+    return {
+      chatId: t0.chatId,
+      frame(c, want) {
+        begin(c);
+        const t = turnById(c.db, id);
+        if (!t) return null;
+        if (!want.detail) return withList(c, want, { turn: t }, { fixed: [] });
+        const d = turnDetail(c, t, q, f);
+        return withList(c, want, { turn: t }, { fixed: [d.head], ...(d.trace ? { trace: [d.trace] } : {}) });
+      },
+    };
+  }
+  if (chat) {
+    const id = Number(chat[1]);
+    if (!chatById(ctx.db, id)) return null;
+    const cache: ChatCache = new Map();
+    return {
+      chatId: id,
+      frame(c, want) {
+        begin(c);
+        const ch = chatById(c.db, id);
+        if (!ch) return null;
+        const sel: Selection = { chat: id, inChat: id };
+        if (!want.detail) return withList(c, want, sel, { fixed: [] });
+        const d = chatDetail(c, ch, q, cache);
+        return withList(c, want, sel, { fixed: [d.head], ...(d.runs ? { trace: d.runs } : {}) });
+      },
+    };
+  }
+  return null;
 }

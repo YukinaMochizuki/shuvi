@@ -622,9 +622,14 @@ details.group .more-link {
   color: var(--ink-faint);
   font-variant-numeric: tabular-nums;
 }
-.trace > .tdiv:first-child {
+.trace > .tdiv:first-child,
+.trace > .lb:first-child > .tdiv:first-child {
   margin-top: 0;
   border-top: 0;
+}
+/* A part the live stream keeps current (html.ts `lb`, live.ts): no box of its own, so the page looks as without it. */
+.lb {
+  display: contents;
 }
 .tdiv > a:first-child {
   display: inline-flex;
@@ -1943,8 +1948,66 @@ html:not(.js) .bmenu,
   white-space: nowrap;
 }
 .selpill[hidden],
-.snack[hidden] {
+.snack[hidden],
+.livenew[hidden] {
   display: none;
+}
+/* A live page scrolled up while new rows came (console.js): "↓ 3 new", quiet, at the bottom centre; it jumps there. */
+.livenew {
+  position: fixed;
+  left: 360px;
+  right: 0;
+  bottom: var(--s5);
+  z-index: 19;
+  width: fit-content;
+  margin: 0 auto;
+  height: 28px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-3);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.4);
+  color: var(--ink-dim);
+  font-size: var(--t-small);
+  font-variant-numeric: tabular-nums;
+}
+.livenew:hover {
+  color: var(--accent);
+}
+.detail.selecting .livenew {
+  bottom: 72px;
+}
+/* What a live page cannot do by itself (console.js `liveBar`): "New activity · Show", "Live updates paused ·
+   Resume", "Live updates stopped · Reload". Fixed under the top bar, so it never moves the page. */
+.livebar {
+  position: fixed;
+  left: 360px;
+  right: 0;
+  top: calc(40px + var(--s2));
+  z-index: 19;
+  width: fit-content;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 28px;
+  padding: 0 var(--s1) 0 var(--s3);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-3);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.4);
+  color: var(--ink-dim);
+  font-size: var(--t-small);
+}
+.livebar button {
+  height: 22px;
+  padding: 0 var(--s2);
+  border-radius: 11px;
+  color: var(--accent);
+  font-weight: 600;
+}
+.livebar button:hover {
+  background: rgb(122 162 247 / 0.12);
 }
 .selpill .pn {
   font-variant-numeric: tabular-nums;
@@ -3170,6 +3233,13 @@ a.hfile.hidden-pb .hpath {
   }
   .detail.selecting .snack {
     bottom: 72px;
+  }
+  .livenew {
+    left: 0;
+    bottom: var(--s4);
+  }
+  .livebar {
+    left: 0;
   }
   .head .title .nav {
     display: none;

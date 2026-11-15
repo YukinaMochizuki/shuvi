@@ -97,6 +97,33 @@ page marks those turns. `j` / `k` move between segments.
 
 Settings, Home, a chat's settings and deleting messages are the console's only ways to change anything.
 
+## Live
+
+A chat's log, a segment, a conversation, a turn and the list keep themselves current (live.ts, its header holds the
+rules). Nothing about the look changes: what arrives looks as it would after a reload, because it is drawn by the
+same functions.
+
+- **Parts.** A page is cut into named parts, each in a wrapper that takes no box (`.lb`, `display: contents`):
+  the detail's header (`head`), the list's count line (`count`), each chat's group (`g<chat>`), and the trace's
+  parts: a turn's rows in a segment, a conversation or on its own page (`t<turn>`: its divider, a gap before it,
+  its rows), and a chat log's rows (`e<seq>` an event, `d<turn>` a turn's divider: named by what they show, never
+  by where the log's window of events begins). A part carries a hash of what it holds (`data-h`); `data-live` marks
+  one that may still change (a running turn, a message not sent yet or no turn has taken in, the list, the header).
+- **In place, row by row.** A part that changed is put in by its rows: a row the same as before stays (what is
+  open or selected in it too); a changed row takes the old one's place, a details it had open staying open (a tool
+  call running → done keeps its chip open); new rows go in after; a part new to the page goes after the one before
+  it. The list's groups are put in the order of last activity; a group's fold stays as the reader left it.
+- **Following.** At the bottom of the detail, it follows what arrives. Scrolled up, it does not move; a quiet
+  pill "↓ N new" (`LiveNew`: 28px, surface-3, faint text, bottom centre of the detail pane, above the selection
+  pill while one is up) counts the rows that came; it jumps to the end and goes, and so does reaching the end.
+- **The bar** (`LiveBar`): what the page cannot do by itself, said in a pill fixed under the top bar, centred on the
+  detail pane, with its one button: "New activity · Show", "Live updates paused (too many pages open) · Resume",
+  "Live updates stopped · Reload". Fixed, so it never moves the page; nothing live loads a page by itself while it
+  holds an undo or a selection.
+- **Deleting** on a live page is as anywhere: a deleted bubble waiting out its undo stays in the page hidden
+  (`.gone`), whatever the stream puts around it, so its Undo still brings it back.
+- **Without script**, nothing of it: the wrappers take no box, and a reload shows what is new.
+
 ## Settings
 
 One column (max 1080px, centred), reached from the top bar's Turns / Settings. What the control bot's
@@ -362,6 +389,9 @@ are GitHub's, as in the diff.
 | Pickable | a deletable bubble: its check slot (left, while selecting), the bubble, its ⋯ menu (top right, on hover) |
 | SelPill | while selecting: "3 selected · Delete · ✕", a refusal under it; fixed at the bottom centre |
 | Snackbar | after a delete: "Deleted 3 · Undo", a thin line running out with the 10 s; fixed at the bottom left |
+| LivePart | a part the live stream keeps current: a wrapper with no box (`.lb`), its name and hash |
+| LiveNew | "↓ 3 new", while scrolled up on a live page: a small pill at the bottom centre that jumps to the end |
+| LiveBar | a live page's notice with its button ("New activity · Show"): a pill fixed under the top bar |
 | SwitchBox | a chat's settings: the mode step under the model picked (Lossless / Lossy / Clean start cards, the note, Cancel) |
 | CapRow | a chat's settings: a capability as a switch, its label and what it gives, its parameters under it while on |
 | FileRow | Home: path · when · who-dot, who and a hint; selected like a list row |
@@ -382,7 +412,8 @@ are GitHub's, as in the diff.
 ## Script
 
 Two scripts, both same origin (CSP `script-src 'self'`, `connect-src 'self'`), both optional: everything
-works without them, the Settings page's forms included.
+works without them, the Settings page's forms included. The live stream is an EventSource to the console itself
+(`/live`, same origin: `connect-src 'self'` covers it); no htmx extension is used.
 
 - **htmx** (the pinned npm package, served at `/htmx.min.js`; html.ts `page` holds its configuration). Every
   page is boosted: a link or a form fetches its page in the background and swaps the body, with the URL and
@@ -390,4 +421,5 @@ works without them, the Settings page's forms included.
   does not flash it). Settings swaps only its `<main>`, and pending parts fetch themselves (above).
 - **`/console.js`**: copy buttons, j / k to move through the list's rows (segments), a line in the top bar
   when a request got no answer at all (the server restarting), and selecting and deleting messages (the ⋯
-  menu and its long press, the pill, the snackbar; a delete is posted with `fetch` and answered in JSON).
+  menu and its long press, the pill, the snackbar; a delete is posted with `fetch` and answered in JSON), and live
+  pages (the stream from `/live`, its parts put in row by row, "↓ N new"; above, "Live").

@@ -20,6 +20,7 @@ bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, a
 bun scripts/e2e-media.ts    # videos from links against a fake porchkit (test/fake-porchkit.ts) and a fake Hangar
 bun scripts/e2e-read.ts     # reading links (read_link, save_link, the post prewarm) against the same fakes
 bun scripts/e2e-drain.ts    # SIGTERM drains: a running turn finishes and is delivered; the deadline stops and retries
+bun scripts/live-demo.ts series   # by hand, needs a local Chromium (CHROME_PATH): the console's live pages in a real browser, screenshots; `idle 10`: resources
 bun run db:generate         # after any change to src/store/schema.ts
 ```
 
@@ -67,6 +68,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | what a turn's transcript records, image references | `src/agent/transcript.ts`, `src/store/transcripts.ts` |
 | secret redaction (transcripts and a chat computer's output) | `src/secrets/redaction.ts` (requests and grants: `src/capabilities/computer/secrets.ts`) |
 | the console: who may look (loopback, Host, tailnet login, token), its pages and design | `src/console/server.ts`, `pages.ts`, `DESIGN.md`; docs/console.md |
+| the console's live pages: the `/live` stream, its one shared poll of the store, the parts it sends and the page's cursor | `src/console/live.ts`; the parts: `pages.ts` (`liveView`); the page's side: `console.js` |
 | a chat's settings pages in the console (Chat, Permissions, Automation & machine): its model (the bot's switch), profile, `/new` / `/stop`, its policy entry as a form | `src/console/chat-settings.ts` (draws, `CATEGORIES`), `chat-settings-data.ts` (reads), `chat-settings-write.ts` (the writes), `policy-form.ts` (form ↔ entry); `src/control/model-cards.ts` (`consoleSwitch`) |
 | a chat's schedules (pause, resume, cancel), secret grants (revoke) and computer (read only) in the console | `src/console/chat-extras.ts` (draws), `chat-extras-data.ts` (reads; the disk from Hangar), the writes in `chat-settings-write.ts`; `src/store/schedules.ts` (paused), `src/capabilities/computer/secrets.ts` (`revokeGrant`), `declared.ts` (`last_apply`) |
 | the console's Home page: editing her files, their history (who changed what, in which turn and call), undo, merge on save | `src/console/home.ts` (draws), `home-data.ts` (reads), `home-write.ts` (the save); the editor: `editor/`; the trailers: `src/capabilities/memory/home.ts`, `src/agent/call-context.ts` |

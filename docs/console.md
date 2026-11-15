@@ -38,6 +38,42 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
 - **Home** (`/home`): her files in `home/`, edited by hand, with each file's history. See below.
 - **Settings** (`/settings`): the model catalog. See below.
 
+## Live pages
+
+A chat's log, a segment, a conversation, a turn and the chats list on the left keep themselves current while they
+are open: a new message and a new turn appear at once, and a running turn unfolds step by step (its thinking, a
+tool call running and then done, her messages pending and then delivered, the turn's status, duration and cost),
+without a reload. Her text is not streamed word by word: a message appears when she has written it. In the list,
+each chat's last activity, its rows' dots and a new segment follow the same way. A picture that finishes
+downloading after its message arrived shows up by itself.
+
+What shows is drawn by the same code as the page, so a live page and a reloaded one are the same. Only what changed
+is put in: a step you opened stays open, a message you selected stays selected. When you are at the bottom of the
+page, it follows what comes in; scrolled up, it stays where you are and a quiet "↓ 3 new" at the bottom jumps there.
+
+It is one Server-Sent Events stream per open page (`/live`), from the console itself, behind the same sign-in and
+Host check as every page; the server reads the store once a second for all open pages together, and nothing when
+none is open. A dropped connection (the server restarting, the tailnet blinking) reconnects by itself and catches
+up, with nothing missed and nothing twice; after a restart the page's deletes keep working.
+
+A live page never reloads or moves by itself to show something else. What needs a load is said in a quiet bar under
+the top bar, with the button that does it:
+
+- **New activity · Show**: on `/turns` with nothing selected, a newer segment than the one shown has begun (the page
+  keeps following its own until you press Show).
+- **Live updates paused (too many pages open) · Resume**: at most 4 pages per sign-in stay live (a browser opens
+  only 6 connections to the console over plain http, the ssh tunnel's, and a live page holds one); a fifth pauses the
+  oldest other. Resume makes this one live again and pauses the oldest other. Moving from page to page in one tab
+  counts once.
+- **Live updates stopped · Reload**: the page is no longer one that updates, or your sign-in ended.
+- **The console was updated: live updates stopped · Reload**: a deploy changed the stylesheet or the scripts. A
+  live page loads itself again then, unless that would cost a pending delete's Undo or a selection, or it already
+  tried a moment ago: then it says so here.
+
+Without script, the pages are as before: reload to see what is new.
+
+A message you deleted does not come back through the stream; its Undo works on a live page as on any other.
+
 ## Deleting messages
 
 On a chat's page, a segment, a conversation, and a turn's Conversation tab, any message can be deleted: a
@@ -217,7 +253,10 @@ on top of the sign-in and the Host check:
 - **A CSRF token**: every form carries a token for your session, an HMAC under a secret the server draws
   at random when it starts. With the tailnet login there is no cookie, so the token is derived from your
   login. With the token sign-in it is derived from your session cookie. A wrong or missing token gets 403.
-  After a server restart, a page loaded before it is refused: reload it.
+  After a server restart, a page loaded before it is refused: reload it (a live page, above, gets the new token
+  from its stream when it reconnects).
+
+`/live` (above) is a read like any page: GET only, the sign-in and the Host check, nothing written.
 
 The pages need no script: each write answers with a redirect back to its page (a delete: to the page it was
 made on), which shows its result once. With script, a delete is posted in the background and answered in JSON.
