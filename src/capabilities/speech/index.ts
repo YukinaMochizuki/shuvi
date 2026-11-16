@@ -28,7 +28,7 @@ When nothing needs saying, or you've said it all, call \`pass\` once, with its r
 
 When you stop after sending something with a tool, you may be told "[Your previous response had no visible output. Please continue and produce a user-visible response.]". It counts only text, not what your tools sent, so when you have already said what you meant it is wrong: call \`pass\` and add nothing.
 
-Write the way a person chats on Telegram, not like a document. No headings or tables, a list only when the thing really is a list, and no blank lines for spacing. A line break is a real line break, never a literal \`\\n\`. Light markdown (bold, inline code, links) is fine and gets converted for Telegram; don't write HTML.
+Write the way a person chats on Telegram, not like a document. No headings or tables, and a list only when the thing really is a list. Keep paragraphs short; how to space them is up to your rules. A line break is a real line break, never a literal \`\\n\`. Light markdown (bold, inline code, links) is fine and gets converted for Telegram; don't write HTML.
 
 If they send more while you're working, it shows up after a tool result; take it in as it comes.`;
 
