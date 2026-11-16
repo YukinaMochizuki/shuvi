@@ -75,6 +75,16 @@ describe("runTurn: how output becomes messages", () => {
     expect(adapter.toolResults[1]!.result.isError).toBe(true);
   });
 
+  test("a second pass in the same turn reacts no more: only the first pass's reaction is sent", async () => {
+    const db = memDb();
+    ownerSays(db, "(sticker)");
+    const { adapter } = await turnWith(db, [{ tool: "pass", args: { reaction: "🥰" } }, { tool: "pass", args: { reaction: "👍" } }, { token: "[Reacted, no reply]" }]);
+    expect(messages(db)).toEqual([]);
+    const reactions = pendingOutbound(db).filter((e) => e.kind === "bot_reaction");
+    expect(reactions.map((e) => (e.payload as unknown as BotReactionPayload).emoji)).toEqual(["🥰"]);
+    expect(adapter.toolResults[1]!.result.isError).toBeFalsy();
+  });
+
   test("a message that arrives during `pass` is not taken by the passing turn; the next turn answers it", async () => {
     const db = memDb();
     const first = ownerSays(db, "mhm");
