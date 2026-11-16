@@ -192,7 +192,7 @@ export const stickers = defineCapability<StickersConfig>({
     const send: ToolDef<{ id: string }> = {
       name: "sticker",
       description:
-        "Send a sticker by id (from find_sticker). It goes out as its own message, after any text you wrote before calling this, and can be your whole reply. One at a time: put words or another action between two stickers.",
+        "Send a sticker by id (from find_sticker). It goes out as its own message, after any text you wrote before calling this, and can be your whole reply: when it says what you meant, write nothing after it, and never describe the sticker in words. One at a time: put words or another action between two stickers.",
       inputSchema: { id: z.string().describe("The sticker's id, e.g. \"ExamplePack/3\"") },
       async handler({ id }) {
         syncLibrary(db, home);
