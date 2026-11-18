@@ -1,13 +1,15 @@
 import { z } from "zod";
 import { err, ok, type ToolContent, type ToolDef, type ToolResult } from "agent-runtime";
 import { actingFor } from "../../agent/acting.ts";
-import { describe, Porchkit, PorchkitError, porchkitConfig, type BrowseAction, type BrowseAnswer, type BrowseStatus, type PorchkitConfig } from "../../porchkit/client.ts";
+import { describe, Porchkit, PorchkitError, porchkitConfig, type BrowseAction, type BrowseAnswer, type BrowseStatus, type BrowseTarget, type PorchkitConfig } from "../../porchkit/client.ts";
 import type { Chat } from "../../store/events.ts";
 import { dataDirFrom } from "../../env.ts";
 import type { ChatPolicy } from "../../policy/policy.ts";
 import { computerConfig } from "../computer/config.ts";
 import { defineCapability, policyEnables, type TurnContext } from "../types.ts";
 import { attachmentPass } from "./attachments.ts";
+import { extraLines, imagesOf, matchLines, pointerLines, rememberShot, situationLines, targetText } from "./look.ts";
+import { lookTools } from "./pointer.ts";
 import { fileTools } from "./files.ts";
 import { sessionOf } from "./keys.ts";
 import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_MS, USE_WITHIN_MS, releaseCarry, releasePurchase, requester, requestPurchase } from "./purchase.ts";
@@ -43,6 +45,8 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *   privacy   typed text and page text are never logged; they live only in the turn's transcript. The
  *             porchkit token is the media capability's and is redacted from transcripts here too.
  *
+ *   beyond the page text  browser_pointer, browser_zoom, browser_watch, browser_find, browser_wait_for, browser_hover,
+ *             browser_select (pointer.ts); every answer's `situation` and images (look.ts), read first.
  *   loops     `browser-attachments`: fetch a file someone sent, for browser_upload (attachments.ts; a runner child
  *             never holds the bot token).
  *
@@ -89,7 +93,9 @@ Each action answers with the page as text: one line per element, \`[e12] role "n
 
 The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
 
-\`browser_send\` sends this chat a screenshot, a download (\`browser_downloads\` lists them) or the page as a PDF. \`browser_upload\` gives the page a file someone sent here or a download: with the file input's ref, or without one and then click the page's own upload button.`;
+\`browser_send\` sends this chat a screenshot, a download (\`browser_downloads\` lists them) or the page as a PDF. \`browser_upload\` gives the page a file someone sent here or a download: with the file input's ref, or without one and then click the page's own upload button.
+
+Reading the situation: each answer starts with what your action did (the URL changed, a dialog opened, what changed, or that nothing visible changed) and hints about the page. Prefer refs. An icon-only or unnamed control: \`browser_screenshot\` with marks, then use its ref. A canvas-heavy page: \`browser_screenshot\` with grid, then \`browser_pointer\` at the point, and check the screenshot it returns; when unsure what is at a point, \`browser_pointer\` with dry_run says without pressing. If the page had not settled or nothing changed, \`browser_watch\` or try another way; do not repeat the same action blindly. On a big page, \`browser_find\` before scrolling. Dropdowns: \`browser_select\`. A captcha: stop and send the owner the live view link. A native popup hint: \`browser_press("Escape")\`.`;
 
 
 const positiveInt = z.number().int().positive();
@@ -104,8 +110,14 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
       return "The owner is using the browser right now (he has taken it over in the live view). Nothing was done. Wait, or ask him.";
     case "busy":
       return "The browser is busy: 3 chats are browsing at the moment, and there is no room for another window. Nothing was done; try again in a few minutes, or say so.";
-    case "approval_required":
-      return "That could place an order or pay (a button that places the order, or on a checkout page any button, Enter, a submit or accepting a dialog), so it needs the owner's approval first. Nothing was done. If it is meant to place the order, call browser_request_purchase with the shop, the items and the total, end your turn, and once he approves, repeat this action with its approval id.";
+    case "approval_required": {
+      const under = targetText(e.body.target as BrowseTarget | undefined);
+      return `That could place an order or pay (a button that places the order, or on a checkout page any button, Enter, a submit or accepting a dialog${under ? `; under the point: ${under}` : ""}), so it needs the owner's approval first. Nothing was done. If it is meant to place the order, call browser_request_purchase with the shop, the items and the total, end your turn, and once he approves, repeat this action with its approval id.`;
+    }
+    case "target_changed": {
+      const now = targetText(e.body.target as BrowseTarget | undefined);
+      return `Something else is at that point now${now ? ` (${now})` : ""}: the page moved since you looked. Nothing was done. Look again (browser_screenshot) and aim from the new screenshot.`;
+    }
     case "dialog_open":
       return "The page is asking something (a confirm or prompt dialog is open), so nothing else can be done on it. Nothing was done. Answer it first with browser_dialog (accept true or false).";
     case "owner_only":
@@ -129,8 +141,14 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
       return "porchkit refused shuvi's credentials; the owner needs to check its token. Nothing was done.";
     case "forbidden":
       return `porchkit does not let shuvi use the browser: ${detail} The owner needs to check its configuration.`;
-    case "bad_request":
-      return `The browser refused that: ${detail}`;
+    case "bad_request": {
+      const options = Array.isArray(e.body.options)
+        ? e.body.options
+            .map((o) => (typeof o === "string" ? o : o && typeof o === "object" ? String((o as Record<string, unknown>).text ?? (o as Record<string, unknown>).label ?? (o as Record<string, unknown>).value ?? "") : ""))
+            .filter(Boolean)
+        : [];
+      return `The browser refused that: ${detail}${options.length ? ` The options are: ${options.map((o) => `"${o}"`).join(", ")}.` : ""}`;
+    }
     case "unreachable":
       return `The browser's service could not be reached, or the connection dropped (${e.detail}). If this was an action, it may or may not have happened: take a new snapshot to see where the page is.`;
     default:
@@ -143,7 +161,7 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
  * given back. Nothing else is: `unavailable`, `unreachable`, a timeout or a crash can come after the wrapper acted
  * (a dropped connection while the answer was read), and giving the approval back then could place two orders.
  */
-export const DID_NOTHING: ReadonlySet<string> = new Set(["takeover", "busy", "bad_ref", "ref_required", "stale_page", "dialog_open", "owner_only", "egress_refused", "forbidden", "bad_request", "unauthorized"]);
+export const DID_NOTHING: ReadonlySet<string> = new Set(["takeover", "busy", "bad_ref", "ref_required", "stale_page", "target_changed", "dialog_open", "owner_only", "egress_refused", "forbidden", "bad_request", "unauthorized"]);
 
 /** What follows the error when an approved action failed in a way that may have come after the click. */
 export const spentNote = (id: number) =>
@@ -162,14 +180,19 @@ export function dialogLine(d: NonNullable<BrowseAnswer["dialog"]>): string {
 }
 
 /** An action's answer, as the model reads it: the page text as porchkit gives it, then tabs, notes, warnings. */
-export function renderAnswer(a: BrowseAnswer, opts: { approved?: number; carries?: boolean; carried?: number; liveUrl?: string | null } = {}): string {
-  const out: string[] = [];
+export function renderAnswer(a: BrowseAnswer, opts: { approved?: number; carries?: boolean; carried?: number; liveUrl?: string | null; action?: string } = {}): string {
+  // What the action did, and hints about the page, first (look.ts).
+  const out: string[] = situationLines(a.situation, a, opts.action);
   if (opts.approved !== undefined && opts.carries)
     out.push(`(Done with the owner's approval #${opts.approved}. It also covers accepting the dialog this opened, once, within ${CARRY_MS / 60_000} minutes: answer it with browser_dialog; no new card is needed.)`);
   else if (opts.approved !== undefined) out.push(`(Done with the owner's approval #${opts.approved}; it is now used up.)`);
   if (opts.carried !== undefined) out.push(`(Accepted with the owner's approval #${opts.carried}, carried from the action that opened this dialog; it is now fully used up.)`);
+  out.push(...pointerLines(a));
+  const matches = matchLines(a);
+  if (matches) out.push(...matches);
   const snap = a.snapshot?.trimEnd();
   out.push(snap ? snap : `${a.title ?? "(no title)"} — ${a.url ?? "(no address)"}`);
+  out.push(...extraLines(a));
   const tabs = a.tabs ?? [];
   if (tabs.length > 1) out.push(`Tabs: ${tabs.map((t) => `${t.index}${t.active ? " (this one)" : ""}: ${t.title || t.url || "(blank)"}`).join(" · ")}`);
   for (const n of a.notes ?? []) out.push(`Note: ${n}`);
@@ -226,7 +249,7 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
    * One action; with `approvalId`, only after the approval is claimed (purchase.ts), and then `approved: true`;
    * with `carriedId`, on the right an approved action carried to the dialog it opened (already claimed).
    */
-  async function act(body: BrowseAction, approvalId?: number, carriedId?: number): Promise<ToolResult> {
+  async function act(body: BrowseAction, approvalId?: number, carriedId?: number, opts: { timeout?: string } = {}): Promise<ToolResult> {
     if (approvalId !== undefined) {
       // The approval is bound to the host it was asked on: check where this chat's window is now.
       let host: string | null;
@@ -248,18 +271,21 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
       if (nothing && carriedId !== undefined) releaseCarry(db, carriedId);
       const used = approvalId ?? carriedId;
       const kept = used === undefined ? "" : nothing ? ` (Approval #${used} was not used up.)` : spentNote(used);
+      if (opts.timeout && e instanceof PorchkitError && e.code === "timeout") return err(opts.timeout);
       return err(`${describeBrowse(e, e instanceof PorchkitError && e.code === "owner_only" ? await liveUrl() : undefined)}${kept}`);
     }
     // An approved action that opened a confirm / prompt carries its approval on to that one dialog (not a carried one).
     const carries = approvalId !== undefined && !!a.dialog;
     if (carries) grantCarry(db, approvalId!, session);
-    return ok(
-      renderAnswer(a, {
-        ...(approvalId !== undefined ? { approved: approvalId, carries } : {}),
-        ...(carriedId !== undefined ? { carried: carriedId } : {}),
-        ...(a.signed_in?.google === false ? { liveUrl: await liveUrl() } : {}),
-      }),
-    );
+    const text = renderAnswer(a, {
+      action: String(body.action),
+      ...(approvalId !== undefined ? { approved: approvalId, carries } : {}),
+      ...(carriedId !== undefined ? { carried: carriedId } : {}),
+      ...(a.signed_in?.google === false ? { liveUrl: await liveUrl() } : {}),
+    });
+    // Any image the answer carries (a pointer's screenshot and close-up, a zoom, a watch sheet), fetched (look.ts).
+    const images = await imagesOf(porch, db, chat.id, a);
+    return { content: [{ type: "text", text }, ...images] };
   }
 
   const open: ToolDef<{ url: string }> = {
@@ -269,11 +295,14 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     handler: (a) => act({ action: "open", url: a.url }),
   };
 
-  const snapshot: ToolDef<Record<string, never>> = {
+  const snapshot: ToolDef<{ ref?: string; offset?: number }> = {
     name: "browser_snapshot",
-    description: "The current page as text again, with fresh refs. Every other action already answers with it.",
-    inputSchema: {},
-    handler: () => act({ action: "snapshot" }),
+    description: "The current page as text again, with fresh refs (every other action already answers with it). `ref`: only that part of the page; `offset`: read on where a long page text was cut.",
+    inputSchema: {
+      ref: ref.optional().describe("Only this element and what is inside it"),
+      offset: z.number().int().nonnegative().optional().describe("Where to start, as the cut page text says"),
+    },
+    handler: (a) => act({ action: "snapshot", ...(a.ref ? { ref: a.ref } : {}), ...(a.offset !== undefined ? { offset: a.offset } : {}) }),
   };
 
   const click: ToolDef<{ ref: string; double?: boolean; button?: "left" | "right" | "middle" } & Approved> = {
@@ -300,11 +329,11 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     handler: (a) => act({ action: "type", text: a.text, ...(a.ref ? { ref: a.ref } : {}), ...(a.submit !== undefined ? { submit: a.submit } : {}) }, a.approval),
   };
 
-  const press: ToolDef<{ key: string } & Approved> = {
+  const press: ToolDef<{ key: string; hold_ms?: number } & Approved> = {
     name: "browser_press",
-    description: 'Press a key or a combination: "Enter", "Escape", "Tab", "PageDown", "Control+A".',
-    inputSchema: { key: z.string().min(1).max(40).describe("The key, e.g. Enter"), approval },
-    handler: (a) => act({ action: "press", key: a.key }, a.approval),
+    description: 'Press a key or a combination: "Enter", "Escape", "Tab", "PageDown", "Control+A". `hold_ms` holds it down that long (a game, a press-and-hold).',
+    inputSchema: { key: z.string().min(1).max(40).describe("The key, e.g. Enter"), hold_ms: z.number().int().min(30).max(5000).optional().describe("Hold it down this many ms (30–5000)"), approval },
+    handler: (a) => act({ action: "press", key: a.key, ...(a.hold_ms !== undefined ? { hold_ms: a.hold_ms } : {}) }, a.approval),
   };
 
   const scroll: ToolDef<{ direction: "up" | "down" | "left" | "right"; amount?: number; ref?: string }> = {
@@ -355,11 +384,11 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     },
   };
 
-  /** The page as an image; null with the reason when it could not be had. */
-  async function shot(): Promise<{ content: ToolContent[]; key: string; bytes: Uint8Array; answer: BrowseAnswer } | { error: string; code?: string }> {
+  /** The page as an image (`marks`: refs drawn on it; `grid`: a coordinate grid, `true` or its spacing); null with the reason when it could not be had. */
+  async function shot(look: { marks?: boolean; grid?: boolean | number } = {}): Promise<{ content: ToolContent[]; key: string; bytes: Uint8Array; answer: BrowseAnswer } | { error: string; code?: string }> {
     let a: BrowseAnswer;
     try {
-      a = await porch.browseAct(session, { action: "screenshot" });
+      a = await porch.browseAct(session, { action: "screenshot", ...(look.marks ? { marks: true } : {}), ...(look.grid ? { grid: look.grid } : {}) });
     } catch (e) {
       return { error: describeBrowse(e, e instanceof PorchkitError && e.code === "owner_only" ? await liveUrl() : undefined), ...(e instanceof PorchkitError ? { code: e.code } : {}) };
     }
@@ -370,25 +399,33 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     } catch (e) {
       return { error: `The screenshot was taken but could not be read back: ${describeBrowse(e)}` };
     }
-    const size = a.screenshot.width && a.screenshot.height ? ` (${a.screenshot.width}x${a.screenshot.height})` : "";
+    const size = a.screenshot.width && a.screenshot.height ? ` Coordinates are in this image's pixels: ${a.screenshot.width}×${a.screenshot.height}.` : "";
     const mime = file.type?.startsWith("image/") ? file.type.split(";")[0]! : "image/png";
+    rememberShot(db, chat.id, a.screenshot.width);
+    const marked = look.marks ? " Refs are drawn on it: act on one with its ref." : look.grid ? ` A grid is drawn on it${typeof a.grid === "number" ? ` (every ${a.grid} px)` : ""}, for browser_pointer.` : "";
+    const situation = situationLines(a.situation, a, "screenshot");
+    const marks = extraLines({ marks: a.marks ?? null });
     return {
       key: a.screenshot.key,
       bytes: file.bytes,
       answer: a,
       content: [
-        { type: "text", text: `Screenshot of ${a.title || "(no title)"} — ${a.url || "(no address)"}${size}:` },
+        { type: "text", text: `${situation.length ? `${situation.join("\n")}\n` : ""}Screenshot of ${a.title || "(no title)"} — ${a.url || "(no address)"}.${size}${marked}${marks.length ? `\n${marks.join("\n")}` : ""}` },
         { type: "image", data: Buffer.from(file.bytes).toString("base64"), mimeType: mime },
       ],
     };
   }
 
-  const screenshot: ToolDef<Record<string, never>> = {
+  const screenshot: ToolDef<{ marks?: boolean; grid?: boolean | number }> = {
     name: "browser_screenshot",
-    description: "See the current page as an image (what the owner sees), when the page text is not enough.",
-    inputSchema: {},
-    async handler() {
-      const r = await shot();
+    description:
+      "See the current page as an image (what the owner sees), when the page text is not enough. `marks`: each element's ref drawn on it, and listed with where it is (for icon-only or unnamed controls). `grid`: a coordinate grid (true, or its spacing in pixels, 20–1000), for browser_pointer on drawn or canvas pages.",
+    inputSchema: {
+      marks: z.boolean().optional().describe("Draw each element's ref on it"),
+      grid: z.union([z.boolean(), z.number().int().min(20).max(1000)]).optional().describe("Draw a coordinate grid on it: true, or its spacing in pixels"),
+    },
+    async handler(a) {
+      const r = await shot({ ...(a.marks ? { marks: true } : {}), ...(a.grid ? { grid: a.grid } : {}) });
       return "error" in r ? err(r.error) : { content: r.content };
     },
   };
@@ -487,7 +524,8 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     render: (a) => renderAnswer(a),
     attachWaitMs: cfg.attachWaitMs,
   });
-  return [open, snapshot, click, type, press, scroll, back, tab, wait, dialog, screenshot, close, status, purchase, ...files] as ToolDef[];
+  const look = lookTools({ act, db, chatId: chat.id });
+  return [open, snapshot, click, type, press, scroll, back, tab, wait, dialog, screenshot, ...look, close, status, purchase, ...files] as ToolDef[];
 }
 
 export const browser = defineCapability<BrowserConfig>({

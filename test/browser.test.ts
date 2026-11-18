@@ -107,6 +107,13 @@ chats:
       "browser_wait",
       "browser_dialog",
       "browser_screenshot",
+      "browser_pointer",
+      "browser_zoom",
+      "browser_watch",
+      "browser_find",
+      "browser_wait_for",
+      "browser_hover",
+      "browser_select",
       "browser_close",
       "browser_status",
       "browser_request_purchase",
@@ -165,7 +172,7 @@ describe("each tool's request", () => {
     await t.browser_open!({ url: SHOP });
     const r = await t.browser_screenshot!();
     expect(r.isError).toBeFalsy();
-    expect(r.content[0]).toEqual({ type: "text", text: `Screenshot of Example Shop — ${SHOP} (1x1):` });
+    expect(r.content[0]).toEqual({ type: "text", text: `Screenshot of Example Shop — ${SHOP}. Coordinates are in this image's pixels: 1280×666.` });
     expect(r.content[1]).toEqual({ type: "image", data: TINY_PNG.toString("base64"), mimeType: "image/png" });
     expect(p.calls.at(-1)).toMatchObject({ method: "GET", authed: true });
     expect(p.calls.at(-1)!.path).toMatch(/^\/files\/[0-9a-f]{32}$/);
@@ -388,7 +395,7 @@ describe("a purchase", () => {
     const done = await t.browser_click!({ ref: "e2", approval: id });
     expect(done.isError).toBeFalsy();
     expect(acts(p).at(-1)).toEqual({ path: `/browse/sessions/chat-${chat.id}/act`, action: "click", ref: "e2", approved: true });
-    expect(text(done)).toStartWith(`(Done with the owner's approval #${id}; it is now used up.)\nURL: ${SHOP_DONE}`);
+    expect(text(done)).toStartWith(`URL changed → ${SHOP_DONE}\n(Done with the owner's approval #${id}; it is now used up.)\nURL: ${SHOP_DONE}`);
     expect(getApproval(db, id)!.data).toMatchObject({ used: true });
 
     const again = await t.browser_press!({ key: "Enter", approval: id });
@@ -555,7 +562,7 @@ chats:
     const accepted = await t.browser_dialog!({ accept: true });
     expect(accepted.isError).toBeFalsy();
     expect(acts(p).at(-1)).toEqual({ path: `/browse/sessions/chat-${chat.id}/act`, action: "dialog", accept: true, approved: true });
-    expect(text(accepted)).toStartWith(`(Accepted with the owner's approval #${id}, carried from the action that opened this dialog; it is now fully used up.)\nURL: ${SHOP_DONE}`);
+    expect(text(accepted)).toStartWith(`URL changed → ${SHOP_DONE}\n(Accepted with the owner's approval #${id}, carried from the action that opened this dialog; it is now fully used up.)\nURL: ${SHOP_DONE}`);
     expect(controlCards(db)).toHaveLength(1);
   });
 
@@ -648,7 +655,7 @@ chats:
   });
 
   test("refusals porchkit makes before the desktop give the approval back: each code", async () => {
-    expect([...DID_NOTHING].sort()).toEqual(["bad_ref", "bad_request", "busy", "dialog_open", "egress_refused", "forbidden", "owner_only", "ref_required", "stale_page", "takeover", "unauthorized"]);
+    expect([...DID_NOTHING].sort()).toEqual(["bad_ref", "bad_request", "busy", "dialog_open", "egress_refused", "forbidden", "owner_only", "ref_required", "stale_page", "takeover", "target_changed", "unauthorized"]);
     const p = porch();
     const db = memDb();
     const { chat, t, id } = await approvedAtCheckout(db, p);

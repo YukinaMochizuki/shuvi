@@ -67,6 +67,17 @@ export const SHOP_CHECKOUT = "https://shop.example.com/checkout";
 export const SHOP_DONE = "https://shop.example.com/order/done";
 /** shuvi's own Google profile page: no longer the owner's (owner decision); a file chooser and a file input. */
 export const PROFILE = "https://myaccount.google.com/personal-info";
+/** A page drawn on a canvas: its "Start" button is at x 100–200, y 100–150 (1280-wide pixels), not in the page text. */
+export const CANVAS = "https://game.example.com/";
+/** A page that a captcha blocks, and one with a native popup open. */
+export const CAPTCHA = "https://blocked.example.com/";
+export const POPUP_PAGE = "https://cookies.example.com/";
+/** A form with a dropdown. */
+export const FORM = "https://forms.example.com/apply";
+/** porchkit's hints per page (the fake's own). */
+const PAGE_HINTS: Record<string, string[]> = { [CANVAS]: ["page: canvas-heavy"], [CAPTCHA]: ["blocked-by: captcha"], [POPUP_PAGE]: ["native-popup: press Escape"] };
+/** A dropdown's options, by `<page> <ref>`. */
+const SELECT_OPTIONS: Record<string, string[]> = { [`${FORM} e2`]: ["Japan", "Taiwan", "United States"] };
 
 type FakeDialog = { type: "alert" | "confirm" | "prompt"; message: string; default_prompt?: string | null; /** Where accepting it leads. */ then?: string };
 
@@ -93,6 +104,10 @@ const SHOP_PAGES: Record<string, { title: string; refs: Record<string, [string, 
   },
   [SHOP_DONE]: { title: "Thank you - Example Shop", refs: { e1: ["link", "Home", SHOP] } },
   [PROFILE]: { title: "Personal info - Google Account", refs: { e1: ["button", "Change photo", null], e2: ["button", "Choose file", null], e3: ["textbox", "Name", null] } },
+  [CANVAS]: { title: "Canvas game", refs: { e1: ["canvas", "", null] } },
+  [CAPTCHA]: { title: "Just a moment...", refs: { e1: ["checkbox", "I am human", null] } },
+  [POPUP_PAGE]: { title: "Cookies", refs: { e1: ["link", "Home", SHOP] } },
+  [FORM]: { title: "A long form", refs: { e1: ["textbox", "Name", null], e2: ["combobox", "Country", null], e3: ["button", "Next", null], e4: ["link", "Terms", null] } },
 };
 /** Google sign-in and account security (password, 2-Step, passkeys, recovery, deleting the account): the owner's. */
 export function ownerOnlyUrl(url: string): boolean {
@@ -128,6 +143,20 @@ export interface FakeBrowse {
   chosen: Map<string, string[]>;
   /** What each file input (`<session> <ref>`) was set to. */
   inputs: Map<string, string[]>;
+  /** Every pointer act's body, in order; how many hit the canvas's Start button. */
+  pointers: Record<string, unknown>[];
+  canvasHits: number;
+  /** Every screenshot asked for, with marks or grid. */
+  screenshots: { marks: boolean; grid: boolean }[];
+  /** What each select (`<session> <ref>`) was set to. */
+  selected: Map<string, string>;
+  popupClosed: boolean;
+  /** Cut every page text after this many elements, with `next_offset` (porchkit cuts at max_chars). */
+  cutAt?: number;
+  /** The next pointer act answers 409 target_changed (the point holds something else now). */
+  targetChangedNext?: boolean;
+  /** What a watch's `urls` says (default: the page's URL at every frame). */
+  watchUrls?: string[];
   /** A size a screenshot's or a PDF's answer claims instead of its own. */
   reportBytes?: number;
 }
@@ -185,7 +214,7 @@ export class FakePorchkit {
   private readonly fetches = new Map<string, { url: string; reads: number; state: string }>();
   private readonly queued = new Map<string, { status: number; body: Record<string, unknown>; headers?: Record<string, string> }[]>();
   private server: ReturnType<typeof Bun.serve>;
-  readonly browse: FakeBrowse = { available: true, takeover: false, google: true, liveUrl: "https://porchkit.example.ts.net:8444/", maxSessions: 3, sessions: new Map(), dialogs: new Map(), downloads: new Map(), uploads: new Map(), armed: new Map(), chosen: new Map(), inputs: new Map() };
+  readonly browse: FakeBrowse = { available: true, takeover: false, google: true, liveUrl: "https://porchkit.example.ts.net:8444/", maxSessions: 3, sessions: new Map(), dialogs: new Map(), downloads: new Map(), uploads: new Map(), armed: new Map(), chosen: new Map(), inputs: new Map(), pointers: [], canvasHits: 0, screenshots: [], selected: new Map(), popupClosed: false };
 
   constructor(readonly token = FAKE_TOKEN) {
     this.videos.set("https://www.youtube.com/watch?v=abc123def45", {
@@ -426,11 +455,37 @@ export class FakePorchkit {
       }
     };
     const isCheckout = here === SHOP_CHECKOUT;
-    const needs = (cond: boolean) => (cond && body.approved !== true ? fail(403, "approval_required", "that could place an order; it needs approved: true") : null);
+    const needs = (cond: boolean, target?: Record<string, unknown>) =>
+      cond && body.approved !== true ? Response.json({ error: "approval_required", detail: "that could place an order; it needs approved: true", ...(target ? { target } : {}) }, { status: 403 }) : null;
     const action = String(body.action ?? "");
     const open = b.dialogs.get(id);
     if (open && action !== "dialog") return fail(409, "dialog_open", `a ${open.type} is open; answer it with the dialog action`);
     const notes: string[] = [];
+    /** porchkit's situation, on every act answer. */
+    const situation: Record<string, unknown> = { url_changed: false, dialog_opened: false, popup_opened: false, hints: [] };
+    let only: string | undefined;
+    let from = 0;
+    const img = (name: string, width: number, height: number, bytes = TINY_PNG.length) => ({ key: this.keep(name, TINY_PNG, "image/png"), width, height, bytes });
+    const tabsOf = (url: string) => [{ index: 0, url, title: SHOP_PAGES[url]?.title ?? "", active: true }];
+    /** Every act answer: session, url, title, checkout, notes, situation, and what the act adds. */
+    const reply = (fields: Record<string, unknown>, withSituation = true) => {
+      const now = h.at(-1)!;
+      situation.url_changed = now !== here;
+      situation.hints = PAGE_HINTS[now] ?? [];
+      return Response.json({ session: id, url: now, title: SHOP_PAGES[now]?.title ?? "", checkout: now === SHOP_CHECKOUT, notes, ...(withSituation ? { situation } : {}), ...fields });
+    };
+    /** A snapshot answer's own fields: the page text (cut at `browse.cutAt` refs, with `next_offset`), tabs. */
+    const snapshot = () => {
+      const now = h.at(-1)!;
+      const p = SHOP_PAGES[now];
+      const all = Object.entries(p?.refs ?? {}).filter(([ref]) => only === undefined || ref === only).map(([ref, [role, name]]) => `[${ref}] ${role} "${name}"`);
+      const rest = all.slice(from);
+      const cut = b.cutAt !== undefined && rest.length > b.cutAt;
+      const shown = cut ? rest.slice(0, b.cutAt) : rest;
+      return { snapshot: [`URL: ${now}`, `Title: ${p?.title ?? ""}`, ...shown].join("\n"), tabs: tabsOf(now), ...(cut ? { next_offset: from + b.cutAt! } : {}) };
+    };
+    /** What a ref act on a canvas-heavy page adds: settling, the change, a screenshot. */
+    const canvasExtra = () => (here === CANVAS ? { settled: true, settle_ms: 80, width: 1280, height: 666, scale: 1, changed_pct: 0, screenshot: img(`canvas-${here}`, 1280, 666) } : {});
     switch (action) {
       case "open": {
         const url = String(body.url ?? "");
@@ -440,9 +495,94 @@ export class FakePorchkit {
         break;
       }
       case "snapshot":
+        if (body.ref !== undefined && !page?.refs[String(body.ref)]) return fail(422, "bad_ref", "no such ref in the latest snapshot");
+        if (body.ref !== undefined) only = String(body.ref);
+        if (body.offset !== undefined) from = Number(body.offset);
+        break;
       case "wait":
       case "scroll":
         break;
+      case "hover": {
+        if (!page?.refs[String(body.ref)]) return fail(422, "bad_ref", "no such ref in the latest snapshot");
+        notes.push(`hovering ${String(body.ref)}`);
+        break;
+      }
+      case "select": {
+        const r = page?.refs[String(body.ref)];
+        if (!r) return fail(422, "bad_ref", "no such ref in the latest snapshot");
+        const options = SELECT_OPTIONS[`${here} ${String(body.ref)}`] ?? [];
+        const option = String(body.option);
+        if (!options.includes(option)) return Response.json({ error: "bad_request", detail: `no option "${option}"`, options }, { status: 400 });
+        b.selected.set(`${id} ${String(body.ref)}`, option);
+        return reply({ ...snapshot(), select: { selected: option, value: option.toLowerCase().replace(/\s+/g, "-"), via: "select" } });
+      }
+      case "find": {
+        const q = String(body.query ?? "").toLowerCase();
+        const found = Object.entries(page?.refs ?? {})
+          .filter(([, [, name]]) => name.toLowerCase().includes(q))
+          .map(([ref, [role, name]]) => ({ ref, line: `[${ref}] ${role} "${name}"`, context: page?.title ?? "" }));
+        return reply({ tabs: tabsOf(here), query: String(body.query ?? ""), matches: found.slice(0, 40), total: found.length });
+      }
+      case "wait_for": {
+        const names = Object.values(page?.refs ?? {}).map(([, name]) => name);
+        const met =
+          body.text !== undefined ? names.some((n) => n.includes(String(body.text))) : body.ref !== undefined ? !!page?.refs[String(body.ref)] : !names.some((n) => n.includes(String(body.gone))) && !page?.refs[String(body.gone)];
+        if (!met) return fail(504, "timeout", `not within ${String(body.timeout)}s`);
+        return reply({ ...snapshot(), wait_for: { met: true, seconds: 0.4 } });
+      }
+      case "zoom": {
+        const region = { x: Number(body.x), y: Number(body.y), w: Number(body.w), h: Number(body.h) };
+        return reply({ width: 400, height: 300, region, factor: 2, zoom: img(`zoom-${here}`, 400, 300) });
+      }
+      case "watch": {
+        const frames = Number(body.frames ?? 6);
+        const seconds = Number(body.seconds ?? 3);
+        const tiles = Array.from({ length: frames }, (_, i) => ({ t: Math.round((i * seconds * 10) / (frames - 1)) / 10, x: (i % 3) * 320, y: Math.floor(i / 3) * 270, w: 320, h: 270 }));
+        const urls = b.watchUrls ?? Array.from({ length: frames }, () => here);
+        return reply({ width: 960, height: 540, tiles, tile_scale: 0.25, changed_pct: 3.5, urls, sheet: img(`watch-${here}`, 960, 540) });
+      }
+      case "pointer": {
+        b.pointers.push(body);
+        // Coordinates come in the screenshot's pixels (`image_width`); the page is 1280 wide.
+        const scale = 1280 / (Number(body.image_width) || 1280);
+        const x = Number(body.x) * scale;
+        const y = Number(body.y) * scale;
+        const kind = String(body.kind);
+        const hit = here === CANVAS && x >= 100 && x <= 200 && y >= 100 && y <= 150;
+        // `names`: the hit node's text, then its ancestors' names (always there); a drag's end point in `to`.
+        const target: Record<string, unknown> = isCheckout
+          ? { role: "button", name: "Pay", ref: "e3", in_canvas: false, names: ["Pay", "Order summary"] }
+          : { role: here === CANVAS ? "canvas" : "generic", name: "", ref: null, in_canvas: here === CANVAS, names: hit ? ["Start", "Game area"] : [] };
+        if (kind === "drag") target.to = { role: "canvas", name: "", ref: null, in_canvas: here === CANVAS, names: ["Goal"] };
+        // A dry run has no situation: nothing was done.
+        if (body.dry_run === true) return reply({ tabs: tabsOf(here), target, dry_run: true }, false);
+        if (b.targetChangedNext) {
+          b.targetChangedNext = false;
+          return Response.json({ error: "target_changed", detail: "the point holds something else now", target: { role: "link", name: "Ad", ref: null, in_canvas: false } }, { status: 409 });
+        }
+        const pressing = ["click", "double", "right", "press_hold", "drag"].includes(kind);
+        const shot = img(`pointer-${here}`, 1280, 666);
+        const common = { tabs: tabsOf(here), kind, target, settled: true, settle_ms: 120, width: 1280, height: 666, scale: 1, screenshot: shot };
+        if (isCheckout && pressing) {
+          // A button on a checkout page: the order, as far as porchkit can tell.
+          const g = needs(true, target);
+          if (g) return g;
+          h.push(SHOP_DONE);
+          situation.visible_change_pct = 80;
+          return reply({ ...common, tabs: tabsOf(SHOP_DONE), changed_pct: 80, changed_bbox: { x: 0, y: 0, w: 1280, h: 666 } });
+        }
+        if (hit && pressing) b.canvasHits++;
+        if (hit) {
+          situation.changes = [{ subtree: 'canvas ""', added: 1, removed: 0 }];
+          situation.visible_change_pct = 12.5;
+        } else situation.nothing_visible_changed = true;
+        return reply({
+          ...common,
+          changed_pct: hit ? 12.5 : 0,
+          ...(hit ? { changed_bbox: { x: 100, y: 100, w: 100, h: 50 } } : {}),
+          closeup: { ...img(`closeup-${here}`, 200, 200), x: Math.max(0, Number(body.x) - 50), y: Math.max(0, Number(body.y) - 50), w: 100, h: 100, factor: 2 },
+        });
+      }
       case "click": {
         const r = page?.refs[String(body.ref)];
         if (!r) return fail(422, "bad_ref", "no such ref in the latest snapshot");
@@ -451,8 +591,8 @@ export class FakePorchkit {
         if (r[3]?.type === "alert") notes.push(`dialog: alert "${r[3].message}" (accepted)`);
         else if (r[3]) {
           b.dialogs.set(id, r[3]);
-          const p = SHOP_PAGES[here];
-          return Response.json({ session: id, url: here, title: p?.title ?? "", tabs: [{ index: 0, url: here, title: p?.title ?? "", active: true }], checkout: isCheckout, notes: [], dialog: { type: r[3].type, message: r[3].message, default_prompt: r[3].default_prompt ?? null } });
+          situation.dialog_opened = true;
+          return reply({ tabs: tabsOf(here), dialog: { type: r[3].type, message: r[3].message, default_prompt: r[3].default_prompt ?? null } });
         }
         if (r[2]) h.push(r[2]);
         // The profile's "Change photo" opens a file chooser: an armed one takes its files.
@@ -462,7 +602,7 @@ export class FakePorchkit {
           b.armed.delete(id);
           notes.push(`file chooser: ${armed.join(", ")} (set)`);
         }
-        break;
+        return reply({ ...snapshot(), ...canvasExtra() });
       }
       case "upload": {
         const held = b.uploads.get(id) ?? [];
@@ -488,6 +628,8 @@ export class FakePorchkit {
       case "press": {
         const g = needs(isCheckout && body.key === "Enter");
         if (g) return g;
+        if (body.hold_ms !== undefined) notes.push(`held ${String(body.key)} for ${String(body.hold_ms)} ms`);
+        if (body.key === "Escape" && here === POPUP_PAGE) b.popupClosed = true;
         break;
       }
       case "dialog": {
@@ -506,28 +648,28 @@ export class FakePorchkit {
         if (body.index !== 0) return fail(422, "bad_ref", "no such tab");
         break;
       case "screenshot": {
-        const key = this.keep(`screenshot-${here}`, TINY_PNG, "image/png");
-        return Response.json({ session: id, url: here, title: page?.title ?? "", checkout: isCheckout, notes: [], screenshot: { key, width: 1, height: 1, bytes: b.reportBytes ?? TINY_PNG.length } });
+        const grid = body.grid === true ? 100 : typeof body.grid === "number" ? body.grid : undefined;
+        b.screenshots.push({ marks: body.marks === true, grid: grid !== undefined });
+        const marks =
+          body.marks === true ? Object.entries(page?.refs ?? {}).map(([ref, [role, name]], i) => ({ ref, role, name, x: 20, y: 40 + i * 40, w: 120, h: 30 })) : undefined;
+        return reply({
+          width: 1280,
+          height: 666,
+          scale: 1,
+          viewport: { width: 1280, height: 666 },
+          ...(marks ? { marks } : {}),
+          ...(grid !== undefined ? { grid } : {}),
+          screenshot: img(`screenshot-${here}`, 1280, 666, b.reportBytes ?? TINY_PNG.length),
+        });
       }
       case "pdf": {
         const key = this.keep(`pdf-${here}`, FAKE_PDF, "application/pdf");
-        return Response.json({ session: id, url: here, title: page?.title ?? "", checkout: isCheckout, notes: [], pdf: { key, bytes: b.reportBytes ?? FAKE_PDF.length } });
+        return reply({ pdf: { key, bytes: b.reportBytes ?? FAKE_PDF.length } });
       }
       default:
         return fail(400, "bad_request", `unknown action ${action}`);
     }
-    const now = h.at(-1)!;
-    const p = SHOP_PAGES[now];
-    const lines = [`URL: ${now}`, `Title: ${p?.title ?? ""}`, ...Object.entries(p?.refs ?? {}).map(([ref, [role, name]]) => `[${ref}] ${role} "${name}"`)];
-    return Response.json({
-      session: id,
-      url: now,
-      title: p?.title ?? "",
-      snapshot: lines.join("\n"),
-      tabs: [{ index: 0, url: now, title: p?.title ?? "", active: true }],
-      checkout: now === SHOP_CHECKOUT,
-      notes,
-    });
+    return reply(snapshot());
   }
 
   /** A download in `session`'s window; its key (null unless completed). */

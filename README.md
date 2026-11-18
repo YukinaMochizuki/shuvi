@@ -140,6 +140,11 @@ Saving one onto the computer is the computer's own tool, `browser_save` (into `~
 which alone holds the bot token) or a browser download, set on a file input by its ref or handed to the page's
 next file chooser. A file from the computer is the computer's `browser_upload_from_computer`, owner-only and
 delegated by `delegate: [computer]` like `browser_save`.
+Where the page text falls short (icons, canvas pages, drawn controls), she has a pointer at screenshot
+coordinates (`browser_pointer`), marked or gridded screenshots, `browser_zoom`, `browser_watch`, `browser_find`,
+`browser_wait_for`, `browser_hover` and `browser_select` (`src/capabilities/browser/pointer.ts`); every answer
+starts with what her action did and porchkit's hints about the page (`look.ts`), and a pointer action on a
+checkout needs the owner's approval as a click does.
 
 ## Each chat's computer
 
