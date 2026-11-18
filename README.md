@@ -64,6 +64,7 @@ bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POS
 bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
 bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
 bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed read, a probe, sheets of a link, a fetch into ~/inbox
+bun scripts/e2e-read.ts      # reading links on the same fakes (read_link, save_link, the prewarm), and her browser: open a page, click
 bun scripts/e2e-drain.ts     # SIGTERM drains: a running turn finishes and is delivered, exit 0; the deadline stops and retries
 bun scripts/console-fixture.ts  # the console over made-up fixture data, on 127.0.0.1:8787, to look at
 ```
@@ -113,6 +114,23 @@ look at a video from its link (`video_probe`, `video_subs`, `video_sheet`); `vid
 file in the computer's `~/inbox/`, is the owner's alone. Every link in a message that starts a turn (from
 anyone; and in the message it replies to), up to 3, is read as soon as it arrives (a prewarm), and the
 console's turn view says whether the turn then used it. The token is never logged and is redacted from turn transcripts.
+
+## Her own browser (porchkit `/browse`)
+
+With porchkit configured as above, the `browser` capability is on too (`src/capabilities/browser/`): a
+real Chrome on the owner's home machine, signed in to accounts made for the assistant, that she drives one
+action at a time through porchkit's `/browse` (`browser_open`, `browser_click`, `browser_type`, …; each
+answers with the page as text), one window per chat (porchkit's session `chat-<chat id>`, closed after 30
+idle minutes). A chat gets it when its policy enables `browser`; anyone whose message starts a turn there
+may use it. The owner watches, or takes over, from porchkit's live view. Placing an order needs his
+approval first: `browser_request_purchase` puts a card to him in the control bot (the checkout's screenshot as
+its photo, and the live view's link to look or take over first), and one approval lets one action through,
+on the same site and within 15 minutes of his answer (`src/capabilities/browser/purchase.ts`): porchkit refuses, without it, a click on a button
+that places an order, and on a checkout page any button, Enter, a submit or accepting a dialog (adding to the
+cart never needs it). A page's alert is accepted by porchkit; a confirm or prompt stays open until she
+answers it with `browser_dialog`; an approved action that opens one carries its approval to accepting that
+one dialog (same window, within 2 minutes), so a "Confirm and pay?" after the approved click needs no second card. Google account and payment pages are his: she
+sends him the live view link instead. porchkit without a desktop answers every call as unavailable.
 
 ## Each chat's computer
 

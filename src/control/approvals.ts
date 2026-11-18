@@ -10,7 +10,7 @@ import { IMMEDIATE } from "../store/turns.ts";
  * the control bot, and get the answer back durably. The first real callers (policy changes, secrets,
  * schedules) are later milestones; this module knows nothing about what an answer means.
  *
- *   requestApproval({ kind, title, body, options, ttlMs?, originChatId?, data? }) → id
+ *   requestApproval({ kind, title, body, options, ttlMs?, originChatId?, data?, photo? }) → id
  *       records the approval and queues its card in the same transaction. Callable from any process
  *       (a runner child's tool included): it only writes rows, and the control sender sends the card.
  *   getApproval(id)
@@ -23,6 +23,10 @@ import { IMMEDIATE } from "../store/turns.ts";
  * (`answerApproval`), and only from the owner (bot.ts checks the sender). Pressing a button on a card that
  * is no longer pending changes nothing. Once answered or expired, the card is edited to say so and loses
  * its buttons.
+ *
+ * A card with a `photo` (a purchase's checkout screenshot) is sent as that photo with the card's text as its
+ * caption (cut to Telegram's 1024 characters, so keep such a card short) and the same buttons; closing it edits the
+ * caption, and drops the photo from the store. A card without one is a text message, as before.
  *
  * Button data is `ap:<approval id>:<option index>`, well under Telegram's 64-byte limit whatever the
  * option ids are.
@@ -48,6 +52,8 @@ export interface ApprovalRequest {
   data?: Record<string, unknown>;
   /** A group's operator whose delegated call asks (schema.ts `approvals.requestedBy`); absent: the owner. */
   requestedBy?: number;
+  /** A picture to send the card with (PNG or JPEG bytes): the card goes as a photo, its text the caption. */
+  photo?: Uint8Array;
 }
 
 export type Approval = typeof approvals.$inferSelect;
@@ -83,6 +89,7 @@ export function requestApproval(db: Db, req: ApprovalRequest, now = Date.now()):
         originChatId: req.originChatId ?? null,
         data: req.data ?? null,
         requestedBy: req.requestedBy ?? null,
+        photo: req.photo ? Buffer.from(req.photo) : null,
         status: "pending",
         expiresAt: req.ttlMs ? new Date(now + req.ttlMs).toISOString() : null,
         createdAt: new Date(now).toISOString(),
@@ -104,8 +111,13 @@ export function parseCallback(data: string | undefined): { approvalId: number; o
   return m ? { approvalId: Number(m[1]), option: Number(m[2]) } : null;
 }
 
-/** Close a pending approval (answered or expired): edit its card, and wake the chat that asked. */
+/**
+ * Close a pending approval (answered or expired): edit its card, and wake the chat that asked. Its photo is dropped:
+ * nothing needs it once the card is closed (closing edits the caption, schema `control_messages.as_photo`), and a
+ * checkout screenshot should not live on in the store and its backups.
+ */
 function close(db: Db, a: Approval, from: Speaker): void {
+  if (a.photo) db.update(approvals).set({ photo: null }).where(eq(approvals.id, a.id)).run();
   queueControl(db, { kind: "approval_closed", text: closedText(a), key: `approval-closed:${a.id}`, approvalId: a.id });
   if (a.originChatId != null) {
     const label = a.options.find((o) => o.id === a.answer)?.label ?? null;

@@ -1,0 +1,1 @@
+ALTER TABLE `control_messages` ADD `as_photo` integer DEFAULT false NOT NULL;

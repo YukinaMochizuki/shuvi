@@ -124,8 +124,8 @@ export function pendingControl(db: Db): ControlMessage[] {
   return db.select().from(controlMessages).where(eq(controlMessages.status, "pending")).orderBy(asc(controlMessages.id)).all();
 }
 
-export function markControlSent(db: Db, id: number, tgMessageId: number | null): void {
-  db.update(controlMessages).set({ status: "sent", tgMessageId }).where(eq(controlMessages.id, id)).run();
+export function markControlSent(db: Db, id: number, tgMessageId: number | null, asPhoto = false): void {
+  db.update(controlMessages).set({ status: "sent", tgMessageId, ...(asPhoto ? { asPhoto } : {}) }).where(eq(controlMessages.id, id)).run();
 }
 
 export function markControlFailed(db: Db, id: number, note: string): void {

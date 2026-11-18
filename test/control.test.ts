@@ -243,6 +243,97 @@ describe("control bot", () => {
 });
 
 describe("approvals", () => {
+  test("a card with a photo goes as that photo, its text the caption (cut to 1024), the same buttons; closing edits the caption; a text card is unchanged", async () => {
+    const db = memDb();
+    const api = fakeApi();
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+    const opts = [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }];
+    const withPhoto = requestApproval(db, { kind: "throwaway", title: "Look at this?", body: `A long body. ${"x".repeat(1200)}`, options: opts, photo: png });
+    const plain = requestApproval(db, { kind: "throwaway", title: "Just text?", body: "No picture.", options: opts });
+    expect(new Uint8Array(getApproval(db, withPhoto)!.photo!)).toEqual(png);
+    expect(getApproval(db, plain)!.photo).toBeNull();
+
+    await controlSendPass(db, api, OWNER);
+    const photos = tg!.sent("sendPhoto");
+    expect(photos).toHaveLength(1);
+    const p = photos[0]!;
+    expect(String(p.chat_id)).toBe(String(OWNER));
+    // grammY sends `photo: attach://<id>` and the file under that id.
+    const part = p[String(p.photo).replace(/^attach:\/\//, "")] as { bytes: Uint8Array };
+    expect(new Uint8Array(part.bytes)).toEqual(png);
+    expect(String(p.caption)).toStartWith(`Approval #${withPhoto} (throwaway)\nLook at this?`);
+    expect(String(p.caption).length).toBe(1024);
+    expect(JSON.parse(String(p.reply_markup))).toEqual({ inline_keyboard: [[{ text: "Yes", callback_data: `ap:${withPhoto}:0` }], [{ text: "No", callback_data: `ap:${withPhoto}:1` }]] });
+    const texts = tg!.sent();
+    expect(texts).toHaveLength(1);
+    expect(String(texts[0]!.text)).toContain("Just text?");
+
+    answerApproval(db, withPhoto, 0, { id: OWNER, name: "Owner" });
+    answerApproval(db, plain, 1, { id: OWNER, name: "Owner" });
+    await controlSendPass(db, api, OWNER);
+    const captions = tg!.sent("editMessageCaption");
+    expect(captions).toHaveLength(1);
+    expect(String(captions[0]!.caption)).toStartWith(`Approval #${withPhoto} (throwaway)`);
+    expect(captions[0]!.reply_markup).toEqual({ inline_keyboard: [] });
+    const edits = tg!.sent("editMessageText");
+    expect(edits).toHaveLength(1);
+    expect(String(edits[0]!.text)).toContain("Just text?");
+    expect(String(edits[0]!.text)).toEndWith("→ Answered: No");
+  });
+
+  test("a photo Telegram refuses (4xx) sends the same card as text; closing it then edits the text", async () => {
+    const db = memDb();
+    const api = fakeApi();
+    const id = requestApproval(db, { kind: "purchase", title: "Buy?", body: "Look first, or take over: https://live.example.ts.net:8444/", options: [{ id: "yes", label: "Yes" }], photo: new Uint8Array([1, 2, 3]) });
+    tg!.fail("sendPhoto", { code: 400, description: "Bad Request: IMAGE_PROCESS_FAILED" });
+    expect(await controlSendPass(db, api, OWNER)).toEqual({ sent: 1, failed: 0, backoffMs: 0 });
+    expect(tg!.sent("sendPhoto")).toHaveLength(1);
+    const texts = tg!.sent();
+    expect(texts).toHaveLength(1);
+    expect(String(texts[0]!.text)).toContain("Look first, or take over: https://live.example.ts.net:8444/");
+    expect(String(texts[0]!.text)).toEndWith("(The screenshot could not be sent.)");
+    expect(texts[0]!.reply_markup).toEqual({ inline_keyboard: [[{ text: "Yes", callback_data: `ap:${id}:0` }]] });
+    answerApproval(db, id, 0, { id: OWNER, name: "Owner" });
+    await controlSendPass(db, api, OWNER);
+    expect(tg!.sent("editMessageCaption")).toHaveLength(0);
+    expect(tg!.sent("editMessageText")).toHaveLength(1);
+  });
+
+  test("a card's photo is dropped from the store once it is answered or expired; the closed card still edits its caption", async () => {
+    const db = memDb();
+    const api = fakeApi();
+    const opts = [{ id: "yes", label: "Yes" }];
+    const answered = requestApproval(db, { kind: "purchase", title: "One", body: "b", options: opts, photo: new Uint8Array([1, 2, 3]) });
+    const expiring = requestApproval(db, { kind: "purchase", title: "Two", body: "b", options: opts, ttlMs: 60_000, photo: new Uint8Array([4, 5, 6]) });
+    const pending = requestApproval(db, { kind: "purchase", title: "Three", body: "b", options: opts, photo: new Uint8Array([7]) });
+    await controlSendPass(db, api, OWNER);
+    expect(tg!.sent("sendPhoto")).toHaveLength(3);
+
+    answerApproval(db, answered, 0, { id: OWNER, name: "Owner" });
+    expireApprovals(db, OWNER, Date.now() + 120_000);
+    expect(getApproval(db, answered)!.photo).toBeNull();
+    expect(getApproval(db, expiring)).toMatchObject({ status: "expired", photo: null });
+    expect(getApproval(db, pending)!.photo).not.toBeNull();
+    const n = (db.$client.query("select count(*) as n from approvals where photo is not null").get() as { n: number }).n;
+    expect(n).toBe(1);
+
+    await controlSendPass(db, api, OWNER);
+    expect(tg!.sent("editMessageCaption")).toHaveLength(2);
+    expect(tg!.sent("editMessageText")).toHaveLength(0);
+  });
+
+  test("a 429 on a photo card backs off and sends it as a photo later, never as text", async () => {
+    const db = memDb();
+    const api = fakeApi();
+    requestApproval(db, { kind: "purchase", title: "Buy?", body: "b", options: [{ id: "yes", label: "Yes" }], photo: new Uint8Array([1, 2, 3]) });
+    tg!.fail("sendPhoto", { code: 429, description: "Too Many Requests", retry_after: 1 });
+    expect((await controlSendPass(db, api, OWNER)).backoffMs).toBe(1500);
+    expect(tg!.sent()).toHaveLength(0);
+    expect((await controlSendPass(db, api, OWNER)).sent).toBe(1);
+    expect(tg!.sent("sendPhoto")).toHaveLength(2);
+    expect(tg!.sent()).toHaveLength(0);
+  });
+
   test("round trip on the fake Bot API: a card with buttons, the owner's press recorded once, the origin chat woken", async () => {
     const db = memDb();
     const api = fakeApi();
