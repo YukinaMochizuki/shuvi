@@ -7,6 +7,7 @@ import { dataDirFrom } from "../../env.ts";
 import type { ChatPolicy } from "../../policy/policy.ts";
 import { computerConfig } from "../computer/config.ts";
 import { defineCapability, policyEnables, type TurnContext } from "../types.ts";
+import { attachmentPass } from "./attachments.ts";
 import { fileTools } from "./files.ts";
 import { sessionOf } from "./keys.ts";
 import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_MS, USE_WITHIN_MS, releaseCarry, releasePurchase, requester, requestPurchase } from "./purchase.ts";
@@ -42,8 +43,12 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *   privacy   typed text and page text are never logged; they live only in the turn's transcript. The
  *             porchkit token is the media capability's and is redacted from transcripts here too.
  *
+ *   loops     `browser-attachments`: fetch a file someone sent, for browser_upload (attachments.ts; a runner child
+ *             never holds the bot token).
+ *
  *   SHUVI_PORCHKIT_URL / SHUVI_PORCHKIT_TOKEN   porchkit and shuvi's token there (both set: on; src/porchkit/).
  *                                               porchkit answers 503 `unavailable` when it has no desktop.
+ *   SHUVI_BROWSER_ATTACH_WAIT_SEC   how long browser_upload waits for a sent file to be fetched (default 30)
  */
 
 export interface BrowserConfig {
@@ -52,11 +57,14 @@ export interface BrowserConfig {
   dataDir: string;
   /** The computer is on in this process: answers may point at its browser_save, in chats that enable it too. */
   computer: boolean;
+  /** How long browser_upload waits for the server to fetch a file someone sent (SHUVI_BROWSER_ATTACH_WAIT_SEC). */
+  attachWaitMs: number;
 }
 
 export function browserConfig(env: Record<string, string | undefined>): BrowserConfig | null {
   const porchkit = porchkitConfig(env);
-  return porchkit ? { porchkit, dataDir: dataDirFrom(env), computer: computerConfig(env) !== null } : null;
+  const wait = Number(env.SHUVI_BROWSER_ATTACH_WAIT_SEC);
+  return porchkit ? { porchkit, dataDir: dataDirFrom(env), computer: computerConfig(env) !== null, attachWaitMs: (wait > 0 ? wait : 30) * 1000 } : null;
 }
 
 /** This chat has the computer too (on in the process, enabled by its policy): where browser_save works. */
@@ -79,9 +87,9 @@ This chat has a browser of your own: a real Chrome on the owner's home machine, 
 
 Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). Refs belong to the latest page text only; after anything changes the page, use the new ones. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
 
-The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google account, security and payment pages are the owner's: send him the live view link from \`browser_status\` and let him do it there.
+The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
 
-\`browser_send\` sends this chat a screenshot, a download (\`browser_downloads\` lists them) or the page as a PDF.`;
+\`browser_send\` sends this chat a screenshot, a download (\`browser_downloads\` lists them) or the page as a PDF. \`browser_upload\` gives the page a file someone sent here or a download: with the file input's ref, or without one and then click the page's own upload button.`;
 
 
 const positiveInt = z.number().int().positive();
@@ -101,7 +109,7 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
     case "dialog_open":
       return "The page is asking something (a confirm or prompt dialog is open), so nothing else can be done on it. Nothing was done. Answer it first with browser_dialog (accept true or false).";
     case "owner_only":
-      return `That page is the owner's (a Google account, security or payment page): you do not act on it. Nothing was done. Send the owner the live view link and ask him to do it himself there.${live}`;
+      return `That page is the owner's (Google sign-in or account security: password, 2-Step Verification, recovery, deleting the account): you do not act on it. Nothing was done. Send the owner the live view link and ask him to do it himself there.${live}`;
     case "unavailable":
       return `The browser is not available right now (the desktop is down or not set up): ${detail} Say so, or try again later.`;
     case "ref_required":
@@ -467,7 +475,18 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     },
   };
 
-  const files = fileTools({ db, chat, s, porch, session, dataDir: cfg.dataDir, computer: computerHere(cfg, ctx.chatPolicy), describe: (e) => describeBrowse(e) });
+  const files = fileTools({
+    db,
+    chat,
+    s,
+    porch,
+    session,
+    dataDir: cfg.dataDir,
+    computer: computerHere(cfg, ctx.chatPolicy),
+    describe: (e) => describeBrowse(e),
+    render: (a) => renderAnswer(a),
+    attachWaitMs: cfg.attachWaitMs,
+  });
   return [open, snapshot, click, type, press, scroll, back, tab, wait, dialog, screenshot, close, status, purchase, ...files] as ToolDef[];
 }
 
@@ -478,5 +497,6 @@ export const browser = defineCapability<BrowserConfig>({
   enable: browserConfig,
   tools: (ctx, cfg) => [{ serverName: "shuvi", tools: tools(ctx, cfg) }],
   section: () => BROWSER_SECTION,
+  loops: ({ db, files }, cfg) => [{ name: "browser-attachments", everyMs: 500, run: async () => void (await attachmentPass(db, files, cfg.dataDir)) }],
   secrets: (cfg) => ({ porchkit: cfg.porchkit.token }),
 });

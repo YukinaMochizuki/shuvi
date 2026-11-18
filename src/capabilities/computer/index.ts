@@ -17,7 +17,7 @@ import { computerConfig, DISK_MAX, DISK_SIZE, sizeLabel, type ComputerConfig, ty
 import { ComputerError, Computers } from "./computer.ts";
 import { BOOST_TERMS, cancelJob, computerJobKind, parseSheets, readJob, runSync, sheetsDir, sheetsIndex, sheetsScript, startJob, syncCommand, type ExecContext } from "./exec.ts";
 import { awaitInbox, inboxNote, inboxPass, sendFromComputer } from "./files.ts";
-import { browserSaveTool } from "./browser-save.ts";
+import { browserSaveTool, browserUploadTool } from "./browser-save.ts";
 import { applyResultText, DECLARED_PATH } from "./declared.ts";
 import { DEFAULT_GRID, GRID_MAX, SHEET_EDGE, SHEET_MAX_FRAMES, sheetActsForOwner, sheetCommand, sheetOptions, type SheetArgs } from "./media.ts";
 import { liveGrants, requestSecret, syncGrants, TTLS, type Ttl } from "./secrets.ts";
@@ -29,7 +29,8 @@ import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, relea
  *
  *   tools     exec, read_job, cancel_job (exec.ts, after workstream's box tools); request_secret
  *             (secrets.ts); send_file, send_photo (files.ts); browser_save (a browser download or PDF into
- *             ~/inbox/browser/; browser-save.ts: the computer's, so `delegate: [computer]` governs it); video_sheet (media.ts; in a chat that
+ *             ~/inbox/browser/) and browser_upload_from_computer (a file from here to the browser's page): both in
+ *             browser-save.ts, the computer's, so `delegate: [computer]` governs them; video_sheet (media.ts; in a chat that
  *             has the media capability, media gives video_sheet instead, for a link or a file, and runs a
  *             file's here, `localSheet`); apply_computer_config (declared.ts). All act for the owner
  *             (`ownerOnly`; video_sheet on a file, `ownerOnlyWhen`), under the one rule
@@ -78,7 +79,7 @@ This chat has a computer of its own: a Linux machine (Debian, with python3, pip,
 
 - \`exec\` runs a shell command there. A synchronous exec has a timeout (120 s by default); anything longer goes in the background (\`background: true\` with an honest \`expect_seconds\`): you get a job id at once, the result comes back to this chat as a job event when it ends, and you end your turn meanwhile. Never wait or poll for a job; \`read_job\` is for looking at its output when you need to, \`cancel_job\` stops it.
 - \`boost\` runs one command or job on the same computer made larger, for heavy work (it restarts the computer around it).
-- Files the owner sends here are copied into ~/inbox/ when the computer next runs (the message says where; your next command waits for them). Photos are not copied unless you ask: \`save_photo\` with the photo's #number. \`send_file\` and \`send_photo\` send a file from the computer to this chat. \`browser_save\` puts one of this chat's browser downloads (or a PDF \`browser_send\` made) in ~/inbox/browser/.
+- Files the owner sends here are copied into ~/inbox/ when the computer next runs (the message says where; your next command waits for them). Photos are not copied unless you ask: \`save_photo\` with the photo's #number. \`send_file\` and \`send_photo\` send a file from the computer to this chat. \`browser_save\` puts one of this chat's browser downloads (or a PDF \`browser_send\` made) in ~/inbox/browser/; \`browser_upload_from_computer\` gives the browser's page a file from here.
 - Installing for yourself needs nothing more: \`pip install --user\`, npm packages installed into ~, programs in ~/.local/bin all stay. Your commands run as a user without root; system packages (apt) go into ${DECLARED_PATH}: \`apt:\` a list of Debian packages, and optionally \`setup:\`, a shell script run after them (both as root; no other keys). It is applied by itself before your next command once it changes, and again whenever the computer's image changes (anything else outside ~ is gone then); \`apply_computer_config\` applies it at once and shows what failed. Keep it to what you need.
 - To look at a video, use \`video_sheet\` rather than writing ffmpeg commands yourself: it gives contact sheets, frames tiled in order with each one's time under it, and an index of the times. Start with the whole video (the default spacing), then zoom into a part with a window (\`from\` / \`to\`) and a smaller \`every\`; \`scene: true\` takes a frame at each cut.
 - Credentials are never on the computer. If a task needs one (an API key), \`request_secret\` asks the owner for a named profile; once granted, its variables are in the environment of your commands here, and their values are hidden from you as [REDACTED:<profile>].`;
@@ -209,11 +210,11 @@ export const computer = defineCapability<ComputerConfig>({
   label: "computer (owner only)",
   gives: "this chat's own computer: exec, files, secrets, photos, video contact sheets.",
   enable: computerConfig,
-  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "browser_save", "apply_computer_config"],
+  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config"],
   // A sheet of a file on the computer is the owner's; one of a link (media's video_sheet) is anyone's.
   ownerOnlyWhen: { video_sheet: sheetActsForOwner },
   ownerOnlyNote: { video_sheet: SHEET_FILE_NOTE },
-  delegable: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "browser_save", "apply_computer_config", "video_sheet"],
+  delegable: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config", "video_sheet"],
   tools({ db, chat, state: s, chatPolicy }, cfg) {
     const computers = computersFor(db, cfg);
     const x: ExecContext = { db, chat, computers, cfg };
@@ -400,7 +401,7 @@ export const computer = defineCapability<ComputerConfig>({
       },
     };
 
-    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, sendFile, sendPhoto, savePhoto, browserSaveTool(x, chatPolicy), ...(sheetHere ? [videoSheet] : []), applyConfig] as ToolDef[] }];
+    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, sendFile, sendPhoto, savePhoto, browserSaveTool(x, chatPolicy), browserUploadTool(x, chatPolicy), ...(sheetHere ? [videoSheet] : []), applyConfig] as ToolDef[] }];
   },
   section: (ctx) =>
     policyDelegates(ctx.chatPolicy, "computer")

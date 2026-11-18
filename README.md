@@ -129,12 +129,17 @@ on the same site and within 15 minutes of his answer (`src/capabilities/browser/
 that places an order, and on a checkout page any button, Enter, a submit or accepting a dialog (adding to the
 cart never needs it). A page's alert is accepted by porchkit; a confirm or prompt stays open until she
 answers it with `browser_dialog`; an approved action that opens one carries its approval to accepting that
-one dialog (same window, within 2 minutes), so a "Confirm and pay?" after the approved click needs no second card. Google account and payment pages are his: she
-sends him the live view link instead. porchkit without a desktop answers every call as unavailable.
+one dialog (same window, within 2 minutes), so a "Confirm and pay?" after the approved click needs no second card. Google sign-in and account-security pages
+(password, 2-Step Verification, recovery, deleting the account) are his: she sends him the live view link
+instead; the rest of her own Google account (profile, photo, settings) she manages herself. porchkit without a desktop answers every call as unavailable.
 `browser_send` sends the chat a screenshot (as a photo), a download (`browser_downloads` lists them) or the
 page as a PDF, within Telegram's limits for a bot (10 MB a photo, 50 MB a file; `src/capabilities/browser/files.ts`).
 Saving one onto the computer is the computer's own tool, `browser_save` (into `~/inbox/browser/`;
 `src/capabilities/computer/browser-save.ts`): owner-only, and in a group delegated only by `delegate: [computer]`.
+`browser_upload` gives a page a file (up to 20 MB): a photo or file sent in the chat (fetched by the server,
+which alone holds the bot token) or a browser download, set on a file input by its ref or handed to the page's
+next file chooser. A file from the computer is the computer's `browser_upload_from_computer`, owner-only and
+delegated by `delegate: [computer]` like `browser_save`.
 
 ## Each chat's computer
 
