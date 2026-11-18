@@ -16,7 +16,8 @@
  *      in ~/inbox on the computer, byte for byte
  *   3. the owner asks her to open a shop: her own browser (porchkit's `/browse`, the fake's made-up shop):
  *      browser_open, then browser_click on a ref from the page text it answered with, both in the session
- *      `chat-<id>`; the browser's prompt section and tools are offered
+ *      `chat-<id>`; the browser's prompt section and tools are offered; then the owner asks for a screenshot:
+ *      browser_send queues it and the sender sends it to the DM as a photo, exactly once
  *
  *   bun scripts/e2e-read.ts
  */
@@ -75,6 +76,8 @@ let readsWhenFirstTool = -1;
 
 /** [what the newest user message contains, what the model does]: the first match wins (matched as JSON). */
 const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
+  [/Sent a screenshot of A teapot - Example Shop/, () => say("There it is.")],
+  [/send me a screenshot of it/, () => use("browser_send", { what: "screenshot", caption: "the teapot" })],
   [/Title: A teapot - Example Shop/, () => say("The teapot page is open.")],
   [/Title: Example Shop/, () => use("browser_click", { ref: "e1" })],
   [/open the example shop/, () => use("browser_open", { url: SHOP })],
@@ -216,6 +219,12 @@ check(
 check(porch.browse.sessions.get(`chat-${dmChat}`)?.at(-1) === SHOP_ITEM, "the window is on the item's page");
 check(toolsOffered.includes("mcp__shuvi__browser_open") && toolsOffered.includes("mcp__shuvi__browser_request_purchase"), "the browser's tools are offered");
 check(bodies.some((b) => b.includes("## Your browser")), "the browser's section is in the system prompt");
+await until("the turn to close", turnsIdle);
+
+tg.updates.push(dmUpdate(4, "send me a screenshot of it"));
+await replied("There it is.", "the turn sent a screenshot");
+const photos = tg.sent("sendPhoto");
+check(photos.length === 1 && Number(photos[0]!.chat_id) === OWNER && photos[0]!.caption === "the teapot", `the screenshot reached the DM as a photo, once (${JSON.stringify(photos.map((p) => ({ chat: p.chat_id, caption: p.caption })))})`);
 await until("the turn to close", turnsIdle);
 
 // ---- 4. the token: nowhere on disk under the data dir, nor in the server's log ---------------------------

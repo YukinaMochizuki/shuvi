@@ -34,6 +34,10 @@ import { createHash } from "node:crypto";
  *                       `browse.takeover` is 409; Google account pages 403 owner_only; `internal.example` 403
  *                       egress_refused; a screenshot is a PNG served by GET /files/<key>. `DELETE
  *                       /browse/sessions/<s>` 204. Every act is recorded in `calls` (`of("/browse/sessions/")`).
+ *                       `GET /browse/sessions/<s>/downloads` lists `browse.downloads` (`addDownload` puts one there,
+ *                       its file served by GET /files/<key> once completed); the act `pdf` answers `pdf: {key,
+ *                       bytes}` (a small made-up PDF). `browse.reportBytes` makes a screenshot's or a PDF's answer
+ *                       claim that size (a large file without the bytes).
  *
  * Errors by URL (any endpoint but /browse): one containing `private` is 422 unavailable, `busy` 429 (Retry-After 180),
  * `internal.example` 403 egress_refused, `broken` 502, `slow` 504. `failNext(path, …)` queues one answer for
@@ -97,7 +101,14 @@ export interface FakeBrowse {
   sessions: Map<string, string[]>;
   /** The confirm / prompt open in a session. */
   dialogs: Map<string, FakeDialog>;
+  /** Each session's downloads, as GET /browse/sessions/<s>/downloads lists them. */
+  downloads: Map<string, { key: string | null; name: string; bytes: number; mime: string; state: string }[]>;
+  /** A size a screenshot's or a PDF's answer claims instead of its own. */
+  reportBytes?: number;
 }
+
+/** The fake page's PDF. */
+export const FAKE_PDF = new TextEncoder().encode("%PDF-1.4\n% a made-up PDF for tests\n%%EOF\n");
 
 export const X_POST = "https://x.com/example/status/1234567890";
 export const REDDIT_POST = "https://www.reddit.com/r/example/comments/abc123/an_example_thread/";
@@ -149,7 +160,7 @@ export class FakePorchkit {
   private readonly fetches = new Map<string, { url: string; reads: number; state: string }>();
   private readonly queued = new Map<string, { status: number; body: Record<string, unknown>; headers?: Record<string, string> }[]>();
   private server: ReturnType<typeof Bun.serve>;
-  readonly browse: FakeBrowse = { available: true, takeover: false, google: true, liveUrl: "https://porchkit.example.ts.net:8444/", maxSessions: 3, sessions: new Map(), dialogs: new Map() };
+  readonly browse: FakeBrowse = { available: true, takeover: false, google: true, liveUrl: "https://porchkit.example.ts.net:8444/", maxSessions: 3, sessions: new Map(), dialogs: new Map(), downloads: new Map() };
 
   constructor(readonly token = FAKE_TOKEN) {
     this.videos.set("https://www.youtube.com/watch?v=abc123def45", {
@@ -349,6 +360,8 @@ export class FakePorchkit {
         sessions: [...b.sessions].map(([session, h]) => ({ session, url: h.at(-1) ?? "about:blank", title: SHOP_PAGES[h.at(-1) ?? ""]?.title ?? "", idle_seconds: 5 })),
       });
     }
+    const dl = path.match(/^\/browse\/sessions\/([A-Za-z0-9_-]{1,64})\/downloads$/);
+    if (method === "GET" && dl) return Response.json({ downloads: b.downloads.get(dl[1]!) ?? [] });
     const m = path.match(/^\/browse\/sessions\/([A-Za-z0-9_-]{1,64})(\/act)?$/);
     if (!m) return fail(404, "not_found", `no route ${method} ${path}`);
     const id = m[1]!;
@@ -432,7 +445,11 @@ export class FakePorchkit {
         break;
       case "screenshot": {
         const key = this.keep(`screenshot-${here}`, TINY_PNG, "image/png");
-        return Response.json({ session: id, url: here, title: page?.title ?? "", checkout: isCheckout, notes: [], screenshot: { key, width: 1, height: 1, bytes: TINY_PNG.length } });
+        return Response.json({ session: id, url: here, title: page?.title ?? "", checkout: isCheckout, notes: [], screenshot: { key, width: 1, height: 1, bytes: b.reportBytes ?? TINY_PNG.length } });
+      }
+      case "pdf": {
+        const key = this.keep(`pdf-${here}`, FAKE_PDF, "application/pdf");
+        return Response.json({ session: id, url: here, title: page?.title ?? "", checkout: isCheckout, notes: [], pdf: { key, bytes: b.reportBytes ?? FAKE_PDF.length } });
       }
       default:
         return fail(400, "bad_request", `unknown action ${action}`);
@@ -449,6 +466,15 @@ export class FakePorchkit {
       checkout: now === SHOP_CHECKOUT,
       notes,
     });
+  }
+
+  /** A download in `session`'s window; its key (null unless completed). */
+  addDownload(session: string, name: string, bytes: Uint8Array, mime: string, state = "completed"): string | null {
+    const key = state === "completed" ? this.keep(`download-${session}-${name}`, bytes, mime) : null;
+    const list = this.browse.downloads.get(session) ?? [];
+    list.push({ key, name, bytes: bytes.length, mime, state });
+    this.browse.downloads.set(session, list);
+    return key;
   }
 
   /** A file of `/read`'s answers, kept for GET /files/<key>; returns its key. */

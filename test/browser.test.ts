@@ -68,7 +68,7 @@ describe("the capability", () => {
     const on = enabledCapabilities(p.env());
     expect(on.some((c) => c.capability.id === "browser")).toBe(true);
     expect(browser.always).toBeUndefined();
-    expect(browser.ownerOnly).toBeUndefined();
+    expect(browser.ownerOnly).toBeUndefined(); // browser_save, which writes to the computer, is the computer's
 
     const policy = policyOf(`
 chats:
@@ -110,6 +110,8 @@ chats:
       "browser_close",
       "browser_status",
       "browser_request_purchase",
+      "browser_downloads",
+      "browser_send",
     ]);
   });
 });

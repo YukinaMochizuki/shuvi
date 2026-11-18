@@ -1,5 +1,5 @@
 import { DEFAULT_SECRETS_FILE, dataDirFrom } from "../../env.ts";
-import { porchkitConfig } from "../../porchkit/client.ts";
+import { porchkitConfig, type PorchkitConfig } from "../../porchkit/client.ts";
 import type { Env } from "../types.ts";
 import type { HangarConfig } from "./hangar/client.ts";
 
@@ -49,6 +49,8 @@ export interface ComputerConfig {
    * enables it, `video_sheet` is media's (a link or a file), not this capability's (a file only).
    */
   mediaOn: boolean;
+  /** porchkit, when it is set up: browser_save fetches a browser download or PDF from its file cache (index.ts). */
+  porchkit: PorchkitConfig | null;
 }
 
 /** Where the chat's home is mounted, and whose it is, in the base image. */
@@ -90,6 +92,7 @@ export function computerConfig(env: Env): ComputerConfig | null {
     applyStepSec: positive(env.SHUVI_COMPUTER_APPLY_STEP_SEC, 900),
     inboxWaitMs: positive(env.SHUVI_COMPUTER_INBOX_WAIT_SEC, 30) * 1000,
     mediaOn: porchkitConfig(env) !== null,
+    porchkit: porchkitConfig(env),
   };
 }
 

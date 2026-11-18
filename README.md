@@ -131,6 +131,10 @@ cart never needs it). A page's alert is accepted by porchkit; a confirm or promp
 answers it with `browser_dialog`; an approved action that opens one carries its approval to accepting that
 one dialog (same window, within 2 minutes), so a "Confirm and pay?" after the approved click needs no second card. Google account and payment pages are his: she
 sends him the live view link instead. porchkit without a desktop answers every call as unavailable.
+`browser_send` sends the chat a screenshot (as a photo), a download (`browser_downloads` lists them) or the
+page as a PDF, within Telegram's limits for a bot (10 MB a photo, 50 MB a file; `src/capabilities/browser/files.ts`).
+Saving one onto the computer is the computer's own tool, `browser_save` (into `~/inbox/browser/`;
+`src/capabilities/computer/browser-save.ts`): owner-only, and in a group delegated only by `delegate: [computer]`.
 
 ## Each chat's computer
 
