@@ -3,8 +3,9 @@
  * reaches it with a bearer token; porchkit fetches anonymously, keeps each site's rate budget and caches
  * what it fetched.
  *
- * WHO USES IT: the media capability (src/capabilities/media/) makes every call here: reading a link
- * (`read_link`, `save_link`), probe, subtitles, sheets of a link, fetches, the prewarm. The computer capability reads only `porchkitConfig`, to know
+ * WHO USES IT: the media capability (src/capabilities/media/) makes the media and reading calls here: reading a link
+ * (`read_link`, `save_link`), probe, subtitles, sheets of a link, fetches, the prewarm. The browser capability
+ * (src/capabilities/browser/) makes the `/browse` calls: shuvi's own desktop, driven one action at a time. The computer capability reads only `porchkitConfig`, to know
  * whether media is on (`ComputerConfig.mediaOn`: then media's video_sheet stands in for its own). The
  * dependency between the two capabilities runs the other way: media imports from computer what a file's
  * sheet and a fetch's copy need (`computersFor`, `localSheet`, the sheet schema, `exec.ts`, `state.ts`).
@@ -26,6 +27,13 @@
  *   POST /media/fetch {url, quality?}                start a download: {key, state, bytes, total}
  *   GET  /media/fetch/<key>                          its progress
  *   GET  /files/<key>                                the file, with Range
+ *   GET  /browse/status                              the desktop: available, takeover, signed in, the live view's link
+ *   POST /browse/sessions/<session>/act {action, …, approved?}
+ *                                                    one browser action in a chat's window (opened on the first);
+ *                                                    the page's snapshot, `checkout`, `notes`, an open `dialog`;
+ *                                                    a screenshot is a file key; `{action: "dialog", accept, text?}`
+ *                                                    answers a confirm / prompt
+ *   DELETE /browse/sessions/<session>                close that window
  *
  * Errors are `{error, detail, ...}`; `PorchkitError` carries them, and `describe` turns one into a plain
  * sentence for the model (what happened, what to do). A URL porchkit answered with (a sheet's) is fetched
@@ -232,6 +240,42 @@ export interface Raw {
 
 export type ReadAnswer = Post | Page | Raw;
 
+// ---- /browse (porchkit's docs/decisions/desktop.md; the fields shuvi reads) --------------------------------
+
+/** A session id porchkit accepts: shuvi sends `chat-<chat id>`. */
+export const BROWSE_SESSION = /^[A-Za-z0-9_-]{1,64}$/;
+
+export interface BrowseStatus {
+  available: boolean;
+  takeover: boolean;
+  signed_in?: { google?: boolean | null } | null;
+  live_url?: string | null;
+  sessions?: { session: string; url?: string | null; title?: string | null; idle_seconds?: number | null }[];
+}
+
+/** One action's body, as the wrapper takes it, plus porchkit's `approved`. */
+export type BrowseAction = { action: string; approved?: boolean } & Record<string, unknown>;
+
+export interface BrowseAnswer {
+  session?: string;
+  url?: string | null;
+  title?: string | null;
+  /** The page as text, already capped by the desktop; absent for a screenshot. */
+  snapshot?: string | null;
+  tabs?: { index: number; url?: string | null; title?: string | null; active?: boolean }[];
+  /** porchkit thinks the page is a checkout: placing the order needs `approved`. */
+  checkout?: boolean;
+  notes?: string[];
+  screenshot?: { key: string; width?: number | null; height?: number | null; bytes?: number | null } | null;
+  /**
+   * A JS `confirm` / `prompt` the action opened, still open (no snapshot then): every other act on the session is
+   * 409 `dialog_open` until `{action: "dialog", accept, text?}` answers it. An alert is accepted by porchkit (a note).
+   */
+  dialog?: { type: "confirm" | "prompt" | string; message?: string | null; default_prompt?: string | null } | null;
+  /** Not in porchkit's contract for an act yet; read when it is there. */
+  signed_in?: { google?: boolean | null } | null;
+}
+
 /**
  * A file key porchkit answered with, checked before it goes into a URL path. The contract's keys are 32
  * lowercase hex characters; this accepts a little more (a short run of URL-safe characters) and refuses
@@ -356,7 +400,7 @@ export class Porchkit {
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
-  private async call(method: "GET" | "POST", path: string, body?: unknown, headers: Record<string, string> = {}, signal?: AbortSignal): Promise<Response> {
+  private async call(method: "GET" | "POST" | "DELETE", path: string, body?: unknown, headers: Record<string, string> = {}, signal?: AbortSignal): Promise<Response> {
     const timeout = AbortSignal.timeout(this.cfg.timeoutMs);
     let res: Response;
     try {
@@ -384,7 +428,7 @@ export class Porchkit {
     throw new PorchkitError(res.status, code, typeof b.detail === "string" ? b.detail : res.statusText || `HTTP ${res.status}`, b, Number.isFinite(ra) && ra > 0 ? ra : undefined);
   }
 
-  private async json<T>(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  private async json<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     return (await (await this.call(method, path, body, {}, signal)).json()) as T;
   }
 
@@ -423,6 +467,20 @@ export class Porchkit {
 
   fetchStatus(key: string, signal?: AbortSignal): Promise<FetchStatus> {
     return this.json("GET", `/media/fetch/${encodeURIComponent(key)}`, undefined, signal);
+  }
+
+  browseStatus(): Promise<BrowseStatus> {
+    return this.json("GET", "/browse/status");
+  }
+
+  browseAct(session: string, body: BrowseAction): Promise<BrowseAnswer> {
+    if (!BROWSE_SESSION.test(session)) throw new PorchkitError(0, "bad_request", "a session id porchkit does not take");
+    return this.json("POST", `/browse/sessions/${session}/act`, body);
+  }
+
+  async browseClose(session: string): Promise<void> {
+    if (!BROWSE_SESSION.test(session)) throw new PorchkitError(0, "bad_request", "a session id porchkit does not take");
+    await this.call("DELETE", `/browse/sessions/${session}`);
   }
 
   /** Bytes [start, end] (inclusive) of a fetched file, its total size and its media type. */

@@ -18,7 +18,7 @@ bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
 bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, an unknown group approved
 bun scripts/e2e-media.ts    # videos from links against a fake porchkit (test/fake-porchkit.ts) and a fake Hangar
-bun scripts/e2e-read.ts     # reading links (read_link, save_link, the prewarm) against the same fakes
+bun scripts/e2e-read.ts     # reading links (read_link, save_link, the prewarm) against the same fakes, and her browser (/browse): open, click
 bun scripts/e2e-drain.ts    # SIGTERM drains: a running turn finishes and is delivered; the deadline stops and retries
 bun scripts/live-demo.ts series   # by hand, needs a local Chromium (CHROME_PATH): the console's live pages in a real browser, screenshots; `idle 10`: resources
 bun run db:generate         # after any change to src/store/schema.ts
@@ -32,6 +32,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 |---|---|
 | what is stored, and the exactly-once keys | `src/store/schema.ts` |
 | videos from links (porchkit): who may look, who may fetch, the prewarm (which messages: `isTrigger`; which links: all, through `/read`) and its accounting | `src/capabilities/media/index.ts`, then `prewarm.ts`, `fetch.ts`; the client and its error texts: `src/porchkit/client.ts` |
+| her own browser (porchkit `/browse`): the tools, the session per chat, a page's dialogs, the error texts, who may use it; a purchase's card and its one-use approval | `src/capabilities/browser/index.ts`, `purchase.ts`; the client: `src/porchkit/client.ts` |
 | reading links (porchkit `/read`): read_link's rendering and images, save_link, which links a prewarm reads, web_fetch's removal | `src/capabilities/media/read.ts`, `links.ts` (`prewarmLinks`), `prewarm.ts`; `src/capabilities/web/index.ts` |
 | a capability's hook on each new inbound message (with the chat's policy), a tool owner-only in some calls, a capability's own credential | `src/capabilities/types.ts` (`inbound`, `InboundEventContext`, `ownerOnlyWhen` / `ownerOnlyNote`, `secrets`) |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |

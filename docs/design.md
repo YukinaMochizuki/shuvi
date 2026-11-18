@@ -421,6 +421,15 @@ Where a forward came from and the text being replied to are recorded as event fi
   gets none. The framework never puts what was fetched into the turn's input: it only says what is ready
   ("(Prepared: #53's link — read_link returns at once.)"), and the assistant asks when it wants it. Each
   prewarm is recorded with whether the turn then used it.
+- **Her own browser** goes through porchkit too (`src/capabilities/browser/`): a real Chrome on the
+  owner's home machine, signed in to accounts made for her, driven step by step through `/browse` with
+  generic tools (no per-site scripts), one window per chat. Unlike reading, it is not anonymous and not
+  limited to reading: a chat whose policy enables `browser` may have her act on a site, anyone there may
+  ask, and the owner watches or takes over from a live view. Money never moves without him: porchkit
+  refuses the action that may place an order (a final-step button anywhere; on a checkout page any button,
+  Enter, a submit or accepting a dialog; accepting a dialog that reads like ordering) unless shuvi says it is approved, and shuvi
+  says so only for one action carrying an approval card the owner answered (one card, one action, that
+  chat only). Google account and payment pages are the owner's own.
 - **Images**: photos and static stickers go to the model as images. Animated (tgs) and video (webm)
   stickers become a thumbnail or one frame, with their emoji and pack. The server downloads them
   (`media/<file_unique_id>`, once per file); a turn waits a few seconds at most for one still downloading

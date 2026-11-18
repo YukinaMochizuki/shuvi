@@ -19,7 +19,23 @@ import { createHash } from "node:crypto";
  *                       leaves a video's transcript and sheet out, as porchkit does. Its files (images,
  *                       posters, the page's whole text and original) are served by GET /files/<key>.
  *
- * Errors by URL (any endpoint): one containing `private` is 422 unavailable, `busy` 429 (Retry-After 180),
+ *   /browse             as porchkit's docs/decisions/desktop.md ("API"): `GET /browse/status` from `browse`;
+ *                       `POST /browse/sessions/<s>/act` opens the session's window on its first act (at most
+ *                       `browse.maxSessions`, then 503 busy); a made-up shop (`SHOP`): its home page links to an
+ *                       item and has buttons that raise an alert (accepted, a note), a confirm and a prompt; the
+ *                       item's page has "Add to cart" and "立即購買" (never guarded) leading to a checkout page
+ *                       (`checkout: true`). The guard, as porchkit's: without `approved: true`, 403
+ *                       approval_required for a click on a final-step button (`FINAL_STEP`) anywhere, and on the
+ *                       checkout page for any button click, Enter, type with submit, or accepting a dialog; and for
+ *                       accepting a dialog whose message reads like `FINAL_STEP` anywhere. The checkout's "Pay"
+ *                       opens a confirm "Confirm and pay NT$1,280?". While a confirm / prompt is open
+ *                       (`browse.dialogs`, settable by a test) every act but `dialog` is 409 dialog_open; the act
+ *                       that opened it answers with `dialog` and no snapshot. A ref not on the page is 422 bad_ref;
+ *                       `browse.takeover` is 409; Google account pages 403 owner_only; `internal.example` 403
+ *                       egress_refused; a screenshot is a PNG served by GET /files/<key>. `DELETE
+ *                       /browse/sessions/<s>` 204. Every act is recorded in `calls` (`of("/browse/sessions/")`).
+ *
+ * Errors by URL (any endpoint but /browse): one containing `private` is 422 unavailable, `busy` 429 (Retry-After 180),
  * `internal.example` 403 egress_refused, `broken` 502, `slow` 504. `failNext(path, …)` queues one answer for
  * the next call of a path. Every request is recorded (`calls`), with whether it carried the token.
  */
@@ -30,7 +46,58 @@ export const TINY_JPEG = Buffer.from(
   "base64",
 );
 
+/** A 1x1 PNG: every screenshot of the fake desktop. */
+export const TINY_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+
 export const FAKE_TOKEN = "pk-fake-token-0123456789abcdef";
+
+/** The fake desktop's made-up shop. */
+export const SHOP = "https://shop.example.com/";
+export const SHOP_ITEM = "https://shop.example.com/item/42";
+export const SHOP_CHECKOUT = "https://shop.example.com/checkout";
+export const SHOP_DONE = "https://shop.example.com/order/done";
+
+type FakeDialog = { type: "alert" | "confirm" | "prompt"; message: string; default_prompt?: string | null; /** Where accepting it leads. */ then?: string };
+
+/** Each page of the shop: its title, and its elements by ref ([role, name, where a click leads, the dialog it raises]). */
+const SHOP_PAGES: Record<string, { title: string; refs: Record<string, [string, string, string | null, FakeDialog?]> }> = {
+  [SHOP]: {
+    title: "Example Shop",
+    refs: {
+      e1: ["link", "A teapot", SHOP_ITEM],
+      e2: ["searchbox", "Search", null],
+      e3: ["button", "Show tip", null, { type: "alert", message: "Free shipping today" }],
+      e4: ["button", "Clear history", null, { type: "confirm", message: "Clear your browsing history?" }],
+      e5: ["button", "Gift message", null, { type: "prompt", message: "Your gift message?", default_prompt: "Enjoy!" }],
+    },
+  },
+  [SHOP_ITEM]: { title: "A teapot - Example Shop", refs: { e1: ["button", "Add to cart", SHOP_CHECKOUT], e2: ["link", "Home", SHOP], e3: ["button", "立即購買", SHOP_CHECKOUT] } },
+  [SHOP_CHECKOUT]: {
+    title: "Checkout - Example Shop",
+    refs: {
+      e1: ["textbox", "Note to seller", null],
+      e2: ["button", "Place order", SHOP_DONE],
+      e3: ["button", "Pay", null, { type: "confirm", message: "Confirm and pay NT$1,280?", then: SHOP_DONE }],
+    },
+  },
+  [SHOP_DONE]: { title: "Thank you - Example Shop", refs: { e1: ["link", "Home", SHOP] } },
+};
+const OWNER_ONLY_HOSTS = ["accounts.google.com", "myaccount.google.com", "pay.google.com", "payments.google.com"];
+/** Final-step words, as porchkit's table (a sample): a click on such a button, or accepting such a dialog, places an order. */
+export const FINAL_STEP = /place (this |the )?order|pay now|confirm and pay|確認付款|送出訂單|下單/i;
+
+export interface FakeBrowse {
+  /** Whether a desktop is configured at all (false: every /browse call 503 unavailable). */
+  available: boolean;
+  takeover: boolean;
+  google: boolean | null;
+  liveUrl: string | null;
+  maxSessions: number;
+  /** Open sessions: their history (the last is the current page). */
+  sessions: Map<string, string[]>;
+  /** The confirm / prompt open in a session. */
+  dialogs: Map<string, FakeDialog>;
+}
 
 export const X_POST = "https://x.com/example/status/1234567890";
 export const REDDIT_POST = "https://www.reddit.com/r/example/comments/abc123/an_example_thread/";
@@ -82,6 +149,7 @@ export class FakePorchkit {
   private readonly fetches = new Map<string, { url: string; reads: number; state: string }>();
   private readonly queued = new Map<string, { status: number; body: Record<string, unknown>; headers?: Record<string, string> }[]>();
   private server: ReturnType<typeof Bun.serve>;
+  readonly browse: FakeBrowse = { available: true, takeover: false, google: true, liveUrl: "https://porchkit.example.ts.net:8444/", maxSessions: 3, sessions: new Map(), dialogs: new Map() };
 
   constructor(readonly token = FAKE_TOKEN) {
     this.videos.set("https://www.youtube.com/watch?v=abc123def45", {
@@ -108,6 +176,9 @@ export class FakePorchkit {
   of(path: string): PorchCall[] {
     return this.calls.filter((c) => c.path.startsWith(path));
   }
+
+  /** Paths whose next answer starts (200) and then breaks off mid-body: a connection dropped while it was read. */
+  readonly dropNext = new Set<string>();
 
   failNext(path: string, status: number, body: Record<string, unknown>, headers?: Record<string, string>): void {
     this.queued.set(path, [...(this.queued.get(path) ?? []), { status, body, ...(headers ? { headers } : {}) }]);
@@ -139,6 +210,20 @@ export class FakePorchkit {
     if (!authed) return Response.json({ error: "unauthorized", detail: "no valid bearer token" }, { status: 401 });
     const q = this.queued.get(u.pathname)?.shift();
     if (q) return Response.json(q.body, { status: q.status, ...(q.headers ? { headers: q.headers } : {}) });
+    if (u.pathname.startsWith("/browse/")) {
+      const answer = this.browseRoute(req.method, u.pathname, body);
+      if (!this.dropNext.delete(u.pathname)) return answer;
+      const half = (await answer.text()).slice(0, 10);
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode(half));
+            c.error(new Error("dropped"));
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }
 
     const url = typeof body.url === "string" ? body.url : "";
     if (url) {
@@ -247,6 +332,123 @@ export class FakePorchkit {
       return new Response(all.subarray(start, end + 1), { status: 206, headers: { "content-type": "video/mp4", "content-range": `bytes ${start}-${end}/${all.length}` } });
     }
     return Response.json({ error: "not_found", detail: `no route ${req.method} ${u.pathname}` }, { status: 404 });
+  }
+
+  // ---- /browse --------------------------------------------------------------------------------------------
+
+  private browseRoute(method: string, path: string, body: Record<string, unknown>): Response {
+    const fail = (status: number, error: string, detail: string) => Response.json({ error, detail }, { status });
+    const b = this.browse;
+    if (!b.available) return fail(503, "unavailable", "no desktop is configured");
+    if (method === "GET" && path === "/browse/status") {
+      return Response.json({
+        available: true,
+        takeover: b.takeover,
+        signed_in: { google: b.google },
+        live_url: b.liveUrl,
+        sessions: [...b.sessions].map(([session, h]) => ({ session, url: h.at(-1) ?? "about:blank", title: SHOP_PAGES[h.at(-1) ?? ""]?.title ?? "", idle_seconds: 5 })),
+      });
+    }
+    const m = path.match(/^\/browse\/sessions\/([A-Za-z0-9_-]{1,64})(\/act)?$/);
+    if (!m) return fail(404, "not_found", `no route ${method} ${path}`);
+    const id = m[1]!;
+    if (method === "DELETE" && !m[2]) {
+      b.sessions.delete(id);
+      return new Response(null, { status: 204 });
+    }
+    if (method !== "POST" || !m[2]) return fail(404, "not_found", `no route ${method} ${path}`);
+    if (b.takeover) return fail(409, "takeover", "the owner holds the live view; wait or ask him");
+    let h = b.sessions.get(id);
+    if (!h) {
+      if (b.sessions.size >= b.maxSessions) return fail(503, "busy", `${b.maxSessions} sessions are open`);
+      b.sessions.set(id, (h = ["about:blank"]));
+    }
+    const here = h.at(-1)!;
+    const page = SHOP_PAGES[here];
+    const host = (url: string) => {
+      try {
+        return new URL(url).hostname;
+      } catch {
+        return "";
+      }
+    };
+    const isCheckout = here === SHOP_CHECKOUT;
+    const needs = (cond: boolean) => (cond && body.approved !== true ? fail(403, "approval_required", "that could place an order; it needs approved: true") : null);
+    const action = String(body.action ?? "");
+    const open = b.dialogs.get(id);
+    if (open && action !== "dialog") return fail(409, "dialog_open", `a ${open.type} is open; answer it with the dialog action`);
+    const notes: string[] = [];
+    switch (action) {
+      case "open": {
+        const url = String(body.url ?? "");
+        if (OWNER_ONLY_HOSTS.includes(host(url))) return fail(403, "owner_only", "the owner does this through the live view");
+        if (url.includes("internal.example")) return fail(403, "egress_refused", "the address is not public");
+        h.push(url);
+        break;
+      }
+      case "snapshot":
+      case "wait":
+      case "scroll":
+        break;
+      case "click": {
+        const r = page?.refs[String(body.ref)];
+        if (!r) return fail(422, "bad_ref", "no such ref in the latest snapshot");
+        const g = needs(FINAL_STEP.test(r[1]) || (isCheckout && r[0] === "button"));
+        if (g) return g;
+        if (r[3]?.type === "alert") notes.push(`dialog: alert "${r[3].message}" (accepted)`);
+        else if (r[3]) {
+          b.dialogs.set(id, r[3]);
+          const p = SHOP_PAGES[here];
+          return Response.json({ session: id, url: here, title: p?.title ?? "", tabs: [{ index: 0, url: here, title: p?.title ?? "", active: true }], checkout: isCheckout, notes: [], dialog: { type: r[3].type, message: r[3].message, default_prompt: r[3].default_prompt ?? null } });
+        }
+        if (r[2]) h.push(r[2]);
+        break;
+      }
+      case "type": {
+        if (body.ref !== undefined && !page?.refs[String(body.ref)]) return fail(422, "bad_ref", "no such ref in the latest snapshot");
+        const g = needs(isCheckout && body.submit === true);
+        if (g) return g;
+        break;
+      }
+      case "press": {
+        const g = needs(isCheckout && body.key === "Enter");
+        if (g) return g;
+        break;
+      }
+      case "dialog": {
+        if (!open) return fail(409, "no_dialog", "no dialog is open");
+        const g = needs(body.accept === true && (isCheckout || FINAL_STEP.test(open.message)));
+        if (g) return g;
+        b.dialogs.delete(id);
+        notes.push(`dialog: ${open.type} "${open.message}" (${body.accept === true ? "accepted" : "dismissed"})`);
+        if (body.accept === true && open.then) h.push(open.then);
+        break;
+      }
+      case "back":
+        if (h.length > 1) h.pop();
+        break;
+      case "tab":
+        if (body.index !== 0) return fail(422, "bad_ref", "no such tab");
+        break;
+      case "screenshot": {
+        const key = this.keep(`screenshot-${here}`, TINY_PNG, "image/png");
+        return Response.json({ session: id, url: here, title: page?.title ?? "", checkout: isCheckout, notes: [], screenshot: { key, width: 1, height: 1, bytes: TINY_PNG.length } });
+      }
+      default:
+        return fail(400, "bad_request", `unknown action ${action}`);
+    }
+    const now = h.at(-1)!;
+    const p = SHOP_PAGES[now];
+    const lines = [`URL: ${now}`, `Title: ${p?.title ?? ""}`, ...Object.entries(p?.refs ?? {}).map(([ref, [role, name]]) => `[${ref}] ${role} "${name}"`)];
+    return Response.json({
+      session: id,
+      url: now,
+      title: p?.title ?? "",
+      snapshot: lines.join("\n"),
+      tabs: [{ index: 0, url: now, title: p?.title ?? "", active: true }],
+      checkout: now === SHOP_CHECKOUT,
+      notes,
+    });
   }
 
   /** A file of `/read`'s answers, kept for GET /files/<key>; returns its key. */

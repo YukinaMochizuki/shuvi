@@ -14,6 +14,9 @@
  *      read_link gives the first part and how to read on; the model
  *      reads on with offset, then saves the whole text and the page as received with save_link: both land
  *      in ~/inbox on the computer, byte for byte
+ *   3. the owner asks her to open a shop: her own browser (porchkit's `/browse`, the fake's made-up shop):
+ *      browser_open, then browser_click on a ref from the page text it answered with, both in the session
+ *      `chat-<id>`; the browser's prompt section and tools are offered
  *
  *   bun scripts/e2e-read.ts
  */
@@ -22,7 +25,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/store/db.ts";
 import { FakeHangar } from "../test/fake-hangar.ts";
-import { FakePorchkit, LONG_HTML, LONG_MARKDOWN, LONG_PAGE, X_POST } from "../test/fake-porchkit.ts";
+import { FakePorchkit, LONG_HTML, LONG_MARKDOWN, LONG_PAGE, SHOP, SHOP_ITEM, X_POST } from "../test/fake-porchkit.ts";
 import { dmUpdate, FakeTelegram, OWNER } from "../test/helpers.ts";
 
 const t0 = Date.now();
@@ -72,6 +75,9 @@ let readsWhenFirstTool = -1;
 
 /** [what the newest user message contains, what the model does]: the first match wins (matched as JSON). */
 const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
+  [/Title: A teapot - Example Shop/, () => say("The teapot page is open.")],
+  [/Title: Example Shop/, () => use("browser_click", { ref: "e1" })],
+  [/open the example shop/, () => use("browser_open", { url: SHOP })],
   [/Saved on your computer: ~\/inbox\//, () => say("Saved it on your computer.")],
   [/\(from character 20,000 of/, () => use("save_link", { url: LONG_PAGE, what: "both" })],
   [/To read on, call read_link again with offset: 20000/, () => use("read_link", { url: LONG_PAGE, offset: 20000 })],
@@ -196,7 +202,23 @@ check(readFileSync(join(inbox, md!), "utf8") === LONG_MARKDOWN, "the whole text,
 check(readFileSync(join(inbox, html!), "utf8") === LONG_HTML, "the page as received, byte for byte");
 await until("the turn to close", turnsIdle);
 
-// ---- 3. the token: nowhere on disk under the data dir, nor in the server's log ---------------------------
+// ---- 3. her own browser: open a page, click a ref from its text ----------------------------------------
+
+tg.updates.push(dmUpdate(3, "open the example shop and look at the teapot"));
+await replied("The teapot page is open.", "the turn opened the shop and clicked through");
+const acts = porch.of("/browse/sessions/").map((c) => ({ path: c.path, ...c.body }));
+const dmChat = (db.$client.query("select id from chats where tg_chat_id = ?").get(OWNER) as { id: number }).id;
+const actPath = `/browse/sessions/chat-${dmChat}/act`;
+check(
+  JSON.stringify(acts) === JSON.stringify([{ path: actPath, action: "open", url: SHOP }, { path: actPath, action: "click", ref: "e1" }]),
+  `porchkit got browser_open, then browser_click on e1, in the chat's session (${JSON.stringify(acts)})`,
+);
+check(porch.browse.sessions.get(`chat-${dmChat}`)?.at(-1) === SHOP_ITEM, "the window is on the item's page");
+check(toolsOffered.includes("mcp__shuvi__browser_open") && toolsOffered.includes("mcp__shuvi__browser_request_purchase"), "the browser's tools are offered");
+check(bodies.some((b) => b.includes("## Your browser")), "the browser's section is in the system prompt");
+await until("the turn to close", turnsIdle);
+
+// ---- 4. the token: nowhere on disk under the data dir, nor in the server's log ---------------------------
 const files = (dir: string): string[] => readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? files(join(dir, f)) : [join(dir, f)]));
 const all = files(dataDir);
 const leaked = all.filter((f) => readFileSync(f).includes(Buffer.from(porch.token)));
