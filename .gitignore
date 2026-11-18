@@ -1,4 +1,6 @@
 node_modules/
+# Written by release.yml for the image (src/capabilities/releases/git.ts); a checkout reads git itself.
+release-log.txt
 # Runtime data: the SQLite file and home/ (persona, memory, policy). Private; never committed.
 data/
 *.db

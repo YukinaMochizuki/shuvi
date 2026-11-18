@@ -45,6 +45,7 @@ describe("the owner's DM system prompt is byte-identical to before the capabilit
     const db = memDb();
     ownerSays(db, "hi");
     const chat = getChat(db, ownerChatId(db))!;
+    // releases stays on: it adds a tool and no section, so the prompt is unchanged by it.
     const caps = enabledCapabilities({ SHUVI_WEB: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" });
     expect(buildSystemPrompt(fixtureHome(), chat, { name: "Owner" }, caps)).toBe(fixture("owner-dm-prompt.no-web.txt"));
   });
@@ -52,9 +53,9 @@ describe("the owner's DM system prompt is byte-identical to before the capabilit
 
 describe("the registry", () => {
   test("speech is first and always on; web, vision and schedules follow their variables", () => {
-    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks", "stickers", "computer", "groups", "media"]);
-    expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks", "stickers", "groups"]);
-    expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_STICKERS: "off", SHUVI_GROUPS: "off" }).map((e) => e.capability.id)).toEqual(["speech", "jobs"]);
+    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks", "stickers", "computer", "groups", "media", "releases"]);
+    expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks", "stickers", "groups", "releases"]);
+    expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_RELEASES: "off", SHUVI_STICKERS: "off", SHUVI_GROUPS: "off" }).map((e) => e.capability.id)).toEqual(["speech", "jobs"]);
   });
 
   test("workstream is on only with its URL and token", () => {
@@ -77,7 +78,7 @@ describe("the registry", () => {
       capabilities: enabledCapabilities({}),
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "pass" }])),
     });
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "list_stickers", "view_stickers", "sticker", "add_sticker_pack", "remove_sticker_pack", "send", "propose_policy", "read_policy", "explain_policy", "web_fetch"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "list_stickers", "view_stickers", "sticker", "add_sticker_pack", "remove_sticker_pack", "send", "propose_policy", "read_policy", "explain_policy", "release_log", "web_fetch"]);
     const names = capabilityTools(enabledCapabilities({}), { db, home: fixtureHome(), chat: getChat(db, ownerChatId(db))!, turnId: turn.id, timeZone: "UTC", owner: {}, state: {} as never }).map((b) => b.serverName);
     expect(names).toEqual(["shuvi", "web"]);
   });
@@ -113,7 +114,7 @@ describe("a capability added to the registry", () => {
   const registry = [...CAPABILITIES, probe];
 
   test("is off unless its own variable enables it", () => {
-    expect(enableCapabilities(registry, {}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks", "stickers", "groups"]);
+    expect(enableCapabilities(registry, {}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks", "stickers", "groups", "releases"]);
   });
 
   test("its tool reaches the turn after the others, and its section reaches the prompt in registry order", async () => {
@@ -130,7 +131,7 @@ describe("a capability added to the registry", () => {
       makeAdapter: (b) => (adapter = new ScriptedAdapter(b, [{ tool: "probe" }, { token: "done" }])),
     });
     expect(outcome).toBe("done");
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "list_stickers", "view_stickers", "sticker", "add_sticker_pack", "remove_sticker_pack", "send", "propose_policy", "read_policy", "explain_policy", "web_fetch", "probe"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "read_playbook", "find_sticker", "list_stickers", "view_stickers", "sticker", "add_sticker_pack", "remove_sticker_pack", "send", "propose_policy", "read_policy", "explain_policy", "release_log", "web_fetch", "probe"]);
     const result = adapter.toolResults[0]!.result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
     expect(result).toContain(`hello from turn ${turn.id}`);
 

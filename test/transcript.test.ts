@@ -15,7 +15,7 @@ import { claimTurn, getTurn } from "../src/store/turns.ts";
 import { buildConsoleFixture } from "./console-fixture.ts";
 import { memDb, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./helpers.ts";
 
-const CAPS = { SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_GROUPS: "off" };
+const CAPS = { SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_STICKERS: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_RELEASES: "off", SHUVI_GROUPS: "off" };
 
 describe("the turn transcript", () => {
   test("records the prompt by section, the input with image references, and the timeline in order", async () => {

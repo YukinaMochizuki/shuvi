@@ -83,7 +83,7 @@ function newHome(): string {
   return home;
 }
 
-const ENV = { SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off" };
+const ENV = { SHUVI_WEB: "off", SHUVI_STICKERS: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_RELEASES: "off" };
 
 async function groupTurn(db: Db, policy: Policy, script: Step[], env: Record<string, string> = ENV) {
   const chat = groupChat(db);

@@ -12,7 +12,9 @@ Photos and stickers are shown to the model as images (the `vision` capability).
 She keeps her own memory in `home/`, looks back through every chat, runs schedules and background jobs, and
 asks workstream's desk. The sticker library (`home/stickers/*.yaml`, the `stickers` capability) lets her
 find, view, send and learn stickers; a pack is added in conversation with `add_sticker_pack`. With Hangar
-configured, each chat has its own computer. Other media are later slices on the same skeleton.
+configured, each chat has its own computer. She can also tell people what is new about her: `release_log` (the
+`releases` capability) lists what changed in the code she runs since a date, a commit or a PR, sorted into
+features, fixes and internal changes. Other media are later slices on the same skeleton.
 
 The framework itself never speaks in the assistant's chat. It talks to the owner through a second bot, the
 **control bot** (`SHUVI_CONTROL_BOT_TOKEN`; create it with BotFather like the first): `/status` lists
@@ -297,7 +299,9 @@ one check **`ci passed`** on `main`: it is green only when every other job is, n
 `ghcr.io/<owner>/shuvi:sha-<12>`, and points `ghcr.io/<owner>/shuvi:main` at it only if that commit is still the
 tip of `main` (so a late release of an older commit never moves it back). It authenticates with the workflow's
 own `GITHUB_TOKEN` (`packages: write`), so the repository needs no secret for it. The image carries the OCI
-`source` and `revision` labels, which link the package to this repository.
+`source` and `revision` labels, which link the package to this repository, and its release log: `main`'s
+history up to that commit, written beside the code as `release-log.txt` (the image has no `.git`) and read by
+`release_log`. The checkout is therefore not shallow.
 
 The image is **public** on ghcr, as the code is. After the package's first push, make it public once: on
 GitHub, the package `shuvi` → Package settings → Change visibility → Public. (ghcr creates a new package

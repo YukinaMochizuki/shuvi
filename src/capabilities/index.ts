@@ -4,6 +4,7 @@ import { jobs } from "./jobs/index.ts";
 import { media } from "./media/index.ts";
 import { memory } from "./memory/index.ts";
 import { playbooks } from "./playbooks/index.ts";
+import { releases } from "./releases/index.ts";
 import { retrieval } from "./retrieval/index.ts";
 import { schedules } from "./schedules/index.ts";
 import { speech } from "./speech/index.ts";
@@ -36,6 +37,7 @@ export const CAPABILITIES: readonly Capability<any>[] = [
   computer,
   groups,
   media,
+  releases,
 ];
 
 /** The capabilities enabled in this process, in registry order. */
