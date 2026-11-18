@@ -1,25 +1,32 @@
+import type { ModelChoice } from "agent-runtime";
 import { listOpenAICompatModels, probeModel, type ModelProbe, type OpenAICompatProvider } from "agent-runtime/openai-compat";
 import { providerKey } from "../agent/backend.ts";
-import { cardsListing, catalogChanged, finishListing } from "../control/model-cards.ts";
+import { cardsListing, catalogChanged, claudeListed, finishListing, type Listed } from "../control/model-cards.ts";
 import type { Db } from "../store/db.ts";
-import { getProvider, modelByRowId, modelsToProbe, recordProbe, type ProbeRecord, type Provider } from "../store/models.ts";
+import { getProvider, modelByRowId, modelsToProbe, recordProbe, unknownKind, type ProbeRecord, type Provider } from "../store/models.ts";
 import { IMMEDIATE } from "../store/turns.ts";
+import { listClaudeInChild } from "./list-claude.ts";
 
 /**
- * The server's background work on the model catalog (docs/design.md §13), for OpenAI-compatible providers only:
+ * The server's background work on the model catalog (docs/design.md §13):
  *
  *   PROBES    a model whose row asks for one (`probe_started_at`; store/models.ts `markProbing`: on add, and on
  *             Re-probe in `/models` or the console) is probed with agent-runtime `probeModel`: one small request
  *             offering a tool, then a small picture unless the owner set the model's vision himself. Its result
  *             is written to the row (`recordProbe`), and the cards showing it are edited (control/model-cards.ts
- *             `catalogChanged`).
- *   LISTINGS  a `/provider add` card waiting for its endpoint's `/models` gets the list
- *             (agent-runtime `listOpenAICompatModels`), or the reason there is none.
+ *             `catalogChanged`). Only OpenAI-compatible models are probed: a Claude model is the CLI's.
+ *   LISTINGS  a `/provider add` card (or the console's listing) waiting for its provider's models gets the list,
+ *             or the reason there is none: an endpoint's `/models` (agent-runtime `listOpenAICompatModels`), or
+ *             what Claude Code offers a Claude login (agent-runtime `listClaudeModels`: a throwaway query whose
+ *             empty prompt never runs, so nothing is spent), as model-cards.ts `claudeListed` rows. A Claude
+ *             login is listed in a child process (list-claude.ts), never here: its CLI gets no bot token, and a
+ *             cancel or the timeout (a minute, `CLAUDE_LISTING_TIMEOUT_MS`: it takes well under a second) kills it.
  *
  * Both are background promises held HERE, in the server only: the rows say what is asked, so a probe or a
  * listing a restart interrupted is simply started again by the next pass (`backgroundPass`). One at a time per
  * model and per card. The rows are also how one is STOPPED: a probe cancelled (`cancelProbe`) or asked again, a
- * listing card closed, or either's row removed, and the next pass aborts its request in flight; its result,
+ * listing card closed, or either's row removed, and the next pass aborts its request in flight (a Claude
+ * listing: kills its child); its result,
  * if any, is dropped. The key is read from the secrets file as a turn reads it (agent/backend.ts), only to
  * send it; any trace of it in an endpoint's error is cut before it is stored.
  */
@@ -31,7 +38,12 @@ export interface BackgroundDeps {
   timeoutMs?: number;
   /** Test seam. */
   fetch?: typeof fetch;
+  /** Test seam: what a Claude login lists (default list-claude.ts `listClaudeInChild`). */
+  listClaude?: (configDir: string | null, signal: AbortSignal) => Promise<ModelChoice[]>;
 }
+
+/** How long a Claude login's listing may take: Claude Code answers from what it knows, with no endpoint to wake. */
+export const CLAUDE_LISTING_TIMEOUT_MS = 60_000;
 
 /** How long one probe request or listing may take by default (the console shows it beside the time waited). */
 export const DEFAULT_TIMEOUT_MS = 5 * 60_000;
@@ -142,15 +154,40 @@ async function runProbe(db: Db, rowId: number, asked: string, signal: AbortSigna
   }, IMMEDIATE);
 }
 
+/** `work`, or a rejection once `signal` aborts (the cancel or the timeout), even if `work` does not heed it. */
+function until<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+    if (signal.aborted) return stop();
+    signal.addEventListener("abort", stop, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop));
+  });
+}
+
 async function runListing(db: Db, cardId: number, providerName: string, signal: AbortSignal, deps: BackgroundDeps): Promise<void> {
   const p = getProvider(db, providerName);
   let c: OpenAICompatProvider | null = null;
   let result: Parameters<typeof finishListing>[2];
   try {
     if (!p) throw new Error(`there is no provider named "${providerName}"`);
-    c = connection(p, deps.secretsFile);
-    const listed = await listOpenAICompatModels(c, deps.fetch ?? fetch, AbortSignal.any([signal, AbortSignal.timeout(deps.timeoutMs ?? DEFAULT_TIMEOUT_MS)]));
-    result = { listed: listed.map((l) => ({ model: l.model, ...(l.reported.contextWindow ? { contextWindow: l.reported.contextWindow } : {}) })) };
+    const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const bounded = AbortSignal.any([signal, AbortSignal.timeout(p.kind === "claude" ? Math.min(timeoutMs, CLAUDE_LISTING_TIMEOUT_MS) : timeoutMs)]);
+    let listed: Listed[];
+    switch (p.kind) {
+      case "claude": {
+        listed = claudeListed(await until((deps.listClaude ?? listClaudeInChild)(p.configDir, bounded), bounded));
+        // Claude Code always offers some model; none means it could not tell, not that the login has none.
+        if (!listed.length) throw new Error("Claude Code listed no models for this login");
+        break;
+      }
+      case "openai-compat":
+        c = connection(p, deps.secretsFile);
+        listed = (await listOpenAICompatModels(c, deps.fetch ?? fetch, bounded)).map((l) => ({ model: l.model, ...(l.reported.contextWindow ? { contextWindow: l.reported.contextWindow } : {}) }));
+        break;
+      default:
+        listed = unknownKind(p.kind);
+    }
+    result = { listed };
   } catch (e) {
     result = { error: clip(scrub(e instanceof Error ? e.message : String(e), c)) };
   }

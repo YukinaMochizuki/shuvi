@@ -118,8 +118,10 @@ The same operations as the control bot's `/models` and `/provider`, through the 
 
 - **Providers**: each one's kind (Claude login or OpenAI-compatible), base URL or config dir, key reference
   (`<profile>.<VAR>`, a name in the secrets file: a key is never entered or shown), and model count. Add one
-  (an OpenAI-compatible provider's `/models` is then listed, to add models from with one press; one whose
-  listing gives no context length asks for it), list its models again, or remove it with its models.
+  (its models are then listed, to add from with one press: an OpenAI-compatible provider's `/models`, where one
+  whose listing gives no context length asks for it; or what Claude Code offers a Claude login, each alias,
+  which follows new versions, beside the fixed version it stands for now), list its models again, or remove it
+  with its models.
 - **Models**: the default (★), each one's context window, vision (set by you, or from its probe), its last
   probe, and the chats whose own model it is. Make one the default, re-probe it, set vision on, off or auto
   (follow the probe), edit its label and context window, add one by its id, or remove it.

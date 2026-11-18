@@ -1,5 +1,5 @@
 import { consoleListing, type ConsoleListing } from "../control/model-cards.ts";
-import { DEFAULT_TIMEOUT_MS } from "../server/probes.ts";
+import { CLAUDE_LISTING_TIMEOUT_MS, DEFAULT_TIMEOUT_MS } from "../server/probes.ts";
 import type { Db } from "../store/db.ts";
 import { chatsOn, listModels, listProviders, probePending, type CatalogModel, type ProviderKind } from "../store/models.ts";
 import { ago, dot, href, html, page, raw, when, type Raw } from "./html.ts";
@@ -8,7 +8,8 @@ import { chatById } from "./queries.ts";
 
 /**
  * The Settings page (`/settings`, DESIGN.md "Settings"): the model catalog's providers and models, their
- * probes, adding a provider and the models its endpoint lists, removing either. The control bot's `/models`
+ * probes, adding a provider and the models it lists (an endpoint's `/models`, or what Claude Code offers a Claude
+ * login), removing either. The control bot's `/models`
  * and `/provider` cards (control/model-cards.ts) do the same operations, and the texts here are theirs.
  *
  * This file READS and draws: the catalog (store/models.ts), the chats on each model, the console's listing
@@ -195,8 +196,8 @@ function mss(ms: number): string {
 }
 
 /** The time something pending has waited since `iso`, beside how long a request may take before it gives up. */
-const waitedLine = (iso: string | null, now: number, each = false) =>
-  html`<span class="waited">waited ${mss(iso ? now - Date.parse(iso) : 0)}<span class="faint"> · ${each ? "each request gives up" : "gives up"} after ${mss(DEFAULT_TIMEOUT_MS)}</span></span>`;
+const waitedLine = (iso: string | null, now: number, each = false, limitMs = DEFAULT_TIMEOUT_MS) =>
+  html`<span class="waited">waited ${mss(iso ? now - Date.parse(iso) : 0)}<span class="faint"> · ${each ? "each request gives up" : "gives up"} after ${mss(limitMs)}</span></span>`;
 
 /**
  * A write form's htmx attributes: post in the background, mark the form busy and disable its button until the
@@ -286,7 +287,7 @@ ${rowNote(v, p.name)}</div>
 <div class="sact">${
     confirming
       ? ""
-      : html`${p.kind === "openai-compat" ? action(ctx, "/settings/providers/list", "List models", { provider: p.name }) : ""}<a class="btn danger" href="${href("/settings", { remove: `provider:${p.name}` })}#${anchor("provider", p.name)}"${inPage}>Remove</a>`
+      : html`${action(ctx, "/settings/providers/list", "List models", { provider: p.name })}<a class="btn danger" href="${href("/settings", { remove: `provider:${p.name}` })}#${anchor("provider", p.name)}"${inPage}>Remove</a>`
   }</div>
 ${confirming ? confirmProvider(ctx, v, p) : ""}
 </div>`;
@@ -404,7 +405,7 @@ ${rowNote(v, "add-provider")}
 <label>Base URL<input type="url" name="base_url" value="${f.base_url ?? ""}" placeholder="http://10.0.0.5:8000/v1" class="mono"><span class="hint">OpenAI-compatible: the endpoint, up to /v1</span></label>
 <label>Key reference<input type="text" name="api_key" placeholder="home.VLLM_KEY" class="mono" autocomplete="off"><span class="hint">OpenAI-compatible, optional: <span class="mono">&lt;profile&gt;.&lt;VAR&gt;</span> in the secrets file. Never the key itself.</span></label>
 <label>Config dir<input type="text" name="config_dir" value="${f.config_dir ?? ""}" placeholder="/home/shuvi/.claude-work" class="mono"><span class="hint">Claude login, optional: empty for the server user's own login</span></label>
-<div class="fbtns"><button type="submit" class="btn primary">Add provider</button><span class="hint">An OpenAI-compatible provider's <span class="mono">/models</span> is listed next, to pick from.</span></div>
+<div class="fbtns"><button type="submit" class="btn primary">Add provider</button><span class="hint">Its models are listed next, to pick from: an endpoint's <span class="mono">/models</span>, or what Claude Code offers the login.</span></div>
 </form></details>
 </section>`;
 }
@@ -428,30 +429,39 @@ export function modelPart(ctx: SettingsContext, v: SettingsView, id: string): Ra
 
 function listingPanel(ctx: SettingsContext, v: SettingsView, l: ConsoleListing): Raw {
   const p = v.providers.find((x) => x.name === l.provider);
-  const where = html`<span class="mono">${l.provider}</span> <span class="faint">(${p?.baseUrl ?? "?"}${p?.apiKey ? html`, key <span class="mono">${p.apiKey}</span>` : ""})</span>`;
+  const claude = p?.kind === "claude";
+  const where = claude
+    ? html`<span class="mono">${l.provider}</span> <span class="faint">(Claude login, ${p?.configDir ?? "the server user's login"})</span>`
+    : html`<span class="mono">${l.provider}</span> <span class="faint">(${p?.baseUrl ?? "?"}${p?.apiKey ? html`, key <span class="mono">${p.apiKey}</span>` : ""})</span>`;
   const card = { card: String(l.cardId) };
   switch (l.state) {
     case "listing":
       return html`<div class="listing"><p class="lh">${dot("running")}<span>Listing the models of ${where}…</span></p>
-<p class="meta">${waitedLine(l.since, ctx.now)}. A scaled-to-zero endpoint boots first, which can take minutes.</p>
+<p class="meta">${waitedLine(l.since, ctx.now, false, claude ? CLAUDE_LISTING_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)}. ${claude ? "Claude Code is asked what it offers this login; that takes a few seconds and spends nothing." : "A scaled-to-zero endpoint boots first, which can take minutes."}</p>
 <div class="cbtns">${action(ctx, "/settings/listings/close", "Cancel the listing", card)}<span class="meta">The provider stays.</span></div></div>`;
     case "failed":
       return html`<div class="listing bad"><p class="lh">${dot("failed")}<span>Listing the models of ${where} failed:</span></p>
 <p class="mono err-text">${l.error}</p>
-<p class="meta">The provider stays. Add a model by its id under <a href="#models">Models</a>, with its context window, or try again.</p>
+<p class="meta">The provider stays. Add a model by its id under <a href="#models">Models</a>${claude ? html` (an alias such as <span class="mono">sonnet</span>, or a version such as <span class="mono">claude-sonnet-5-5</span>)` : ", with its context window"}, or try again.</p>
 <div class="cbtns">${action(ctx, "/settings/providers/list", "List again", { provider: l.provider })}${action(ctx, "/settings/listings/close", "Done", card)}</div></div>`;
     case "listed": {
       const ours = new Map(v.models.filter((m) => m.provider === l.provider).map((m) => [m.id, m]));
       return html`<div class="listing"><p class="lh">${dot("done")}<span>${where} lists ${plural(l.listed.length, "model")}. ✓ = in the catalog.</span></p>
+${claude ? html`<p class="meta">An alias follows new versions, and a chat on it keeps its conversation across them; a fixed version runs that version only.</p>` : ""}
 ${l.note ? html`<p class="row-note ${/^(Could not|The listing gives no)/.test(l.note) ? "failed" : "ok"}" role="status">${l.note}</p>` : ""}
-<div class="lrows">${l.listed.map((x, i) => {
+<div class="lrows${claude ? " about" : ""}">${l.listed.map((x, i) => {
         const have = ours.get(`${l.provider}/${x.model}`);
         let right: Raw;
         if (have) right = html`<span class="have c-done">✓ in the catalog</span>${have.probe ? html`<span class="small">${probeLine(have.probe, ctx)}</span>` : ""}`;
-        else if (x.contextWindow) right = action(ctx, "/settings/listings/add", "Add", { ...card, index: String(i) });
+        else if (claude || x.contextWindow) right = action(ctx, "/settings/listings/add", "Add", { ...card, index: String(i) });
         else
           right = html`<form method="post" action="/settings/listings/add" class="inline ctxask"${writes("/settings/listings/add")}>${csrfField(ctx)}<input type="hidden" name="card" value="${card.card}"><input type="hidden" name="index" value="${String(i)}"><input type="number" name="context_window" min="1" step="1" required placeholder="context window" aria-label="context window for ${x.model}" inputmode="numeric"><button type="submit" class="btn">Add</button></form>`;
-        return html`<div class="lrow${have ? " have" : ""}"><span class="lname mono">${x.model}</span><span class="lctx">${x.contextWindow ? tokensOf(x.contextWindow) : html`<span class="c-lost">no context length listed</span>`}</span><span class="lact">${right}</span></div>`;
+        const about = claude
+          ? html`${x.label ? html`<b>${x.label}</b>` : ""}${x.label && x.detail ? " · " : ""}${x.detail ? html`<span class="faint">${x.detail}</span>` : ""}`
+          : x.contextWindow
+            ? tokensOf(x.contextWindow)
+            : html`<span class="c-lost">no context length listed</span>`;
+        return html`<div class="lrow${have ? " have" : ""}"><span class="lname mono">${x.model}</span><span class="lctx">${about}</span><span class="lact">${right}</span></div>`;
       })}</div>
 <div class="cbtns">${action(ctx, "/settings/listings/close", "Done", card)}</div></div>`;
     }

@@ -149,16 +149,17 @@ One column (max 1080px, centred), reached from the top bar's Turns / Settings. W
 ```
 
 - **Providers**: name, kind, base URL or config dir, the key's `<profile>.<VAR>` (never a value), model
-  count; List models (an endpoint), Remove.
+  count; List models (an endpoint's `/models`, or what Claude Code offers a Claude login), Remove.
 - **Models**, under their provider: ★ default, id, label; context window, vision with where it came from
   ("set by you" / "from probe" / "not known yet"), the probe (checking with the time waited and a request's
   limit, ok with latency, ⚠ text-instead, ⚠ failed with its reason, when); the chats whose own model it is
   (the default: how many chats run on it). Make default, Re-probe (Cancel probe while one is pending), Vision
   on / off / auto (auto: follow the probe), Edit (label, context window), Remove. A warned row has an amber
   edge, a failed one red.
-- **Add a provider**: the form; an endpoint's `/models` listing then shows in a panel (listing… with the time
+- **Add a provider**: the form; its models' listing then shows in a panel (listing… with the time
   waited and Cancel, the list with Add per model, ✓ for those in the catalog and a context-window field where the listing gives none,
-  or why it failed), until Done.
+  or why it failed), until Done. A Claude login's rows give the label and what each is (an alias that follows
+  new versions, or a fixed version) instead of a context window, and add with no field.
 - **Remove** is a link: the row opens a red confirmation panel naming what it removes and the chats on it.
   On the default (or its provider) the page shows the control bot's refusal instead. Edit opens a form in
   the row the same way.

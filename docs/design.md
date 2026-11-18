@@ -493,7 +493,9 @@ stickers:
     default cannot be removed). `/models add <provider>/<model> [<context_window>]` adds one directly.
   - `/provider add <name> <base_url> [<profile>.<VAR>]` adds an OpenAI-compatible endpoint; the card then
     lists the endpoint's `/models`, and pressing one adds it with the listed context window. `/provider add
-    <name> claude [<config_dir>]` adds a Claude login; `/provider remove <name>` names its models and the
+    <name> claude [<config_dir>]` adds a Claude login; its card lists what Claude Code offers that login
+    (each alias, which follows new versions, then the fixed version it stands for now), and pressing one adds
+    it with its label. `/provider remove <name>` names its models and the
     chats on them, then removes them all. A key is only ever named (`<profile>.<VAR>` in the secrets file),
     never entered or shown.
   - Planned: jobs and cost in `/status`, cancelling jobs, reverting `home/`.
