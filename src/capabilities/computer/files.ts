@@ -136,30 +136,43 @@ export function inboxNote(e: ChatEvent): string | null {
 }
 
 /**
+ * Read `path` from the computer for something that leaves it (a message, a web page): its size checked against
+ * `limit` first (`tooLarge` says why not), then its bytes, refused if they hold a known secret value (`verb`: what
+ * was not done, "sent" / "uploaded"). Throws ComputerError.
+ */
+export async function readFromComputer(x: ExecContext, cfg: ComputerConfig, path: string, limit: number, tooLarge: (size: string) => string, verb: string): Promise<Uint8Array> {
+  const statScript = `p=${shq(path)}; ${resolvePath("p")}; [ -f "$p" ] || { echo "no such file: $p" >&2; exit 2; }; stat -L -c %s -- "$p"`;
+  const run = (script: string, max?: number) => x.computers.withLease(x.chat, 120_000, async () => (await awaitInbox(x.db, x.chat.id, cfg.inboxWaitMs), x.computers.hangar.run(getComputer(x.db, x.chat.id)!.container, { command: ["bash", "-c", script], workingDir: HOME_DIR }, max)));
+  const st = (await run(statScript)).value;
+  if (st.code !== 0) throw new ComputerError(st.stderr.trim() || `cannot read ${path} (exit ${st.code})`);
+  const size = Number(Buffer.from(st.stdout).toString("utf8").trim());
+  if (size > limit) throw new ComputerError(tooLarge(mb(size)));
+  const read = (await run(`p=${shq(path)}; ${resolvePath("p")}; cat -- "$p"`, limit + 1)).value;
+  if (read.code !== 0) throw new ComputerError(read.stderr.trim() || `cannot read ${path} (exit ${read.code})`);
+  const red = redactionFor(cfg.secretsFile);
+  const leaked = red.contains(read.stdout);
+  if (leaked === "?") throw new ComputerError(`${path} was not ${verb}: ${red.why}, so it cannot be checked for secret values.`);
+  if (leaked) throw new ComputerError(`${path} contains the value of the secret profile "${leaked}"; it was not ${verb}.`);
+  return read.stdout;
+}
+
+/**
  * Read `path` from the computer and queue it to be sent. Returns the tool's text, or throws ComputerError.
  */
 export async function sendFromComputer(x: ExecContext, s: TurnState, cfg: ComputerConfig, a: { path: string; caption?: string; as: "document" | "photo" }): Promise<string> {
   if (s.passed) throw new ComputerError("This turn has already passed; nothing was sent.");
-  const limit = a.as === "photo" ? PHOTO_LIMIT : DOCUMENT_LIMIT;
-  const statScript = `p=${shq(a.path)}; ${resolvePath("p")}; [ -f "$p" ] || { echo "no such file: $p" >&2; exit 2; }; stat -L -c %s -- "$p"`;
-  const run = (script: string, max?: number) => x.computers.withLease(x.chat, 120_000, async () => (await awaitInbox(x.db, x.chat.id, cfg.inboxWaitMs), x.computers.hangar.run(getComputer(x.db, x.chat.id)!.container, { command: ["bash", "-c", script], workingDir: HOME_DIR }, max)));
-  const st = (await run(statScript)).value;
-  if (st.code !== 0) throw new ComputerError(st.stderr.trim() || `cannot read ${a.path} (exit ${st.code})`);
-  const size = Number(Buffer.from(st.stdout).toString("utf8").trim());
-  if (size > limit) {
-    throw new ComputerError(
+  const bytes = await readFromComputer(
+    x,
+    cfg,
+    a.path,
+    a.as === "photo" ? PHOTO_LIMIT : DOCUMENT_LIMIT,
+    (size) =>
       a.as === "photo"
-        ? `${a.path} is ${mb(size)}; Telegram takes photos from a bot up to 10 MB. Send it with send_file (up to 50 MB), or make it smaller (e.g. ffmpeg or convert).`
-        : `${a.path} is ${mb(size)}; Telegram's limit for a file sent by a bot is 50 MB. Compress it or split it (e.g. zip, split -b 45m) and send the parts.`,
-    );
-  }
-  const read = (await run(`p=${shq(a.path)}; ${resolvePath("p")}; cat -- "$p"`, limit + 1)).value;
-  if (read.code !== 0) throw new ComputerError(read.stderr.trim() || `cannot read ${a.path} (exit ${read.code})`);
-  const red = redactionFor(cfg.secretsFile);
-  const leaked = red.contains(read.stdout);
-  if (leaked === "?") throw new ComputerError(`${a.path} was not sent: ${red.why}, so it cannot be checked for secret values.`);
-  if (leaked) throw new ComputerError(`${a.path} contains the value of the secret profile "${leaked}"; it was not sent.`);
-  const caption = a.caption ? red.redact(a.caption).slice(0, 1024) : undefined;
-  queueBotFile(x.db, { dataDir: cfg.dataDir, chatId: x.chat.id, turnId: s.turnId, n: s.n++, as: a.as, name: safeName(a.path), bytes: read.stdout, source: a.path, ...(caption ? { caption } : {}) });
-  return `Sent ${a.as === "photo" ? "the photo" : "the file"} ${a.path} (${mb(read.stdout.length)}).`;
+        ? `${a.path} is ${size}; Telegram takes photos from a bot up to 10 MB. Send it with send_file (up to 50 MB), or make it smaller (e.g. ffmpeg or convert).`
+        : `${a.path} is ${size}; Telegram's limit for a file sent by a bot is 50 MB. Compress it or split it (e.g. zip, split -b 45m) and send the parts.`,
+    "sent",
+  );
+  const caption = a.caption ? redactionFor(cfg.secretsFile).redact(a.caption).slice(0, 1024) : undefined;
+  queueBotFile(x.db, { dataDir: cfg.dataDir, chatId: x.chat.id, turnId: s.turnId, n: s.n++, as: a.as, name: safeName(a.path), bytes, source: a.path, ...(caption ? { caption } : {}) });
+  return `Sent ${a.as === "photo" ? "the photo" : "the file"} ${a.path} (${mb(bytes.length)}).`;
 }

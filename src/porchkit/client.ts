@@ -36,6 +36,9 @@
  *   GET  /browse/sessions/<session>/downloads        what that window downloaded: name, size, type, state, and a
  *                                                    file key once completed
  *   POST /browse/sessions/<session>/act {action: "pdf"} the page as a PDF: `pdf: {key, bytes}`
+ *   POST /browse/sessions/<session>/uploads (bytes, X-Filename)  a file for the page: {id, name, bytes} (≤ 20 MB,
+ *                                                    ≤ 10 per session); act {action: "upload", files: [id], ref?}
+ *                                                    sets it on a file input, or arms the next file chooser
  *   DELETE /browse/sessions/<session>                close that window
  *
  * Errors are `{error, detail, ...}`; `PorchkitError` carries them, and `describe` turns one into a plain
@@ -265,6 +268,13 @@ export interface BrowseDownload {
   state: "in_progress" | "completed" | "canceled" | string;
 }
 
+/** A file porchkit holds for a session's page (`POST /browse/sessions/<s>/uploads`). */
+export interface BrowseUpload {
+  id: string;
+  name: string;
+  bytes: number;
+}
+
 /** One action's body, as the wrapper takes it, plus porchkit's `approved`. */
 export type BrowseAction = { action: string; approved?: boolean } & Record<string, unknown>;
 
@@ -420,8 +430,12 @@ export class Porchkit {
     try {
       res = await this.fetchImpl(`${this.cfg.url}${path}`, {
         method,
-        headers: { authorization: `Bearer ${this.cfg.token}`, ...(body !== undefined ? { "content-type": "application/json" } : {}), ...headers },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        headers: {
+          authorization: `Bearer ${this.cfg.token}`,
+          ...(body !== undefined ? { "content-type": body instanceof Uint8Array ? "application/octet-stream" : "application/json" } : {}),
+          ...headers,
+        },
+        ...(body !== undefined ? { body: body instanceof Uint8Array ? body : JSON.stringify(body) } : {}),
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       });
     } catch (e) {
@@ -495,6 +509,16 @@ export class Porchkit {
   async browseDownloads(session: string): Promise<BrowseDownload[]> {
     if (!BROWSE_SESSION.test(session)) throw new PorchkitError(0, "bad_request", "a session id porchkit does not take");
     return (await this.json<{ downloads?: BrowseDownload[] }>("GET", `/browse/sessions/${session}/downloads`)).downloads ?? [];
+  }
+
+  /**
+   * A file for the session's page, to set with the `upload` act. The name goes in `X-Filename`, percent-encoded
+   * when it is not plain ASCII (a header carries ASCII only).
+   */
+  async browseUpload(session: string, name: string, bytes: Uint8Array): Promise<BrowseUpload> {
+    if (!BROWSE_SESSION.test(session)) throw new PorchkitError(0, "bad_request", "a session id porchkit does not take");
+    const header = /^[\x20-\x7e]*$/.test(name) ? name : encodeURIComponent(name);
+    return (await (await this.call("POST", `/browse/sessions/${session}/uploads`, bytes, { "x-filename": header })).json()) as BrowseUpload;
   }
 
   async browseClose(session: string): Promise<void> {

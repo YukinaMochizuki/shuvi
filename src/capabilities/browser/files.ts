@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import { err, ok, type ToolDef, type ToolResult } from "agent-runtime";
 import { FILE_KEY, type BrowseAnswer, type Porchkit } from "../../porchkit/client.ts";
@@ -6,7 +8,9 @@ import { kvSet, type Chat } from "../../store/events.ts";
 import { DOCUMENT_LIMIT, PHOTO_LIMIT, queueBotFile } from "../../store/outbox.ts";
 import type { TurnState } from "../../agent/turn.ts";
 import { safeName } from "../computer/files.ts";
+import { attachmentIn, awaitAttachment, doneWithAttachment, requestAttachment } from "./attachments.ts";
 import { downloadsOf, ownKey, pdfKv } from "./keys.ts";
+import { overLimit, UPLOAD_MODES, uploadedLine, uploadToPage } from "./upload.ts";
 
 /**
  * What the browser has, out of it: its downloads, a screenshot, the page as a PDF.
@@ -19,6 +23,10 @@ import { downloadsOf, ownKey, pdfKv } from "./keys.ts";
  *                        `pdf` the page as a PDF document named from its title. Telegram's limits for a bot are
  *                        checked first (photo 10 MB, document 50 MB): over, nothing is sent and the tool says so.
  *                        Anyone whose message starts a turn here may ask, as for every browser tool.
+ *   browser_upload(source, ref?)  gives the page a file: one someone sent here (fetched by the server, which alone
+ *                        may download from Telegram: attachments.ts) or one of the window's downloads; up to 20 MB,
+ *                        checked before anything is posted (upload.ts). Anyone may ask, as for every browser tool.
+ *                        A file from the computer is the computer's tool, browser_upload_from_computer.
  *   browser_save(key)    is the COMPUTER's tool (computer/index.ts): saving onto the computer is the computer's
  *                        authority, delegated by `delegate: [computer]`. It uses the same keys (keys.ts).
  *
@@ -47,6 +55,10 @@ export interface FileToolsContext {
   computer: boolean;
   /** The browser's own error text for a porchkit failure (index.ts `describeBrowse`). */
   describe: (e: unknown) => string;
+  /** An action's answer as the model reads it (index.ts `renderAnswer`). */
+  render: (a: BrowseAnswer) => string;
+  /** How long browser_upload waits for the server to fetch a sent file (attachments.ts). */
+  attachWaitMs: number;
 }
 
 export function fileTools(x: FileToolsContext): ToolDef[] {
@@ -123,6 +135,75 @@ export function fileTools(x: FileToolsContext): ToolDef[] {
     },
   };
 
-  return [downloads, send];
+  const upload: ToolDef<{ source: { message?: number; download?: string }; ref?: string }> = {
+    name: "browser_upload",
+    description:
+      "Give the page a file: a photo or file someone sent in this chat (`source: {message: <#number>}`) or one of this chat's browser downloads (`source: {download: <key>}`), up to 20 MB. " +
+      UPLOAD_MODES,
+    inputSchema: {
+      source: z
+        .object({
+          message: z.number().int().positive().optional().describe("The #number of a message with a photo or file"),
+          download: z.string().min(1).max(128).optional().describe("A download's key (browser_downloads)"),
+        })
+        .describe("Exactly one of message or download"),
+      ref: z.string().min(1).max(32).optional().describe("A file input's ref from the page text; leave out to arm the page's next file chooser"),
+    },
+    async handler(a): Promise<ToolResult> {
+      const { message, download } = a.source ?? {};
+      if ((message === undefined) === (download === undefined)) return err("Give exactly one source: {message: <#number>} or {download: <key>}.");
+      let file: { name: string; bytes: Uint8Array };
+      if (message !== undefined) {
+        const at = attachmentIn(db, chat, message);
+        if ("error" in at) return err(at.error.includes("still downloading") ? at.error : `${at.error} Nothing was uploaded.`);
+        if ("photo" in at) {
+          // A photo anyone sent: vision's copy, already in the data dir.
+          let bytes: Uint8Array;
+          try {
+            bytes = new Uint8Array(readFileSync(join(x.dataDir, at.photo.path)));
+          } catch {
+            return err(`#${message}'s photo is not on hand any more. Nothing was uploaded.`);
+          }
+          file = { name: at.photo.name, bytes };
+          return finish(file);
+        }
+        const name = safeName(at.attachment.name);
+        if (at.attachment.size) {
+          const over = overLimit(name, at.attachment.size);
+          if (over) return err(over);
+        }
+        requestAttachment(db, message);
+        const got = await awaitAttachment(db, x.dataDir, message, x.attachWaitMs);
+        if ("error" in got) return err(got.pending ? got.error : `${got.error} Nothing was uploaded.`);
+        file = { name, bytes: got.bytes };
+      } else {
+        const k = await ownKey(db, porch, chat, download!, x.describe);
+        if ("error" in k) return err(`${k.error} Nothing was uploaded.`);
+        const name = safeName(k.name);
+        const listed = overLimit(name, k.bytes ?? 0);
+        if (listed) return err(listed);
+        try {
+          file = { name, bytes: (await porch.file(download!)).bytes };
+        } catch (e) {
+          return err(`${x.describe(e)} Nothing was uploaded.`);
+        }
+      }
+      return finish(file, message);
+
+      async function finish(f: { name: string; bytes: Uint8Array }, fetched?: number): Promise<ToolResult> {
+        const over = overLimit(f.name, f.bytes.length);
+        if (over) return err(over);
+        try {
+          const ans = await uploadToPage(porch, x.session, f, a.ref);
+          if (fetched !== undefined) doneWithAttachment(db, x.dataDir, fetched);
+          return ok(`${uploadedLine(f.name, f.bytes.length, a.ref)}\n${x.render(ans)}`);
+        } catch (e) {
+          return err(`${x.describe(e)} Nothing was uploaded.`);
+        }
+      }
+    },
+  };
+
+  return [downloads, send, upload];
 }
 

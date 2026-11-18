@@ -429,7 +429,9 @@ Where a forward came from and the text being replied to are recorded as event fi
   refuses the action that may place an order (a final-step button anywhere; on a checkout page any button,
   Enter, a submit or accepting a dialog; accepting a dialog that reads like ordering) unless shuvi says it is approved, and shuvi
   says so only for one action carrying an approval card the owner answered (one card, one action, that
-  chat only). Google account and payment pages are the owner's own.
+  chat only). Google sign-in and account-security pages are the owner's own; the rest of her Google account is
+  hers. She can give a page a file sent in the chat or downloaded by the browser; a file from her computer only as
+  the computer's tool, under the computer's authority.
 - **Images**: photos and static stickers go to the model as images. Animated (tgs) and video (webm)
   stickers become a thumbnail or one frame, with their emoji and pack. The server downloads them
   (`media/<file_unique_id>`, once per file); a turn waits a few seconds at most for one still downloading

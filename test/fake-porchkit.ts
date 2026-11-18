@@ -31,7 +31,12 @@ import { createHash } from "node:crypto";
  *                       opens a confirm "Confirm and pay NT$1,280?". While a confirm / prompt is open
  *                       (`browse.dialogs`, settable by a test) every act but `dialog` is 409 dialog_open; the act
  *                       that opened it answers with `dialog` and no snapshot. A ref not on the page is 422 bad_ref;
- *                       `browse.takeover` is 409; Google account pages 403 owner_only; `internal.example` 403
+ *                       `browse.takeover` is 409; Google sign-in and account-security pages (`ownerOnlyUrl`) 403
+ *                       owner_only, the rest of the account (`PROFILE`, its "Change photo" button and file input) not;
+ *                       `POST /browse/sessions/<s>/uploads` holds a file (`browse.uploads`; > 20 MB 413 too_large,
+ *                       an 11th 409 too_many) and the act `upload` sets it on a file input (`ref`, recorded in
+ *                       `browse.inputs`) or arms the next file chooser, which a click on "Change photo" opens
+ *                       (`browse.chosen`); `internal.example` 403
  *                       egress_refused; a screenshot is a PNG served by GET /files/<key>. `DELETE
  *                       /browse/sessions/<s>` 204. Every act is recorded in `calls` (`of("/browse/sessions/")`).
  *                       `GET /browse/sessions/<s>/downloads` lists `browse.downloads` (`addDownload` puts one there,
@@ -60,6 +65,8 @@ export const SHOP = "https://shop.example.com/";
 export const SHOP_ITEM = "https://shop.example.com/item/42";
 export const SHOP_CHECKOUT = "https://shop.example.com/checkout";
 export const SHOP_DONE = "https://shop.example.com/order/done";
+/** shuvi's own Google profile page: no longer the owner's (owner decision); a file chooser and a file input. */
+export const PROFILE = "https://myaccount.google.com/personal-info";
 
 type FakeDialog = { type: "alert" | "confirm" | "prompt"; message: string; default_prompt?: string | null; /** Where accepting it leads. */ then?: string };
 
@@ -85,8 +92,18 @@ const SHOP_PAGES: Record<string, { title: string; refs: Record<string, [string, 
     },
   },
   [SHOP_DONE]: { title: "Thank you - Example Shop", refs: { e1: ["link", "Home", SHOP] } },
+  [PROFILE]: { title: "Personal info - Google Account", refs: { e1: ["button", "Change photo", null], e2: ["button", "Choose file", null], e3: ["textbox", "Name", null] } },
 };
-const OWNER_ONLY_HOSTS = ["accounts.google.com", "myaccount.google.com", "pay.google.com", "payments.google.com"];
+/** Google sign-in and account security (password, 2-Step, passkeys, recovery, deleting the account): the owner's. */
+export function ownerOnlyUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.hostname === "accounts.google.com") return true;
+    return u.hostname === "myaccount.google.com" && /^\/(security|signinoptions|two-step-verification|recovery|delete-services-or-account)/.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
 /** Final-step words, as porchkit's table (a sample): a click on such a button, or accepting such a dialog, places an order. */
 export const FINAL_STEP = /place (this |the )?order|pay now|confirm and pay|確認付款|送出訂單|下單/i;
 
@@ -103,6 +120,14 @@ export interface FakeBrowse {
   dialogs: Map<string, FakeDialog>;
   /** Each session's downloads, as GET /browse/sessions/<s>/downloads lists them. */
   downloads: Map<string, { key: string | null; name: string; bytes: number; mime: string; state: string }[]>;
+  /** Files held for each session's page (uploads), with their bytes. */
+  uploads: Map<string, { id: string; name: string; bytes: Uint8Array }[]>;
+  /** A session's next file chooser, armed with these files' names. */
+  armed: Map<string, string[]>;
+  /** What a session's file chooser got when the page opened it. */
+  chosen: Map<string, string[]>;
+  /** What each file input (`<session> <ref>`) was set to. */
+  inputs: Map<string, string[]>;
   /** A size a screenshot's or a PDF's answer claims instead of its own. */
   reportBytes?: number;
 }
@@ -160,7 +185,7 @@ export class FakePorchkit {
   private readonly fetches = new Map<string, { url: string; reads: number; state: string }>();
   private readonly queued = new Map<string, { status: number; body: Record<string, unknown>; headers?: Record<string, string> }[]>();
   private server: ReturnType<typeof Bun.serve>;
-  readonly browse: FakeBrowse = { available: true, takeover: false, google: true, liveUrl: "https://porchkit.example.ts.net:8444/", maxSessions: 3, sessions: new Map(), dialogs: new Map(), downloads: new Map() };
+  readonly browse: FakeBrowse = { available: true, takeover: false, google: true, liveUrl: "https://porchkit.example.ts.net:8444/", maxSessions: 3, sessions: new Map(), dialogs: new Map(), downloads: new Map(), uploads: new Map(), armed: new Map(), chosen: new Map(), inputs: new Map() };
 
   constructor(readonly token = FAKE_TOKEN) {
     this.videos.set("https://www.youtube.com/watch?v=abc123def45", {
@@ -210,6 +235,21 @@ export class FakePorchkit {
     const u = new URL(req.url);
     const authed = req.headers.get("authorization") === `Bearer ${this.token}`;
     let body: Record<string, unknown> = {};
+    const up = req.method === "POST" ? u.pathname.match(/^\/browse\/sessions\/([A-Za-z0-9_-]{1,64})\/uploads$/) : null;
+    if (up) {
+      const bytes = new Uint8Array(await req.arrayBuffer());
+      const name = req.headers.get("x-filename") ?? "";
+      this.calls.push({ method: req.method, path: u.pathname, body: { name, bytes: bytes.length }, authed, range: null });
+      if (!authed) return Response.json({ error: "unauthorized", detail: "no valid bearer token" }, { status: 401 });
+      if (!name) return Response.json({ error: "bad_request", detail: "X-Filename is required" }, { status: 400 });
+      if (bytes.length > 20 * 1024 * 1024) return Response.json({ error: "too_large", detail: "uploads are at most 20 MB" }, { status: 413 });
+      const list = this.browse.uploads.get(up[1]!) ?? [];
+      if (list.length >= 10) return Response.json({ error: "too_many", detail: "at most 10 uploads per session" }, { status: 409 });
+      const held = { id: `u${list.length + 1}`, name: decodeURIComponent(name), bytes };
+      list.push(held);
+      this.browse.uploads.set(up[1]!, list);
+      return Response.json({ id: held.id, name: held.name, bytes: bytes.length });
+    }
     if (req.method === "POST") {
       try {
         body = (await req.json()) as Record<string, unknown>;
@@ -394,7 +434,7 @@ export class FakePorchkit {
     switch (action) {
       case "open": {
         const url = String(body.url ?? "");
-        if (OWNER_ONLY_HOSTS.includes(host(url))) return fail(403, "owner_only", "the owner does this through the live view");
+        if (ownerOnlyUrl(url)) return fail(403, "owner_only", "the owner does this through the live view");
         if (url.includes("internal.example")) return fail(403, "egress_refused", "the address is not public");
         h.push(url);
         break;
@@ -415,6 +455,28 @@ export class FakePorchkit {
           return Response.json({ session: id, url: here, title: p?.title ?? "", tabs: [{ index: 0, url: here, title: p?.title ?? "", active: true }], checkout: isCheckout, notes: [], dialog: { type: r[3].type, message: r[3].message, default_prompt: r[3].default_prompt ?? null } });
         }
         if (r[2]) h.push(r[2]);
+        // The profile's "Change photo" opens a file chooser: an armed one takes its files.
+        const armed = b.armed.get(id);
+        if (here === PROFILE && r[1] === "Change photo" && armed) {
+          b.chosen.set(id, armed);
+          b.armed.delete(id);
+          notes.push(`file chooser: ${armed.join(", ")} (set)`);
+        }
+        break;
+      }
+      case "upload": {
+        const held = b.uploads.get(id) ?? [];
+        const ids = Array.isArray(body.files) ? (body.files as string[]) : [];
+        const names = ids.map((f) => held.find((x) => x.id === f)?.name);
+        if (!ids.length || names.some((n) => n === undefined)) return fail(422, "bad_upload", "no such upload in this session");
+        if (body.ref !== undefined) {
+          if (!page?.refs[String(body.ref)]) return fail(422, "bad_ref", "no such ref in the latest snapshot");
+          b.inputs.set(`${id} ${String(body.ref)}`, names as string[]);
+          notes.push(`files set on ${String(body.ref)}: ${names.join(", ")}`);
+        } else {
+          b.armed.set(id, names as string[]);
+          notes.push(`the next file chooser gets: ${names.join(", ")}`);
+        }
         break;
       }
       case "type": {

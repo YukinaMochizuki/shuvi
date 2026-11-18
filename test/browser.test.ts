@@ -17,7 +17,7 @@ import { recordBatch } from "../src/server/poller.ts";
 import type { Db } from "../src/store/db.ts";
 import { allChats, ensureChat, type Chat } from "../src/store/events.ts";
 import { claimTurn } from "../src/store/turns.ts";
-import { FakePorchkit, SHOP, SHOP_CHECKOUT, SHOP_DONE, TINY_PNG } from "./fake-porchkit.ts";
+import { FakePorchkit, PROFILE, SHOP, SHOP_CHECKOUT, SHOP_DONE, TINY_PNG } from "./fake-porchkit.ts";
 import { groupUpdate, memDb, OWNER, ScriptedAdapter } from "./helpers.ts";
 
 const BOT: BotIdentity = { id: 1, username: "shuvi_test_bot" };
@@ -112,6 +112,7 @@ chats:
       "browser_request_purchase",
       "browser_downloads",
       "browser_send",
+      "browser_upload",
     ]);
   });
 });
@@ -233,14 +234,27 @@ describe("errors, as the model reads them", () => {
     });
   }
 
-  test("owner_only: the owner's Google pages, with the live view link to send him", async () => {
+  test("owner_only: Google sign-in and account security are the owner's, with the live view link to send him; her own profile is hers", async () => {
     const p = porch();
     const db = memDb();
-    const r = await toolsFor(db, p, dm(db)).browser_open!({ url: "https://myaccount.google.com/security" });
+    const t = toolsFor(db, p, dm(db));
+    const r = await t.browser_open!({ url: "https://myaccount.google.com/security" });
     expect(r.isError).toBe(true);
     expect(text(r)).toBe(
-      "That page is the owner's (a Google account, security or payment page): you do not act on it. Nothing was done. Send the owner the live view link and ask him to do it himself there. The live view: https://porchkit.example.ts.net:8444/",
+      "That page is the owner's (Google sign-in or account security: password, 2-Step Verification, recovery, deleting the account): you do not act on it. Nothing was done. Send the owner the live view link and ask him to do it himself there. The live view: https://porchkit.example.ts.net:8444/",
     );
+    expect(text(await t.browser_open!({ url: "https://accounts.google.com/signin" }))).toStartWith("That page is the owner's (Google sign-in");
+    const mine = await t.browser_open!({ url: PROFILE });
+    expect(mine.isError ?? false).toBe(false);
+    expect(text(mine)).toContain('[e1] button "Change photo"');
+  });
+
+  test("the prompt: sign-in and account security are the owner's; the rest of her Google account is hers", () => {
+    expect(BROWSER_SECTION).toContain(
+      "Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from `browser_status` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.",
+    );
+    expect(BROWSER_SECTION).not.toMatch(/Google account, security and payment/);
+    expect(describeBrowse(new PorchkitError(403, "owner_only", "x"))).not.toMatch(/payment/);
   });
 
   test("the fake's own: busy past 3 sessions, takeover, a stale ref, no desktop at all", async () => {
