@@ -152,7 +152,7 @@ export async function buildConsoleFixture(opts: { pauses?: boolean; rich?: boole
   const groupEntry = (id: number) => `  "${id}":\n    trigger: [mention, reply]\n    persona: [public]\n    tools: all\n`;
   const policy = parsePolicy(`owner: ${OWNER}\nchats:\n  dm:\n    tools: all\n${[FIXTURE_GROUP.id, -100201, -100202, -100203].map(groupEntry).join("")}`);
   if ("error" in policy) throw new Error(policy.error);
-  const env = { SHUVI_DATA_DIR: dataDir, SHUVI_WEB: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_STICKERS: "off" };
+  const env = { SHUVI_DATA_DIR: dataDir, SHUVI_WEB: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_RELEASES: "off", SHUVI_STICKERS: "off" };
   const capabilities: EnabledCapability[] = opts.rich
     ? [...enabledCapabilities({ SHUVI_DATA_DIR: dataDir, SHUVI_WEB: "off", SHUVI_STICKERS: "off" }), { capability: lookAt as never, config: {} }, { capability: research as never, config: {} }]
     : [...enabledCapabilities(env), { capability: lookAt as never, config: {} }];

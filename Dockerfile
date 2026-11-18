@@ -50,9 +50,12 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production \
  && rm -rf /root/.bun/install/cache
 
-COPY tsconfig.json ./
 COPY drizzle ./drizzle
 COPY src ./src
+# The release log release.yml writes (src/capabilities/releases/git.ts): what `release_log` reads, since there is
+# no .git here. The bracket makes it optional, so a local build without one still builds (the tool then says
+# there is no log); tsconfig.json beside it keeps the COPY from ever matching nothing.
+COPY tsconfig.json release-log.tx[t] ./
 
 # The commit /status shows (src/control/bot.ts `deployedCommit`): there is no .git in the image.
 ARG REVISION=unknown

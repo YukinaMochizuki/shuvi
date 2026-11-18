@@ -1,5 +1,5 @@
-# The image takes package.json, bun.lock, tsconfig.json, drizzle/ and src/ (Dockerfile); nothing else needs
-# to reach the build, and data/ must never.
+# The image takes package.json, bun.lock, tsconfig.json, drizzle/, src/ and, when release.yml wrote it,
+# release-log.txt (Dockerfile); nothing else needs to reach the build, and data/ must never.
 .git
 .github
 .ws-cache
