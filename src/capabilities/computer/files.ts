@@ -1,10 +1,9 @@
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { max } from "drizzle-orm";
 import type { TurnState } from "../../agent/turn.ts";
 import type { Db } from "../../store/db.ts";
 import { filesCopiedFrom, type Policy } from "../../policy/policy.ts";
-import { enqueueOutbound, getChat, kvGet, kvSet, type ChatEvent, type MessageAttachment, type MessagePayload } from "../../store/events.ts";
+import { getChat, kvGet, kvSet, type ChatEvent, type MessageAttachment, type MessagePayload } from "../../store/events.ts";
+import { DOCUMENT_LIMIT, PHOTO_LIMIT, queueBotFile } from "../../store/outbox.ts";
 import { attachmentOfEvent, pendingAttachments, updateAttachment } from "../../store/media.ts";
 import { chatEvents } from "../../store/schema.ts";
 import type { TelegramFiles } from "../../telegram/files.ts";
@@ -34,15 +33,14 @@ import { acquireLease, getComputer, opHeld, releaseLease } from "./state.ts";
  * noted as not copied.
  *
  * OUTBOUND: `send_file(path)` and `send_photo(path, caption?)` read a file from the computer and queue it
- * for the sender, which alone talks to Telegram: the bytes wait in `<data dir>/outbox/` until delivered. A
+ * for the sender (store/outbox.ts), which alone talks to Telegram: the bytes wait in `<data dir>/outbox/` until delivered. A
  * bot may send documents up to 50 MB and photos up to 10 MB; past that the tool says so before reading
  * anything. A file holding a known secret value is not sent at all.
  */
 
 /** The Bot API's limits for a bot: what it may download (getFile), and send as a document or a photo. */
 export const DOWNLOAD_LIMIT = 20 * 1024 * 1024;
-export const DOCUMENT_LIMIT = 50 * 1024 * 1024;
-export const PHOTO_LIMIT = 10 * 1024 * 1024;
+export { DOCUMENT_LIMIT, PHOTO_LIMIT };
 const MAX_ATTEMPTS = 3;
 /** kv: the last seq recorded before the computer capability first ran; files up to it are skipped. */
 export const INBOX_FROM_KEY = "computer_inbox_from";
@@ -161,20 +159,7 @@ export async function sendFromComputer(x: ExecContext, s: TurnState, cfg: Comput
   const leaked = red.contains(read.stdout);
   if (leaked === "?") throw new ComputerError(`${a.path} was not sent: ${red.why}, so it cannot be checked for secret values.`);
   if (leaked) throw new ComputerError(`${a.path} contains the value of the secret profile "${leaked}"; it was not sent.`);
-  const n = s.n++;
-  const name = safeName(a.path);
-  const dir = join(cfg.dataDir, "outbox");
-  mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${s.turnId}-${n}-${name}`);
-  writeFileSync(`${file}.tmp`, read.stdout);
-  renameSync(`${file}.tmp`, file);
   const caption = a.caption ? red.redact(a.caption).slice(0, 1024) : undefined;
-  enqueueOutbound(x.db, {
-    chatId: x.chat.id,
-    kind: "bot_file",
-    payload: { as: a.as, file, name, source: a.path, bytes: read.stdout.length, ...(caption ? { caption } : {}) },
-    idemKey: `turn:${s.turnId}:${n}`,
-    turnId: s.turnId,
-  });
+  queueBotFile(x.db, { dataDir: cfg.dataDir, chatId: x.chat.id, turnId: s.turnId, n: s.n++, as: a.as, name: safeName(a.path), bytes: read.stdout, source: a.path, ...(caption ? { caption } : {}) });
   return `Sent ${a.as === "photo" ? "the photo" : "the file"} ${a.path} (${mb(read.stdout.length)}).`;
 }

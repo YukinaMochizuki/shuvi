@@ -3,7 +3,12 @@ import { err, ok, type ToolContent, type ToolDef, type ToolResult } from "agent-
 import { actingFor } from "../../agent/acting.ts";
 import { describe, Porchkit, PorchkitError, porchkitConfig, type BrowseAction, type BrowseAnswer, type BrowseStatus, type PorchkitConfig } from "../../porchkit/client.ts";
 import type { Chat } from "../../store/events.ts";
-import { defineCapability, type TurnContext } from "../types.ts";
+import { dataDirFrom } from "../../env.ts";
+import type { ChatPolicy } from "../../policy/policy.ts";
+import { computerConfig } from "../computer/config.ts";
+import { defineCapability, policyEnables, type TurnContext } from "../types.ts";
+import { fileTools } from "./files.ts";
+import { sessionOf } from "./keys.ts";
 import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_MS, USE_WITHIN_MS, releaseCarry, releasePurchase, requester, requestPurchase } from "./purchase.ts";
 
 /**
@@ -16,7 +21,10 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *             snapshot, passed through as it comes: it is capped there), so she rarely needs browser_snapshot;
  *             browser_screenshot: the page as an image (porchkit's file, fetched here with the token);
  *             browser_close; browser_status: the desktop, signed in or not, takeover, the live view's link;
- *             browser_request_purchase: the owner's card before an order is placed (purchase.ts).
+ *             browser_request_purchase: the owner's card before an order is placed (purchase.ts);
+ *             browser_downloads, browser_send (a screenshot, a download, the page as a PDF, to this chat):
+ *             files.ts. Saving one onto the computer (browser_save) is the computer capability's tool: its
+ *             authority is the computer's (`delegate: [computer]`), not the browser's.
  *   who       anyone whose message starts a turn in a chat whose policy enables `browser` (the owner decided
  *             it: groups included). Nothing here is owner-only; the purchase card is the owner's, as every
  *             card is (control/approvals.ts: only he answers).
@@ -40,12 +48,19 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
 
 export interface BrowserConfig {
   porchkit: PorchkitConfig;
+  /** The data dir: browser_send's files wait in its outbox/ (store/outbox.ts). */
+  dataDir: string;
+  /** The computer is on in this process: answers may point at its browser_save, in chats that enable it too. */
+  computer: boolean;
 }
 
 export function browserConfig(env: Record<string, string | undefined>): BrowserConfig | null {
   const porchkit = porchkitConfig(env);
-  return porchkit ? { porchkit } : null;
+  return porchkit ? { porchkit, dataDir: dataDirFrom(env), computer: computerConfig(env) !== null } : null;
 }
+
+/** This chat has the computer too (on in the process, enabled by its policy): where browser_save works. */
+const computerHere = (cfg: BrowserConfig, chatPolicy: ChatPolicy | undefined) => cfg.computer && policyEnables(chatPolicy, "computer");
 
 /** One client per configuration. */
 const clients = new WeakMap<PorchkitConfig, Porchkit>();
@@ -56,7 +71,7 @@ export function browserClient(cfg: BrowserConfig): Porchkit {
 }
 
 /** The chat's session at porchkit: `chat-<chat id>`, only `[A-Za-z0-9_-]`. */
-export const sessionOf = (chat: Pick<Chat, "id">): string => `chat-${String(chat.id).replace(/[^A-Za-z0-9_-]/g, "_")}`.slice(0, 64);
+export { sessionOf };
 
 export const BROWSER_SECTION = `## Your browser
 
@@ -64,7 +79,10 @@ This chat has a browser of your own: a real Chrome on the owner's home machine, 
 
 Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). Refs belong to the latest page text only; after anything changes the page, use the new ones. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
 
-The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google account, security and payment pages are the owner's: send him the live view link from \`browser_status\` and let him do it there.`;
+The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google account, security and payment pages are the owner's: send him the live view link from \`browser_status\` and let him do it there.
+
+\`browser_send\` sends this chat a screenshot, a download (\`browser_downloads\` lists them) or the page as a PDF.`;
+
 
 const positiveInt = z.number().int().positive();
 
@@ -449,7 +467,8 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     },
   };
 
-  return [open, snapshot, click, type, press, scroll, back, tab, wait, dialog, screenshot, close, status, purchase] as ToolDef[];
+  const files = fileTools({ db, chat, s, porch, session, dataDir: cfg.dataDir, computer: computerHere(cfg, ctx.chatPolicy), describe: (e) => describeBrowse(e) });
+  return [open, snapshot, click, type, press, scroll, back, tab, wait, dialog, screenshot, close, status, purchase, ...files] as ToolDef[];
 }
 
 export const browser = defineCapability<BrowserConfig>({

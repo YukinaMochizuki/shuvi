@@ -33,6 +33,9 @@
  *                                                    the page's snapshot, `checkout`, `notes`, an open `dialog`;
  *                                                    a screenshot is a file key; `{action: "dialog", accept, text?}`
  *                                                    answers a confirm / prompt
+ *   GET  /browse/sessions/<session>/downloads        what that window downloaded: name, size, type, state, and a
+ *                                                    file key once completed
+ *   POST /browse/sessions/<session>/act {action: "pdf"} the page as a PDF: `pdf: {key, bytes}`
  *   DELETE /browse/sessions/<session>                close that window
  *
  * Errors are `{error, detail, ...}`; `PorchkitError` carries them, and `describe` turns one into a plain
@@ -253,6 +256,15 @@ export interface BrowseStatus {
   sessions?: { session: string; url?: string | null; title?: string | null; idle_seconds?: number | null }[];
 }
 
+/** A file the session's window downloaded; `key` (GET /files/<key>) only once it is completed. */
+export interface BrowseDownload {
+  key: string | null;
+  name: string;
+  bytes: number;
+  mime: string;
+  state: "in_progress" | "completed" | "canceled" | string;
+}
+
 /** One action's body, as the wrapper takes it, plus porchkit's `approved`. */
 export type BrowseAction = { action: string; approved?: boolean } & Record<string, unknown>;
 
@@ -267,6 +279,8 @@ export interface BrowseAnswer {
   checkout?: boolean;
   notes?: string[];
   screenshot?: { key: string; width?: number | null; height?: number | null; bytes?: number | null } | null;
+  /** The page as a PDF (`{action: "pdf"}`), in the file cache. */
+  pdf?: { key: string; bytes?: number | null } | null;
   /**
    * A JS `confirm` / `prompt` the action opened, still open (no snapshot then): every other act on the session is
    * 409 `dialog_open` until `{action: "dialog", accept, text?}` answers it. An alert is accepted by porchkit (a note).
@@ -476,6 +490,11 @@ export class Porchkit {
   browseAct(session: string, body: BrowseAction): Promise<BrowseAnswer> {
     if (!BROWSE_SESSION.test(session)) throw new PorchkitError(0, "bad_request", "a session id porchkit does not take");
     return this.json("POST", `/browse/sessions/${session}/act`, body);
+  }
+
+  async browseDownloads(session: string): Promise<BrowseDownload[]> {
+    if (!BROWSE_SESSION.test(session)) throw new PorchkitError(0, "bad_request", "a session id porchkit does not take");
+    return (await this.json<{ downloads?: BrowseDownload[] }>("GET", `/browse/sessions/${session}/downloads`)).downloads ?? [];
   }
 
   async browseClose(session: string): Promise<void> {
