@@ -1,5 +1,5 @@
 import { and, asc, count, desc, eq, gte, inArray, lt, max } from "drizzle-orm";
-import { GrammyError, HttpError, type Api } from "grammy";
+import { GrammyError, HttpError, InputFile, type Api } from "grammy";
 import type { BotCommand, Update } from "grammy/types";
 import { formatTime } from "../agent/render.ts";
 import { CAPABILITIES } from "../capabilities/index.ts";
@@ -278,13 +278,17 @@ export async function controlPollOnce(db: Db, api: Api, deps: ControlDeps & { si
 }
 
 const clip = (s: string) => (s.length > MAX_TEXT ? `${s.slice(0, MAX_TEXT - 1)}…` : s);
+/** Telegram's limit for a photo's caption. */
+const MAX_CAPTION = 1024;
+const clipCaption = (s: string) => (s.length > MAX_CAPTION ? `${s.slice(0, MAX_CAPTION - 1)}…` : s);
 
 class Wait extends Error {}
 
-/** Edit a sent message; an edit to what it already says is not an error. */
-async function edit(api: Api, ownerId: number, messageId: number, text: string, keyboard: { text: string; callback_data: string }[][]): Promise<void> {
+/** Edit a sent message (a photo card's caption); an edit to what it already says is not an error. */
+async function edit(api: Api, ownerId: number, messageId: number, text: string, keyboard: { text: string; callback_data: string }[][], photo = false): Promise<void> {
   try {
-    await api.editMessageText(ownerId, messageId, clip(text), { reply_markup: { inline_keyboard: keyboard } });
+    if (photo) await api.editMessageCaption(ownerId, messageId, { caption: clipCaption(text), reply_markup: { inline_keyboard: keyboard } });
+    else await api.editMessageText(ownerId, messageId, clip(text), { reply_markup: { inline_keyboard: keyboard } });
   } catch (e) {
     if (!(e instanceof GrammyError && /message is not modified/i.test(e.description))) throw e;
   }
@@ -296,14 +300,28 @@ async function deliver(db: Db, api: Api, ownerId: number, row: ControlMessage): 
       const a = getApproval(db, row.approvalId!);
       // A card answered or expired before it was ever sent has nothing left to ask.
       if (!a || a.status !== "pending") return markControlSent(db, row.id, null);
-      const msg = await api.sendMessage(ownerId, clip(row.text), { reply_markup: { inline_keyboard: cardKeyboard(a) } });
+      const markup = { reply_markup: { inline_keyboard: cardKeyboard(a) } };
+      if (a.photo) {
+        try {
+          const msg = await api.sendPhoto(ownerId, new InputFile(new Uint8Array(a.photo), `approval-${a.id}`), { caption: clipCaption(row.text), ...markup });
+          return markControlSent(db, row.id, msg.message_id, true);
+        } catch (e) {
+          // Telegram refused the photo itself (too large, not an image): the card goes as text, so the owner
+          // still gets it. A 429 or an owner the bot cannot reach is about sending at all: the pass handles those.
+          if (!(e instanceof GrammyError && e.error_code >= 400 && e.error_code < 500 && e.error_code !== 429 && !isUnreachable(e))) throw e;
+          console.error(`control: approval #${a.id}'s photo was refused (${e.error_code} ${e.description}); sending it as text`);
+          const msg = await api.sendMessage(ownerId, clip(`${row.text}\n\n(The screenshot could not be sent.)`), markup);
+          return markControlSent(db, row.id, msg.message_id);
+        }
+      }
+      const msg = await api.sendMessage(ownerId, clip(row.text), markup);
       return markControlSent(db, row.id, msg.message_id);
     }
     case "approval_closed": {
       const card = approvalCard(db, row.approvalId!);
       if (card?.status === "pending") throw new Wait(); // the card itself goes first (it is older; this only guards)
       if (!card?.tgMessageId) return markControlSent(db, row.id, null);
-      await edit(api, ownerId, card.tgMessageId, row.text, []);
+      await edit(api, ownerId, card.tgMessageId, row.text, [], card.asPhoto);
       return markControlSent(db, row.id, card.tgMessageId);
     }
     // A model card (model-cards.ts) is sent, and edited, as its row is NOW: a later edit shows the latest step.

@@ -1,5 +1,5 @@
 import { and, inArray, sql } from "drizzle-orm";
-import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { blob, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type { ModelMessage } from "agent-runtime/openai-compat";
 
 /**
@@ -675,6 +675,8 @@ export const controlMessages = sqliteTable(
     status: text("status", { enum: ["pending", "sent", "failed", "suppressed"] }).notNull(),
     tgMessageId: integer("tg_message_id"),
     note: text("note"),
+    /** For `approval`: the card went out as a photo (its text the caption), so closing it edits the caption. */
+    asPhoto: integer("as_photo", { mode: "boolean" }).notNull().default(false),
     createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
   (t) => [index("control_messages_status").on(t.status), index("control_messages_topic").on(t.topic, t.createdAt)],
@@ -709,6 +711,11 @@ export const approvals = sqliteTable("approvals", {
   answeredAt: text("answered_at"),
   expiresAt: text("expires_at"),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  /**
+   * A picture the card is sent with (PNG or JPEG bytes; a purchase's checkout screenshot): the card then goes as a
+   * photo, its text the caption (control/bot.ts). Null: a text card, as every other card.
+   */
+  photo: blob("photo", { mode: "buffer" }),
 });
 
 /**
