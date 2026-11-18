@@ -118,8 +118,8 @@ describe("the Settings page reads the catalog", () => {
     expect(t).toContain("The default: 2 chats without a model of their own run on it.");
     // Every form posts to a write route, with this session's token.
     const forms = [...html.matchAll(/<form[^>]* action="([^"]+)"/g)].map((m) => m[1]!);
-    // vllm's List models; Make default, Re-probe and Vision for each vllm model; add a model; add a provider.
-    expect(forms.length).toBe(9);
+    // claude's and vllm's List models; Make default, Re-probe and Vision for each vllm model; add a model; add a provider.
+    expect(forms.length).toBe(10);
     expect(html.match(/<form /g)!.length).toBe(forms.length);
     expect(html.match(/<form [^>]*method="post"/g)!.length).toBe(forms.length);
     for (const a of forms) expect(SETTINGS_WRITES as readonly string[]).toContain(a);
@@ -331,7 +331,40 @@ describe("adding a provider lists its models through the server's background pas
     await write(db, "/settings/providers/list", { provider: "lab" });
     expect(consoleListing(db)).toMatchObject({ provider: "lab", state: "listing" });
     expect(consoleListing(db)!.cardId).not.toBe(first.cardId);
-    expect(text(await write(db, "/settings/providers/list", { provider: "claude" }))).toContain("claude is a Claude login: it has no /models to list.");
+  });
+
+  test("a Claude login is listed too: its aliases and fixed versions, each added with its label, unprobed", async () => {
+    const db = setup();
+    const listClaude = async () => [
+      { id: "sonnet", canonicalId: "claude-sonnet-5-5", label: "Sonnet", description: "Sonnet 5.5 · Efficient for routine tasks" },
+      { id: "haiku", canonicalId: "claude-haiku-5-5", label: "Haiku", description: "Haiku 5.5 · Fastest for quick answers" },
+    ];
+    let html = await write(db, "/settings/providers/list", { provider: "claude" });
+    expect(text(html)).toContain("Listing the models of claude (Claude login, the server user's login)…");
+    expect(text(html)).toContain("Claude Code is asked what it offers this login; that takes a few seconds and spends nothing.");
+    const l = consoleListing(db)!;
+    expect(backgroundPass(db, { secretsFile: secrets(), listClaude })).toBe(1);
+    await backgroundSettled();
+    html = await get(db, "/settings");
+    expect(text(html)).toContain("lists 4 models. ✓ = in the catalog.");
+    expect(text(html)).toContain("An alias follows new versions");
+    expect(text(html)).toContain("sonnetSonnet · now Sonnet 5.5 · follows new versions");
+    expect(text(html)).toContain("claude-sonnet-5-5Sonnet 5.5 · fixed version");
+    // No context-window field: a Claude model's is the CLI's.
+    expect(html).not.toContain('aria-label="context window for sonnet"');
+    html = await write(db, "/settings/listings/add", { card: String(l.cardId), index: "1" });
+    expect(text(html)).toContain("Added claude/claude-sonnet-5-5 (Sonnet 5.5).");
+    expect(findModel(db, "claude/claude-sonnet-5-5")!.model).toMatchObject({ label: "Sonnet 5.5", contextWindow: null, probeStartedAt: null });
+    // A context window sent anyway is not taken.
+    await write(db, "/settings/listings/add", { card: String(l.cardId), index: "0", context_window: "8192" });
+    expect(findModel(db, "claude/sonnet")!.model).toMatchObject({ label: "Sonnet", contextWindow: null });
+  });
+
+  test("adding a Claude login lists it at once", async () => {
+    const db = setup();
+    const html = await write(db, "/settings/providers/add", { name: "work", kind: "claude", config_dir: "/srv/example-claude" });
+    expect(text(html)).toContain("Added Claude login work (/srv/example-claude). Listing its models…");
+    expect(consoleListing(db)).toMatchObject({ provider: "work", state: "listing" });
   });
 
   test("a failed listing says why until it is dismissed; the provider stays", async () => {

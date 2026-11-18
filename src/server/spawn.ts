@@ -25,16 +25,24 @@ const CHILD = join(dirname(fileURLToPath(import.meta.url)), "../runner/child.ts"
  */
 export type SpawnTurn = (turnId: number) => number;
 
-export const spawnTurn: SpawnTurn = (turnId) => {
+/**
+ * The environment of every process the server starts that runs Claude Code (a turn's runner child, a Claude
+ * login's listing: list-claude.ts): the server's, minus the bot tokens. Only the senders talk to Telegram.
+ */
+export function childEnv(): Record<string, string | undefined> {
   const env = { ...process.env };
   delete env.SHUVI_BOT_TOKEN;
   delete env.SHUVI_CONTROL_BOT_TOKEN;
+  return env;
+}
+
+export const spawnTurn: SpawnTurn = (turnId) => {
   const proc = Bun.spawn([process.execPath, CHILD, String(turnId)], {
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
     detached: true,
-    env,
+    env: childEnv(),
   });
   proc.unref();
   return proc.pid;

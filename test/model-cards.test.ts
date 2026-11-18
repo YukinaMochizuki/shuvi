@@ -3,11 +3,12 @@ import { eq } from "drizzle-orm";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ModelChoice } from "agent-runtime";
 import { Api } from "grammy";
 import type { Update } from "grammy/types";
 import { enterChatModel, getSwitchRequest } from "../src/agent/switch.ts";
 import { controlSendPass, recordControlBatch } from "../src/control/bot.ts";
-import { catalogChanged, CLOSED, finishListing, getCard, modeLines, probeText, refreshCards, relativeTime, switchCardPass } from "../src/control/model-cards.ts";
+import { catalogChanged, claudeListed, CLOSED, finishListing, getCard, modeLines, probeText, refreshCards, relativeTime, switchCardPass } from "../src/control/model-cards.ts";
 import { commandPass, switchRequestPass } from "../src/server/commands.ts";
 import { backgroundPass, backgroundSettled, probeRecord } from "../src/server/probes.ts";
 import { appendMessages } from "../src/store/conversations.ts";
@@ -49,6 +50,14 @@ const button = (db: Db, text: string | RegExp, id = lastCard(db).id) => {
   return b.callback_data;
 };
 const replies = (db: Db) => controlMessagesOf(db, "reply").map((r) => r.text);
+
+/** What Claude Code's `supportedModels()` reports, as agent-runtime `listClaudeModels` returns it. */
+const CLAUDE_CHOICES: ModelChoice[] = [
+  { id: "default", canonicalId: "claude-opus-5-5", label: "Default (recommended)", description: "Use the default model (currently Opus 5.5) · $4/$20 per Mtok" },
+  { id: "opus", canonicalId: "claude-opus-5-5", label: "Opus", description: "Opus 5.5 · Best for everyday, complex tasks · $4/$20 per Mtok" },
+  { id: "sonnet", canonicalId: "claude-sonnet-5-5", label: "Sonnet", description: "Sonnet 5.5 · Efficient for routine tasks · $2/$10 per Mtok" },
+  { id: "haiku", canonicalId: "claude-haiku-5-5", label: "Haiku", description: "Haiku 5.5 · Fastest for quick answers" },
+];
 
 /** A catalog: a Claude login (opus), and an endpoint with two models, the default `vllm/qwen`. A chat on it that has talked. */
 function setup() {
@@ -386,13 +395,65 @@ describe("/provider", () => {
     say(db, "/provider add Bad! http://x");
     say(db, "/provider add x ftp://x");
     say(db, "/provider frob");
+    // The login is listed on a card (below), not answered with a reply.
+    const listing = db.select().from(controlCards).where(eq(controlCards.kind, "provider_add")).all();
+    expect(listing.map((c) => [c.status, c.state])).toEqual([["open", { step: "listing", provider: "work" }]]);
+    expect(listing[0]!.text).toBe("Added Claude login work (/srv/example-claude). Listing its models…");
     expect(replies(db)).toEqual([
-      "Added Claude login work (/srv/example-claude). Add its models with /models add work/<model>.",
       'Could not add provider Bad!: "Bad!" is not a provider name: lower-case letters, digits, \'.\', \'_\' and \'-\', at most 40',
       "Could not add provider x: the base URL must be http(s)",
       "Usage: /provider add <name> <base_url> [<profile>.<VAR>], /provider add <name> claude [<config_dir>], or /provider remove <name>",
     ]);
     expect(getProvider(db, "work")).toMatchObject({ kind: "claude", configDir: "/srv/example-claude" });
+  });
+
+  test("a Claude login lists what Claude Code offers it: each alias, then its fixed version; a press adds it with its label, unprobed", async () => {
+    const { db } = setup();
+    const asked: (string | null)[] = [];
+    const listClaude = async (configDir: string | null) => (asked.push(configDir), CLAUDE_CHOICES);
+    say(db, "/provider add work claude /srv/example-claude");
+    const id = lastCard(db).id;
+    expect(backgroundPass(db, { secretsFile: "/nonexistent", listClaude })).toBe(1);
+    await backgroundSettled();
+    expect(asked).toEqual(["/srv/example-claude"]);
+    expect(getCard(db, id)!.text).toBe("work (/srv/example-claude) lists 7 models (page 1/2). Press one to add it. ✓ = in the catalog.");
+    expect(buttons(db).map((b) => b.text)).toEqual([
+      "default · the CLI's default, now Opus 5.5",
+      "claude-opus-5-5 · fixed version",
+      "opus · now Opus 5.5 · follows new versions",
+      "sonnet · now Sonnet 5.5 · follows new versions",
+      "claude-sonnet-5-5 · fixed version",
+      "haiku · now Haiku 5.5 · follows new versions",
+      "›",
+      "Done",
+    ]);
+    press(db, button(db, /^sonnet /));
+    press(db, button(db, /^claude-sonnet-5-5 /));
+    expect(findModel(db, "work/sonnet")!.model).toMatchObject({ label: "Sonnet", contextWindow: null, probeStartedAt: null });
+    expect(findModel(db, "work/claude-sonnet-5-5")!.model).toMatchObject({ label: "Sonnet 5.5", contextWindow: null, probeStartedAt: null });
+    expect(getCard(db, id)!.text.split("\n")[1]).toBe("Added work/claude-sonnet-5-5 (Sonnet 5.5).");
+    expect(buttons(db).map((b) => b.text)).toContain("✓ sonnet · now Sonnet 5.5 · follows new versions");
+    press(db, button(db, /^✓ sonnet /));
+    expect(getCard(db, id)!.text.split("\n")[1]).toBe("work/sonnet is already in the catalog.");
+    // Nothing is probed: a Claude model is the CLI's.
+    expect(backgroundPass(db, { secretsFile: "/nonexistent", listClaude })).toBe(0);
+  });
+
+  test("a Claude listing that fails, finds nothing, or outlasts the timeout says so, and the login stays", async () => {
+    for (const [listClaude, why] of [
+      [async () => Promise.reject(new Error("Claude Code exited with code 1")), "Claude Code exited with code 1"],
+      [async () => [], "Claude Code listed no models for this login"],
+      [() => new Promise<never>(() => {}), "The operation timed out."],
+    ] as const) {
+      const { db } = setup();
+      say(db, "/provider add work claude");
+      backgroundPass(db, { secretsFile: "/nonexistent", listClaude, timeoutMs: 20 });
+      await backgroundSettled();
+      const card = lastCard(db);
+      expect(card.status).toBe("closed");
+      expect(card.text).toBe(`Added Claude login work (the server user's login). Listing its models failed: ${why}\nThe login stays. Add a model with /models add work/<model> (an alias such as sonnet, or a version such as claude-sonnet-5-5).`);
+      expect(getProvider(db, "work")).toBeDefined();
+    }
   });
 
   test("remove names its models and the chats on them, then removes them all; one holding the default is refused", () => {
@@ -616,3 +677,32 @@ describe("cards stay bounded, current and safe", () => {
 function eqId(id: number) {
   return eq(models.id, id);
 }
+
+describe("claudeListed", () => {
+  test("aliases in the CLI's order, each fixed version once, named from an alias that names it", () => {
+    expect(claudeListed(CLAUDE_CHOICES)).toEqual([
+      { model: "default", label: "Default", detail: "the CLI's default, now Opus 5.5" },
+      { model: "claude-opus-5-5", label: "Opus 5.5", detail: "fixed version" },
+      { model: "opus", label: "Opus", detail: "now Opus 5.5 · follows new versions" },
+      { model: "sonnet", label: "Sonnet", detail: "now Sonnet 5.5 · follows new versions" },
+      { model: "claude-sonnet-5-5", label: "Sonnet 5.5", detail: "fixed version" },
+      { model: "haiku", label: "Haiku", detail: "now Haiku 5.5 · follows new versions" },
+      { model: "claude-haiku-5-5", label: "Haiku 5.5", detail: "fixed version" },
+    ]);
+  });
+
+  test("a model with no fixed version, or one that is its own, is listed once as the CLI names it; an unnamed version keeps its id", () => {
+    expect(
+      claudeListed([
+        { id: "claude-example-1", canonicalId: "claude-example-1", label: "Example 1" },
+        { id: "custom", label: "Custom" },
+        { id: "default", canonicalId: "claude-example-9", label: "Default", description: "Use the default model (currently Example 9)" },
+      ]),
+    ).toEqual([
+      { model: "claude-example-1", label: "Example 1", detail: "as the CLI names it" },
+      { model: "custom", label: "Custom", detail: "as the CLI names it" },
+      { model: "default", label: "Default", detail: "the CLI's default, now claude-example-9" },
+      { model: "claude-example-9", label: "claude-example-9", detail: "fixed version" },
+    ]);
+  });
+});

@@ -19,7 +19,9 @@
  *      the link, and the page itself opens with the token fallback (a session cookie from /login).
  *   7. Models: `/provider add` against a fake OpenAI-compatible endpoint lists its `/models` on a card;
  *      pressing two adds them and the server probes them in the background (one calls the tool, one answers
- *      in text: ⚠), and the card and `/models` show it. Then `/model` in the DM while a turn runs: 👌 and
+ *      in text: ⚠), and the card and `/models` show it. `/provider add … claude` lists a Claude login with the
+ *      real CLI (its aliases and fixed versions); pressing one adds it with its label, unprobed. Then
+ *      `/model` in the DM while a turn runs: 👌 and
  *      nothing else in the chat, a card in the control bot; a model, then lossless: the card says the turn
  *      will be stopped, the turn is stopped, the switch is applied, and the card is edited to the result.
  *      The stopped turn's message is answered on the new model.
@@ -342,6 +344,28 @@ check(labCard.buttons.map((b) => b.text).slice(0, 2).join("|") === "✓ qwen3 ·
 const labRows = db.$client.query("select model, context_window, probe_status from models where provider_id = (select id from model_providers where name = 'lab') order by id").all() as { model: string; context_window: number; probe_status: string }[];
 check(JSON.stringify(labRows) === JSON.stringify([{ model: "qwen3", context_window: 32768, probe_status: "ok" }, { model: "chatty", context_window: 8192, probe_status: "text-instead" }]), `the catalog has them with their context windows and probe states (${JSON.stringify(labRows)})`);
 
+// A Claude login is listed by the real Claude Code CLI: what it offers that login (supportedModels; nothing is
+// sent to a model). Its exact list is the CLI's, so only its shape is checked: aliases that follow new versions,
+// and the fixed versions they stand for.
+// The login's config dir lives in the run's data dir, with everything else this script writes.
+const workDir = join(dataDir, "claude-login-work");
+mkdirSync(workDir);
+const WORK_CARD = /^(Added Claude login work|work \()/;
+controlSay(`/provider add work claude ${workDir}`);
+await until("the Claude login's listing on its card", () => / lists \d+ models/.test(cardNow(WORK_CARD)?.text ?? ""), 60_000);
+const workCard = cardNow(WORK_CARD)!;
+const workRows = workCard.buttons.map((b) => b.text).filter((t) => t !== "Done" && t !== "›");
+check(
+  workRows.some((t) => t.endsWith("follows new versions")) && workRows.some((t) => t.endsWith(" · fixed version")),
+  `/provider add … claude lists the login's aliases and their fixed versions on its card (${workRows.join(" | ")})`,
+);
+const pinned = workRows.find((t) => t.endsWith(" · fixed version"))!;
+pressButton(buttonOf(workCard, pinned));
+const pinnedId = pinned.split(" · ")[0]!;
+await until("the fixed version added", () => !!cardNow(WORK_CARD)?.text.includes(`Added work/${pinnedId}`));
+const workRow = db.$client.query("select model, label, context_window, probe_started_at from models where provider_id = (select id from model_providers where name = 'work')").get() as { model: string; label: string | null; context_window: number | null; probe_started_at: string | null };
+check(workRow.model === pinnedId && !!workRow.label && workRow.context_window === null && workRow.probe_started_at === null, `pressing it adds it with its label, no context window and no probe (${JSON.stringify(workRow)})`);
+
 controlSay("/models add claude/opus");
 await until("the /models add reply", () => controlTexts().includes("Added claude/opus."));
 controlSay("/models");
@@ -364,7 +388,7 @@ await until("the model card", () => control.sent().length > cardsBefore && !!car
 await until("the 👌", () => tg.sent("setMessageReaction").length > reactionsBefore);
 check(JSON.stringify(tg.sent("setMessageReaction").at(-1)!.reaction) === JSON.stringify([{ type: "emoji", emoji: "👌" }]) && chatTexts().length === chatBefore, "/model in the DM gets 👌 and nothing else in the chat");
 let switchCard = cardNow("Model for chat 1")!;
-check(switchCard.text.startsWith("Model for chat 1 (tg 1001): now claude/claude-sonnet-4-5") && switchCard.buttons.map((b) => b.text).join("|") === "✓ claude/claude-sonnet-4-5|claude/opus|lab/qwen3|⚠ lab/chatty|Cancel", `the control bot sent the card: the current model ✓, the one whose probe got no tool call ⚠ (${switchCard.buttons.map((b) => b.text).join("|")})`);
+check(switchCard.text.startsWith("Model for chat 1 (tg 1001): now claude/claude-sonnet-4-5") && switchCard.buttons.map((b) => b.text).join("|") === `✓ claude/claude-sonnet-4-5|claude/opus|lab/qwen3|⚠ lab/chatty|work/${pinnedId}|Cancel`, `the control bot sent the card: the current model ✓, the one whose probe got no tool call ⚠ (${switchCard.buttons.map((b) => b.text).join("|")})`);
 check((db.$client.query("select status from turns where id = ?").get(stalledTurn) as { status: string }).status === "running", "and the running turn was not stopped by /model itself");
 pressButton(buttonOf(switchCard, "claude/opus"));
 await until("the mode step", () => cardNow("Model for chat 1")!.text.startsWith("Switch chat 1"));

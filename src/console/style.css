@@ -1666,6 +1666,13 @@ details.addp[open] > summary::before {
 .lrow.have .lname {
   color: var(--ink-dim);
 }
+/* A Claude login's rows: what each model is (its label, alias or fixed version) instead of a context window. */
+.lrows.about .lrow {
+  grid-template-columns: minmax(140px, 220px) minmax(0, 1fr) auto;
+}
+.lrows.about .lctx {
+  text-align: left;
+}
 .ctxask {
   gap: var(--s2);
 }
@@ -3346,6 +3353,10 @@ a.hfile.hidden-pb .hpath {
   .lrow {
     grid-template-columns: minmax(0, 1fr) auto;
     padding: var(--s2) 0;
+  }
+  /* Too narrow for an id beside a description: one under the other. */
+  .lrows.about .lrow {
+    grid-template-columns: minmax(0, 1fr);
   }
   .lrow .lact {
     grid-column: 1 / -1;

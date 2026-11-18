@@ -99,7 +99,7 @@ describe("Settings with htmx", () => {
   test("every write form posts in the background and swaps the page's main; in-page links swap it too", async () => {
     const html = await (await get(setup(), "/settings")).text();
     const forms = [...html.matchAll(/<form [^>]*method="post"[^>]*>/g)].map(([tag]) => tag);
-    expect(forms.length).toBe(6); // vllm's List models; qwen's Make default, Re-probe, Vision; Add a model; Add a provider
+    expect(forms.length).toBe(7); // claude's and vllm's List models; qwen's Make default, Re-probe, Vision; Add a model; Add a provider
     for (const tag of forms) {
       const action = /action="([^"]+)"/.exec(tag)![1];
       expect(tag).toContain(`hx-post="${action}" hx-target="main.settings" hx-select="main" hx-swap="outerHTML" hx-push-url="false"`);

@@ -24,9 +24,10 @@ import { anchor, type ProviderForm, type SettingsNote } from "./settings.ts";
  * fields (server.ts checks the Origin and the CSRF token before any of them runs). Each does what the control
  * bot's command or button does, through the same functions and rules (store/models.ts, control/model-cards.ts):
  *
- *   providers/add      name, kind, base_url, api_key | config_dir  `addProvider`; an OpenAI-compatible one is
- *                      then listed (`openConsoleListing`: a provider_add card with no message)
- *   providers/list     provider                 list its `/models` again
+ *   providers/add      name, kind, base_url, api_key | config_dir  `addProvider`, then its models are listed
+ *                      (`openConsoleListing`: a provider_add card with no message): an endpoint's `/models`, or
+ *                      what Claude Code offers a Claude login
+ *   providers/list     provider                 list its models again
  *   providers/remove   provider                 `removeProvider` (refused while it holds the default)
  *   models/add         provider, model, context_window   `addModel`, then `markProbing`
  *   models/default     model                    `setDefaultModel`
@@ -183,7 +184,8 @@ function write(db: Db, path: SettingsWrite, form: Form, key: string): Outcome {
         if (kind === "claude") {
           const p = addProvider(db, { name, kind: "claude", configDir: adding.config_dir || null });
           catalogChanged(db);
-          return { note: { tone: "ok", text: `Added Claude login ${p.name} (${p.configDir ?? "the server user's login"}). Add its models by id under Models.`, on: p.name }, anchor: anchor("provider", p.name) };
+          openConsoleListing(db, p.name, key);
+          return { note: { tone: "ok", text: `Added Claude login ${p.name} (${p.configDir ?? "the server user's login"}). Listing its models…`, on: p.name }, anchor: "add" };
         }
         if (kind !== "openai-compat") throw new Refused(`"${kind}" is not a kind of provider.`);
         const p = addProvider(db, { name, kind: "openai-compat", baseUrl: baseUrl || null, apiKey: apiKey || null });
@@ -198,7 +200,6 @@ function write(db: Db, path: SettingsWrite, form: Form, key: string): Outcome {
       const name = field(form, "provider");
       const p = getProvider(db, name);
       if (!p) throw new Refused(`There is no provider ${name}.`);
-      if (p.kind !== "openai-compat") throw new Refused(`${name} is a Claude login: it has no /models to list.`);
       openConsoleListing(db, p.name, key);
       return { note: { tone: "ok", text: `Listing the models of ${p.name}…`, on: p.name }, anchor: "add" };
     }

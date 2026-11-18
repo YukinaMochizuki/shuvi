@@ -1,4 +1,5 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
+import type { ModelChoice } from "agent-runtime";
 import { HISTORY_ON_NEW } from "../agent/turn.ts";
 import { getSwitchRequest, previewSwitch, requestSwitch, type SwitchMode, type SwitchPreview, type SwitchRequest, type SwitchResult } from "../agent/switch.ts";
 import { cardMessage, queueCardMessage, queueReply } from "../store/control.ts";
@@ -8,6 +9,7 @@ import {
   addModel,
   addProvider,
   chatsOn,
+  CLI_DEFAULT_MODEL,
   defaultModel,
   findModel,
   getProvider,
@@ -47,11 +49,13 @@ import { chatLabel, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
  *   models           `/models`: every model with its label, ★ default, context window, vision and probe
  *                    state, 6 a page; per model Make default, Re-probe (an OpenAI-compatible one) and Remove,
  *                    which asks first, naming the chats whose own model it is. The default cannot be removed.
- *   provider_add     `/provider add <name> <base_url> [<profile>.<VAR>]`: the provider is added at once, then
- *                    the server lists the endpoint's `/models` (server/probes.ts `backgroundPass`; Cancel
- *                    meanwhile closes the card and drops the listing, the provider stays) and the card
- *                    becomes that list, 6 a page, models already in the catalog ✓; pressing one adds it with
- *                    the listed context window and asks for its probe.
+ *   provider_add     `/provider add <name> <base_url> [<profile>.<VAR>]` or `/provider add <name> claude
+ *                    [<config_dir>]`: the provider is added at once, then the server lists its models
+ *                    (server/probes.ts `backgroundPass`: an endpoint's `/models`, or what Claude Code offers the
+ *                    login, `claudeListed`; Cancel meanwhile closes the card and drops the listing, the provider
+ *                    stays) and the card becomes that list, 6 a page, models already in the catalog ✓; pressing
+ *                    one adds it: an endpoint's with the listed context window, asking for its probe; a Claude
+ *                    login's with its label, as it is (no context window, no probe).
  *   provider_remove  `/provider remove <name>`: names its models and the chats on them, then removes it.
  *   profile          `/profile` in a chat (acknowledged with 👌 only, as `/model` is) or `/profile <chat>` here:
  *                    Base and every profile (capabilities/memory/layers.ts, as they were when it opened), the
@@ -95,10 +99,53 @@ type CardKind = Card["kind"];
 type Button = { text: string; callback_data: string };
 type Keyboard = Button[][];
 
-/** A listed model of an endpoint, as a provider_add card keeps it. */
-interface Listed {
+/**
+ * A listed model of a provider, as a provider_add card keeps it. An endpoint's `/models` gives its id and, maybe,
+ * its context window; a Claude login's list (`claudeListed`) gives its id, the label it is added with, and a
+ * line saying what it is (an alias that follows new versions, or a fixed version).
+ */
+export interface Listed {
   model: string;
   contextWindow?: number;
+  label?: string;
+  detail?: string;
+}
+
+/** The model's name in a Claude Code description, its first part ("Sonnet 5.5 · Efficient for …"). */
+function describedName(description: string | undefined): string | undefined {
+  const first = description?.split(" · ")[0]?.trim();
+  // The CLI's default describes itself ("Use the default model (currently Opus 5.5)"), naming no model of its own.
+  return first && !/\(currently /.test(first) ? first : undefined;
+}
+
+/**
+ * What a Claude login lists (agent-runtime `listClaudeModels`) as listing rows: each model the CLI offers, by the
+ * alias it offers it under (`sonnet`, `default`), in the CLI's order, each followed by the fixed version it stands
+ * for now (`claude-sonnet-5-5`) unless that is listed already. An alias follows new versions, so a chat on it keeps
+ * its conversation across them; a fixed version runs that version only.
+ */
+export function claudeListed(choices: readonly ModelChoice[]): Listed[] {
+  // A fixed version's name, from an alias that names it (`default` does not).
+  const names = new Map<string, string>();
+  for (const c of choices) {
+    const n = describedName(c.description);
+    if (c.canonicalId && n && !names.has(c.canonicalId)) names.set(c.canonicalId, n);
+  }
+  const out: Listed[] = [];
+  const seen = new Set<string>();
+  const push = (l: Listed) => {
+    if (seen.has(l.model)) return;
+    seen.add(l.model);
+    out.push(l);
+  };
+  for (const c of choices) {
+    const now = c.canonicalId ? names.get(c.canonicalId) ?? c.canonicalId : undefined;
+    const detail = !now || c.canonicalId === c.id ? "as the CLI names it" : c.id === CLI_DEFAULT_MODEL ? `the CLI's default, now ${now}` : `now ${now} · follows new versions`;
+    // The CLI's own menu wording ("Default (recommended)") is no label for a catalog entry.
+    push({ model: c.id, label: c.id === CLI_DEFAULT_MODEL ? "Default" : c.label, detail });
+    if (c.canonicalId && c.canonicalId !== c.id) push({ model: c.canonicalId, label: names.get(c.canonicalId) ?? c.canonicalId, detail: "fixed version" });
+  }
+  return out;
 }
 
 type State =
@@ -437,10 +484,11 @@ function renderModels(db: Db, state: State, cb: (a: string) => string): { text: 
 function renderProviderAdd(db: Db, state: State, cb: (a: string) => string): { text: string; keyboard: Keyboard } {
   const provider = "provider" in state ? getProvider(db, state.provider) : undefined;
   if (!provider || !("provider" in state)) return { text: `The provider is no longer in the catalog.`, keyboard: [] };
-  const where = `${provider.name} (${provider.baseUrl}${provider.apiKey ? `, key ${provider.apiKey}` : ""})`;
+  const claude = provider.kind === "claude";
+  const where = claude ? `${provider.name} (${provider.configDir ?? "the server user's login"})` : `${provider.name} (${provider.baseUrl}${provider.apiKey ? `, key ${provider.apiKey}` : ""})`;
   switch (state.step) {
     case "listing":
-      return { text: fit([`Added provider ${where}. Listing its models…`], []), keyboard: [[{ text: "Cancel", callback_data: cb("x") }]] };
+      return { text: fit([`Added ${claude ? "Claude login" : "provider"} ${where}. Listing its models…`], []), keyboard: [[{ text: "Cancel", callback_data: cb("x") }]] };
     case "listed": {
       const ours = new Map(providerModels(db, provider.name).map((m) => [m.model.model, m]));
       const p = paged(state.listed, state.page, cb);
@@ -457,7 +505,8 @@ function renderProviderAdd(db: Db, state: State, cb: (a: string) => string): { t
       const keyboard: Keyboard = p.items.map((l, i) => {
         const have = ours.get(l.model);
         const mark = `${have ? "✓ " : ""}${have && probeWarned(have) ? "⚠ " : ""}`;
-        return [{ text: `${mark}${l.model} · ${l.contextWindow ? `${l.contextWindow} tokens` : "no context length"}`, callback_data: cb(`a${first + i}`) }];
+        const about = claude ? (l.detail ?? l.label ?? "") : l.contextWindow ? `${l.contextWindow} tokens` : "no context length";
+        return [{ text: `${mark}${l.model}${about ? ` · ${about}` : ""}`, callback_data: cb(`a${first + i}`) }];
       });
       if (p.nav.length) keyboard.push(p.nav);
       keyboard.push([{ text: "Done", callback_data: cb("x") }]);
@@ -556,12 +605,7 @@ export function providerCommand(db: Db, key: string, arg: string): void {
   }
   if (sub !== "add" || !name || !where || rest.length) return queueReply(db, key, PROVIDER_USAGE);
   try {
-    if (where === "claude") {
-      const p = addProvider(db, { name, kind: "claude", configDir: extra ?? null });
-      catalogChanged(db);
-      return queueReply(db, key, `Added Claude login ${p.name} (${p.configDir ?? "the server user's login"}). Add its models with /models add ${p.name}/<model>.`);
-    }
-    const p = addProvider(db, { name, kind: "openai-compat", baseUrl: where, apiKey: extra ?? null });
+    const p = where === "claude" ? addProvider(db, { name, kind: "claude", configDir: extra ?? null }) : addProvider(db, { name, kind: "openai-compat", baseUrl: where, apiKey: extra ?? null });
     catalogChanged(db);
     openCard(db, { kind: "provider_add", idemKey: key, state: { step: "listing", provider: p.name } });
   } catch (e) {
@@ -696,9 +740,20 @@ function addListed(db: Db, card: Card, state: Extract<State, { step: "listed" }>
   const l = state.listed[n]!;
   const ctx = l.contextWindow ?? contextWindow;
   const id = `${state.provider}/${l.model}`;
+  const provider = getProvider(db, state.provider);
   let note: string;
   if (findModel(db, id)) note = `${id} is already in the catalog.`;
-  else if (!ctx) note = `The listing gives no context length for ${l.model}. Add it with /models add ${id} <context_window>.`;
+  else if (!provider) note = `Could not add ${id}: there is no provider named "${state.provider}".`;
+  else if (provider.kind === "claude") {
+    // A Claude model takes the CLI's context window and is not probed (store/models.ts, server/probes.ts).
+    try {
+      addModel(db, { provider: state.provider, model: l.model, ...(l.label ? { label: l.label } : {}) });
+      catalogChanged(db, card.id);
+      note = `Added ${id}${l.label ? ` (${l.label})` : ""}.`;
+    } catch (e) {
+      note = `Could not add ${id}: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  } else if (!ctx) note = `The listing gives no context length for ${l.model}. Add it with /models add ${id} <context_window>.`;
   else {
     try {
       const m = addModel(db, { provider: state.provider, model: l.model, contextWindow: ctx });
@@ -852,7 +907,7 @@ export function consoleSwitch(db: Db, chatId: number, to: string, mode: SwitchMo
 
 // ---- the console's listings ----------------------------------------------------------------------------
 //
-// The console's Settings page lists a provider's `/models` through a provider_add card of its own, opened
+// The console's Settings page lists a provider's models through a provider_add card of its own, opened
 // with no message (its idem key starts CONSOLE_LISTING): the same row, the same background listing
 // (server/probes.ts), the same Add rules (`addListed`) and Cancel / Done (`pressCard`). The page shows the
 // newest such card while it is open, or closed by a failed listing until that is dismissed.
@@ -876,7 +931,7 @@ function consoleCards(db: Db): Card[] {
 }
 
 /**
- * List provider `provider`'s `/models` for the console: a provider_add card with no message, closing (as
+ * List provider `provider`'s models for the console: a provider_add card with no message, closing (as
  * superseded) the console's older open ones. `key` makes a repeated request open one card.
  */
 export function openConsoleListing(db: Db, provider: string, key: string): Card | null {
@@ -919,7 +974,7 @@ export function closeConsoleListing(db: Db, cardId: number): void {
   if (s.step === "closed" && s.listingFailed && !s.dismissed) db.update(controlCards).set({ state: { ...s, dismissed: true } as unknown as Record<string, unknown> }).where(eq(controlCards.id, card.id)).run();
 }
 
-/** The provider_add cards waiting for their endpoint's `/models` (server/probes.ts `backgroundPass`). */
+/** The provider_add cards waiting for their provider's models (server/probes.ts `backgroundPass`). */
 export function cardsListing(db: Db): { cardId: number; provider: string }[] {
   return db
     .select()
@@ -933,7 +988,7 @@ export function cardsListing(db: Db): { cardId: number; provider: string }[] {
 }
 
 /**
- * Show what the endpoint listed on card `cardId` (or why it could not be listed: the provider stays). Not a
+ * Show what the provider listed on card `cardId` (or why it could not be listed: the provider stays). Not a
  * step: nothing the owner had on screen pointed anywhere.
  */
 export function finishListing(db: Db, cardId: number, r: { listed: Listed[] } | { error: string }): void {
@@ -942,7 +997,10 @@ export function finishListing(db: Db, cardId: number, r: { listed: Listed[] } | 
   if (!card || card.status !== "open" || state?.step !== "listing") return;
   if ("error" in r) {
     const p = getProvider(db, state.provider);
-    const text = `Added provider ${state.provider}${p?.baseUrl ? ` (${p.baseUrl})` : ""}. Listing its models failed: ${r.error}\nThe provider stays. Add a model with /models add ${state.provider}/<model> <context_window>.`;
+    const text =
+      p?.kind === "claude"
+        ? `Added Claude login ${state.provider} (${p.configDir ?? "the server user's login"}). Listing its models failed: ${r.error}\nThe login stays. Add a model with /models add ${state.provider}/<model> (an alias such as sonnet, or a version such as claude-sonnet-5-5).`
+        : `Added provider ${state.provider}${p?.baseUrl ? ` (${p.baseUrl})` : ""}. Listing its models failed: ${r.error}\nThe provider stays. Add a model with /models add ${state.provider}/<model> <context_window>.`;
     setState(db, card, { step: "closed", text, listingFailed: { provider: state.provider, error: r.error } }, { step: true });
     return;
   }
