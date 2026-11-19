@@ -17,7 +17,9 @@
  *   3. the owner asks her to open a shop: her own browser (porchkit's `/browse`, the fake's made-up shop):
  *      browser_open, then browser_click on a ref from the page text it answered with, both in the session
  *      `chat-<id>`; the browser's prompt section and tools are offered; then the owner asks for a screenshot:
- *      browser_send queues it and the sender sends it to the DM as a photo, exactly once
+ *      browser_send queues it and the sender sends it to the DM as a photo, exactly once; then a canvas game: the
+ *      answer's hint says it is drawn, a grid screenshot, and browser_pointer at the Start button, which the model
+ *      sees hit (the situation, the target, the screenshot and close-up as images)
  *
  *   bun scripts/e2e-read.ts
  */
@@ -26,7 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/store/db.ts";
 import { FakeHangar } from "../test/fake-hangar.ts";
-import { FakePorchkit, LONG_HTML, LONG_MARKDOWN, LONG_PAGE, SHOP, SHOP_ITEM, X_POST } from "../test/fake-porchkit.ts";
+import { CANVAS, FakePorchkit, LONG_HTML, LONG_MARKDOWN, LONG_PAGE, SHOP, SHOP_ITEM, X_POST } from "../test/fake-porchkit.ts";
 import { dmUpdate, FakeTelegram, OWNER } from "../test/helpers.ts";
 
 const t0 = Date.now();
@@ -72,10 +74,15 @@ const seen: string[] = [];
 const bodies: string[] = [];
 let toolsOffered: string[] = [];
 let postResult = "";
+let pointerResult = "";
 let readsWhenFirstTool = -1;
 
 /** [what the newest user message contains, what the model does]: the first match wins (matched as JSON). */
 const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
+  [/Under the pointer: canvas/, (t) => ((pointerResult = t), say("Started the game."))],
+  [/Screenshot of Canvas game/, () => use("browser_pointer", { action: "click", x: 150, y: 125 })],
+  [/Hint: page: canvas-heavy/, () => use("browser_screenshot", { grid: true })],
+  [/start the canvas game/, () => use("browser_open", { url: CANVAS })],
   [/Sent a screenshot of A teapot - Example Shop/, () => say("There it is.")],
   [/send me a screenshot of it/, () => use("browser_send", { what: "screenshot", caption: "the teapot" })],
   [/Title: A teapot - Example Shop/, () => say("The teapot page is open.")],
@@ -225,6 +232,16 @@ tg.updates.push(dmUpdate(4, "send me a screenshot of it"));
 await replied("There it is.", "the turn sent a screenshot");
 const photos = tg.sent("sendPhoto");
 check(photos.length === 1 && Number(photos[0]!.chat_id) === OWNER && photos[0]!.caption === "the teapot", `the screenshot reached the DM as a photo, once (${JSON.stringify(photos.map((p) => ({ chat: p.chat_id, caption: p.caption })))})`);
+await until("the turn to close", turnsIdle);
+
+tg.updates.push(dmUpdate(5, "start the canvas game"));
+await replied("Started the game.", "the turn opened the game, looked with a grid and clicked its Start button");
+const pointers = porch.browse.pointers;
+check(pointers.length === 1 && pointers[0]!.x === 150 && pointers[0]!.y === 125 && pointers[0]!.image_width === 1280, `one pointer act, in the screenshot's pixels (${JSON.stringify(pointers)})`);
+check(porch.browse.canvasHits === 1, "it hit the canvas's Start button");
+check(porch.browse.screenshots.some((s) => s.grid), "the screenshot before it had a grid");
+check(pointerResult.includes('Changed: canvas \\"\\" (+1') && pointerResult.includes("12.5% of it changed") && pointerResult.includes("settled in 120 ms"), "the model read the situation, what changed and that the page settled");
+check((pointerResult.match(/"type":"image"/g) ?? []).length === 2, "the pointer's screenshot and close-up reached the model as images");
 await until("the turn to close", turnsIdle);
 
 // ---- 4. the token: nowhere on disk under the data dir, nor in the server's log ---------------------------

@@ -288,7 +288,7 @@ export interface BrowseAnswer {
   /** porchkit thinks the page is a checkout: placing the order needs `approved`. */
   checkout?: boolean;
   notes?: string[];
-  screenshot?: { key: string; width?: number | null; height?: number | null; bytes?: number | null } | null;
+  screenshot?: BrowseImage | null;
   /** The page as a PDF (`{action: "pdf"}`), in the file cache. */
   pdf?: { key: string; bytes?: number | null } | null;
   /**
@@ -298,6 +298,92 @@ export interface BrowseAnswer {
   dialog?: { type: "confirm" | "prompt" | string; message?: string | null; default_prompt?: string | null } | null;
   /** Not in porchkit's contract for an act yet; read when it is there. */
   signed_in?: { google?: boolean | null } | null;
+  /**
+   * What the action did to the page, and hints about the page (porchkit's "situation", on every act answer). Read
+   * loosely all the same: a field of another shape is skipped, never an error.
+   */
+  situation?: BrowseSituation | null;
+  /** The image's size and scale (a screenshot, a zoom, a pointer, a watch, a canvas page's ref act). */
+  width?: number | null;
+  height?: number | null;
+  scale?: number | null;
+  viewport?: { width?: number | null; height?: number | null } | null;
+  /** screenshot with marks: where each element is, in the image's pixels. */
+  marks?: { ref?: string | null; role?: string | null; name?: string | null; x?: number; y?: number; w?: number; h?: number }[] | null;
+  /** screenshot with grid: its spacing in pixels. */
+  grid?: number | null;
+  /** pointer: the kind it did, and what was under the point. */
+  kind?: string | null;
+  target?: BrowseTarget | null;
+  /** pointer (and a ref act on a canvas-heavy page): whether the page settled, in how long, and how much changed. */
+  settled?: boolean | null;
+  settle_ms?: number | null;
+  changed_pct?: number | null;
+  changed_bbox?: BrowseBox | null;
+  /** pointer with dry_run: nothing was pressed; `target` says what is there. */
+  dry_run?: boolean | null;
+  /** pointer: a close-up around the point (its region in the screenshot's pixels, enlarged by `factor`). */
+  closeup?: (BrowseImage & Partial<BrowseBox> & { factor?: number | null }) | null;
+  /** zoom: the region asked for, enlarged by `factor`. */
+  region?: BrowseBox | null;
+  factor?: number | null;
+  zoom?: BrowseImage | null;
+  /** watch: frames over time tiled in one image, each tile's time and place in it. */
+  tiles?: { t?: number; x?: number; y?: number; w?: number; h?: number }[] | null;
+  /** watch: the page's URL at each frame. */
+  urls?: string[] | null;
+  tile_scale?: number | null;
+  sheet?: BrowseImage | null;
+  /** find: up to 40 matching lines of the page text (the refs are then the whole tree's), out of `total`. */
+  query?: string | null;
+  matches?: { ref?: string | null; line?: string | null; context?: string | null }[] | null;
+  total?: number | null;
+  /** snapshot: where to read on when the page text was cut. */
+  next_offset?: number | null;
+  /** wait_for: whether it happened, and how long it took. */
+  wait_for?: { met?: boolean | null; seconds?: number | null } | null;
+  /** select: what was chosen, and how. */
+  select?: { selected?: string | null; value?: string | null; via?: string | null } | null;
+}
+
+/** A region, in an image's pixels. */
+export interface BrowseBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** What was under a point (pointer; also on a 403 `approval_required` and a 409 `target_changed`). */
+export interface BrowseTarget {
+  role?: string | null;
+  name?: string | null;
+  ref?: string | null;
+  in_canvas?: boolean | null;
+  /** The hit node's text, then its ancestors' names ("Place order", "Order summary"). */
+  names?: string[] | null;
+  /** A drag: what is at its end point. */
+  to?: BrowseTarget | null;
+}
+
+/** An image porchkit keeps in its file cache (`GET /files/<key>`); coordinates are in its pixels. */
+export interface BrowseImage {
+  key: string;
+  width?: number | null;
+  height?: number | null;
+  bytes?: number | null;
+}
+
+export interface BrowseSituation {
+  url_changed?: boolean | null;
+  dialog_opened?: boolean | null;
+  popup_opened?: boolean | null;
+  /** What changed where (at most 8): `subtree` is "page", `<role> "<name>"` or `iframe "<label>"`. */
+  changes?: { subtree?: string | null; added?: number | null; removed?: number | null }[] | null;
+  visible_change_pct?: number | null;
+  nothing_visible_changed?: boolean | null;
+  /** Verbatim: "page: canvas-heavy", "blocked-by: captcha", "native-popup: press Escape". */
+  hints?: string[] | null;
 }
 
 /**
