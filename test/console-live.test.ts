@@ -197,6 +197,70 @@ describe("the stream", () => {
     expect(ops()).toEqual([]);
   });
 
+  test("the timeline in the head follows a running turn: a call open while it runs, then its bar linking to its chip", () => {
+    const { db, turn } = setup();
+    const saved = clock;
+    clock = Date.parse(turn.startedAt);
+    try {
+      const here = `/segments/${turn.id}`;
+      const { open, tick } = harness(db);
+      const { ops } = open(here, segmentPage({ ...ctxOf(db), here }, new URLSearchParams(), turn.id)!);
+      ops();
+
+      clock += 2000;
+      addStep(db, turn.id, 1, { kind: "tool", name: "search_notes", args: JSON.stringify({ query: "trains" }), callId: "c1", status: "running", at: new Date(clock - 1000).toISOString() });
+      tick();
+      const running = parts(ops()).find((o) => o.k === "head")!;
+      expect(running.html).toContain('class="timeline lanes"');
+      expect(running.html).toContain("tl-bar k-open");
+
+      clock += 3000;
+      completeStep(db, turn.id, "c1", { status: "ok", result: "two trains", endedAt: new Date(clock).toISOString() });
+      finishTurn(db, turn.id, { status: "done" });
+      tick();
+      const done = parts(ops()).find((o) => o.k === "head")!;
+      expect(done.html).not.toContain("k-open");
+      expect(done.html).toContain('class="tl-bar k-tool"');
+      expect(done.html).toContain('href="#call-c1"');
+      // What the stream sent is what a reload draws.
+      expect(partIn(segmentPage({ ...ctxOf(db), here }, new URLSearchParams(), turn.id)!, "head")!.h).toBe(done.h);
+    } finally {
+      clock = saved;
+    }
+  });
+
+  test("the waterfall on a turn's page follows it too: a row for the call while it runs, its bar linking to its chip once done", () => {
+    const { db, turn } = setup();
+    const saved = clock;
+    clock = Date.parse(turn.startedAt);
+    try {
+      const here = `/turns/${turn.id}`;
+      const { open, tick } = harness(db);
+      const { ops } = open(here, turnsPage({ ...ctxOf(db), here }, new URLSearchParams(), turn.id)!);
+      ops();
+
+      clock += 2000;
+      addStep(db, turn.id, 1, { kind: "tool", name: "search_notes", args: JSON.stringify({ query: "trains" }), callId: "c1", status: "running", at: new Date(clock - 1000).toISOString() });
+      tick();
+      const running = parts(ops()).find((o) => o.k === "head")!;
+      expect(running.html).toContain('class="timeline waterfall"');
+      expect(running.html).toContain('<span class="tl-name">search_notes</span>');
+      expect(running.html).toContain("tl-bar k-open");
+      expect(running.html).toContain('class="c-running">running');
+
+      clock += 3000;
+      completeStep(db, turn.id, "c1", { status: "ok", result: "two trains", endedAt: new Date(clock).toISOString() });
+      finishTurn(db, turn.id, { status: "done" });
+      tick();
+      const done = parts(ops()).find((o) => o.k === "head")!;
+      expect(done.html).not.toContain("k-open");
+      expect(done.html).toContain('href="#call-c1"');
+      expect(partIn(turnsPage({ ...ctxOf(db), here }, new URLSearchParams(), turn.id)!, "head")!.h).toBe(done.h);
+    } finally {
+      clock = saved;
+    }
+  });
+
   test("a new turn is a new part after the last; a reconnect resumes from what the page has, with no gap and nothing twice", () => {
     const { db, chat, turn } = setup();
     const here = `/segments/${turn.id}`;

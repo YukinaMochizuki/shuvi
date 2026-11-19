@@ -4367,3 +4367,198 @@ span.sw {
   color: var(--ink);
   font-weight: 500;
 }
+
+/*
+ * The timeline (timeline.ts, DESIGN.md "Timeline"): where a span's or a turn's time went, under the head's facts.
+ * Model purple, tools orange (the colours of the trace viewers this is modelled on); a failed call in the failure
+ * colour, a refused one in the refusal colour; messages in the accent, hers in the done colour.
+ */
+.timeline {
+  --k-model: #a78bfa;
+  --k-wait: rgb(167 139 250 / 0.32);
+  --k-tool: #f59e42;
+  margin-top: var(--s3);
+  padding: var(--s3) var(--s3) var(--s2);
+  background: var(--surface-2);
+  border-radius: 8px;
+  max-width: 980px;
+}
+.tl-sum {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s4);
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: var(--s2);
+}
+.tl-sum b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.tl-key {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 5px;
+}
+.tl-grid {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 0;
+  row-gap: 5px;
+  align-items: center;
+}
+.waterfall .tl-grid {
+  grid-template-columns: minmax(0, 180px) minmax(0, 1fr) 56px;
+  row-gap: 3px;
+}
+.tl-label {
+  font-size: 11px;
+  text-align: right;
+  padding-right: var(--s2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.waterfall .tl-label {
+  text-align: left;
+}
+.tl-name {
+  font-family: var(--mono);
+  color: var(--ink-dim);
+}
+.tl-arg {
+  color: var(--ink-faint);
+}
+.tl-dur {
+  text-align: right;
+  font: 11px var(--mono);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.tl-track {
+  position: relative;
+  height: 10px;
+}
+.waterfall .tl-track {
+  height: 12px;
+}
+.tl-track.thin {
+  height: 8px;
+}
+.tl-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: var(--line-soft);
+}
+.tl-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 2px;
+  border-radius: 2px;
+}
+a.tl-bar:hover {
+  outline: 1px solid var(--ink);
+  text-decoration: none;
+}
+.k-think,
+.k-text {
+  background: var(--k-model);
+}
+.k-wait {
+  background: var(--k-wait);
+}
+.k-tool {
+  background: var(--k-tool);
+}
+.tl-bar.k-error {
+  background: var(--failed);
+}
+.tl-bar.k-refused {
+  background: var(--refused);
+}
+/* A call with no result: drawn to the turn's end (or now, while it runs), its end left open. */
+.tl-bar.k-open {
+  background: repeating-linear-gradient(90deg, var(--k-tool) 0 6px, transparent 6px 9px);
+}
+.tl-key.k-idle {
+  background: var(--line);
+}
+.tl-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+}
+.tl-tick.k-in {
+  background: var(--accent);
+}
+.tl-tick.k-out {
+  background: var(--done);
+}
+.tl-turn {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--ink-faint);
+  opacity: 0.45;
+}
+.tl-break {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  background: repeating-linear-gradient(115deg, transparent 0 3px, var(--line) 3px 4px);
+}
+.tl-turns,
+.tl-axis {
+  position: relative;
+  height: 15px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.tl-turns a,
+.tl-axis span {
+  position: absolute;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+.tl-turns a {
+  transform: none;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+.tl-axis .first {
+  transform: none;
+}
+.tl-axis .last {
+  transform: translateX(-100%);
+}
+@media (max-width: 760px) {
+  .timeline {
+    padding: var(--s2);
+  }
+  .tl-grid {
+    grid-template-columns: 46px minmax(0, 1fr) 0;
+  }
+  .tl-label {
+    padding-right: var(--s1);
+  }
+  .waterfall .tl-grid {
+    grid-template-columns: minmax(0, 96px) minmax(0, 1fr) 46px;
+  }
+  .waterfall .tl-arg,
+  .tl-axis .gap,
+  .tl-axis .mid {
+    display: none;
+  }
+}

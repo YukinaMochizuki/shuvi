@@ -82,6 +82,37 @@ page marks those turns. `j` / `k` move between segments.
     collapsed; a toggle (`&diff=1`) for the diff against the previous turn's prompt in the chat.
   - Raw input: the exact text and images the model received, the opening prompt and each append, in
     monospace with copy buttons.
+- **Timeline** (timeline.ts), under the facts of a segment's, a conversation's and a turn's header (a turn: on its
+  Conversation tab only, where the chips its bars link to are): where the time went, model against tools.
+  ```
+  ■ Model 1m 18s 37%  ■ Tools 2m 13s 63%  bash 1m 40s · read_link 8s  ■ between turns 11m 47s (folded)
+        41      42                       43    44  45
+  In    |       |    |                  /|    /|  /|
+  Model ▆▆ ▆▆  /▆▆ ▆▆                   /▆▆   /▆▆ /▆▆ ▆▆
+  Tools   ▆▆▆ /    ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆  /▆▆   /   /  ▆▆▆▆
+  Out          |                  |      |     |       |
+        15:02:10   +2m 10s              +25s  +9m 00s  15:17:28
+  ```
+  - A span: four lanes (In: what opened each turn and what arrived mid-turn; Model; Tools; Out: her messages,
+    stickers and files, not a send that failed) on one axis, each turn's start marked with its number (a link to the turn). A silence
+    between turns over 10 s (or over a fifth of the turns' own time) is folded into a hatched break of fixed width,
+    so a pause does not squash the work; together the breaks take at most a quarter of the axis.
+  - A turn: a waterfall. The model's row, a messages row, then a row per tool call in the order they started (one
+    per tool name past 20 calls), each with its duration; parallel calls show as overlapping rows.
+  - The model's time is derived: the turn's wall time minus the time at least one tool ran (parallel calls once),
+    so Model + Tools is the wall time. Its recorded thinking and text are solid, the rest (waiting for the first
+    token, writing a call) faint, "not recorded".
+  - Model purple, tools orange, a failed call in the failure colour, a refused one in the refusal colour, a call
+    with no result dashed to the turn's end (or now, while it runs). Every tool bar is a link to its chip
+    (`#call-<id>`), its details in its `title`. Within a turn, slivers of one kind closer than 0.15% are drawn as
+    one (never across turns).
+  - A span of hundreds of turns stays small, since its head is a live part sent whole while a turn runs: a turn
+    narrower than 1% of the axis is binned with its neighbours (a model bar and a tools bar per bin, each its
+    share of the bin's time, the title saying which turns), ticks and turn marks closer than 0.5% are drawn once,
+    and breaks thinner than 0.2% are not drawn (the summary still says the silences were folded).
+  - Positions in percent, server-drawn: nothing needs script. Under 760px the arguments and the gap labels are
+    hidden, and the waterfall's axis keeps only its two ends.
+  - Nothing for a turn without a transcript; a span with none recorded has no timeline.
 - **No transcript**: a turn from before recording began still shows, from `chat_events` (its messages and
   replies), tagged "messages only". Its tabs, and a segment made only of such turns, say in a sentence why:
   it ran before recording started with the console's deployment (with the first recorded turn and its date),
@@ -410,6 +441,7 @@ are GitHub's, as in the diff.
 | Dot | 8px outcome colour |
 | Badge | outcome word in its colour, for headers |
 | HeaderStrip | title line + one facts line (middot-separated, numbers tabular) |
+| Timeline | under a header's facts (Pages, "Timeline"): a summary line, then lanes (a span) or a waterfall (a turn) |
 | Tabs | text links, the active one underlined in accent |
 | TraceRow | gutter (offset) + body |
 | Bubble | `in` (surface-2, left), `out` (accent tint, right), `mid` (in + "mid-turn" tag), `unsent` (dashed) |

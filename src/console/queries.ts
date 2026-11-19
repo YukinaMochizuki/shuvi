@@ -135,6 +135,15 @@ export function outboundOf(db: Db, turnId: number): ChatEvent[] {
   return (db.$client.query(`select ${EVENT_COLUMNS} from chat_events where turn_id = ? order by seq`).all(turnId) as EventRow[]).map(eventRow);
 }
 
+/** `outboundOf` for many turns in one query (a span's timeline): each turn's events, in order; none, an empty list. */
+export function outboundOfTurns(db: Db, turnIds: readonly number[]): Map<number, ChatEvent[]> {
+  const out = new Map<number, ChatEvent[]>(turnIds.map((id) => [id, []]));
+  if (!turnIds.length) return out;
+  const rows = db.$client.query(`select ${EVENT_COLUMNS} from chat_events where turn_id in (select value from json_each(?)) order by seq`).all(JSON.stringify(turnIds)) as EventRow[];
+  for (const e of rows.map(eventRow)) out.get(e.turnId!)?.push(e);
+  return out;
+}
+
 /**
  * The media prewarms of the messages a turn answered (its chat's, in (from, to]): how many, and how many a
  * turn then used (`video_probe` of the same link). The console's "prewarmed: used / unused".
