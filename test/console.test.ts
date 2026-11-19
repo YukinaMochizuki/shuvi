@@ -380,6 +380,45 @@ describe("pages, against fixture data", () => {
     expect(expanded).toContain('class="step tool" id="s2" open');
   });
 
+  test("where the time went: a turn's waterfall on its Conversation tab, each call's bar linking to its chip; a span's lanes", async () => {
+    const x = await r();
+    const ids = (x.db.$client.query("select id from turns order by id").all() as { id: number }[]).map((t) => t.id);
+    const research = await page(`/turns/${ids.at(-1)}`, x);
+    const calls = [...research.matchAll(/class="call-anchor" id="call-([^"]+)"/g)].map((m) => m[1]!);
+    expect(calls.length).toBe(11);
+    const head = research.slice(research.indexOf('class="timeline waterfall"'), research.indexOf('class="tabs"'));
+    expect(head).toContain("Model <b>");
+    expect(head).toContain("Tools <b>");
+    // A row per call, each bar a link to that call's chip below; the failed call in the failure colour.
+    for (const id of calls) expect(head).toContain(`href="#call-${id}"`);
+    expect((head.match(/class="tl-label"/g) ?? []).length).toBe(11);
+    expect(head).toContain("tl-bar k-error");
+    // Not on the other tabs, where the chips are not.
+    expect(await page(`/turns/${ids.at(-1)}?tab=prompt`, x)).not.toContain('class="timeline');
+    expect(await page(`/turns/${ids.at(-1)}?tab=raw`, x)).not.toContain('class="timeline');
+
+    // A segment and a conversation: the four lanes, a mark linking to each recorded turn, every tool bar linking to a
+    // call (here milliseconds apart, so slivers are merged: a merged bar links to its first call).
+    const seg = await page(`/segments/${ids.at(-1)}`, x);
+    expect(seg).toContain('class="timeline lanes"');
+    expect(seg).toContain(`href="/turns/${ids.at(-1)}" title="turn ${ids.at(-1)}`);
+    const linked = [...seg.matchAll(/class="tl-bar k-(?:tool|error|refused|open)"[^>]*href="#call-([^"]+)"/g)].map((m) => m[1]!);
+    expect(linked.length).toBeGreaterThan(0);
+    expect(linked[0]).toBe(calls[0]!);
+    for (const id of linked) expect(calls).toContain(id);
+    const chatId = (x.db.$client.query("select chat_id from turns where id = ?").get(ids.at(-1)!) as { chat_id: number }).chat_id;
+    const place = conversationOf(x.db, chatId, ids.at(-1)!)!;
+    expect(await page(`/conversations/${place.id}`, x)).toContain('class="timeline lanes"');
+  });
+
+  test("no timeline for turns without a transcript, nor for a segment made only of them", async () => {
+    const x = await r();
+    const before = (x.db.$client.query("select id from turns where id not in (select turn_id from turn_transcripts) order by id").all() as { id: number }[]).map((t) => t.id);
+    expect(before.length).toBeGreaterThan(0);
+    for (const id of before) expect(await page(`/turns/${id}`, x)).not.toContain('class="timeline');
+    expect(await page(`/segments/${before[0]}`, x)).not.toContain('class="timeline');
+  });
+
   test("text from a chat is escaped, never markup", async () => {
     const x = await f();
     const g = ensureChat(x.db, { id: FIXTURE_GROUP.id, kind: "group" });

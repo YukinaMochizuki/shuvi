@@ -31,6 +31,15 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
   - *System prompt*: by section (persona, directives, this chat, each capability's section, the playbook
     index, memory), each with its size, and a diff against the previous turn's prompt in the chat.
   - *Raw input*: the exact text and images the model received.
+- **Where the time went**: under the header of a segment, a conversation and a turn (its Conversation tab), a
+  timeline of the model against the tools. A segment or conversation has four lanes, In (what opened each turn,
+  what arrived mid-turn), Model, Tools and Out (her messages), across its turns, with the silences between turns
+  folded into a hatched break; a turn has a waterfall, the model's row and a row per tool call, so calls in
+  parallel and the slow one stand out. A line above sums it up: the model's time and the tools', in seconds and
+  percent, and the tools that took longest. The model's time is what is left of the turn's when no tool was
+  running, so the two add up to the turn's duration; the thinking and text she wrote are solid, the rest of it
+  (waiting for the model to start, writing a call) faint. Each tool's bar links to its call below; hover it for
+  its arguments and times.
 - **A chat** (`/chats/<id>`): the chat's whole log, each turn's boundary a divider linking to it, with the model
   it ran on (a switch marked as on a segment).
 - **A chat's settings** (`/chats/<id>/settings`, `/permissions`, `/automation`): its model, profile and

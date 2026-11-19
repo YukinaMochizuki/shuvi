@@ -21,6 +21,7 @@ import { listModels } from "../store/models.ts";
 import { diffLines, hunks } from "./diff.ts";
 import { ago, badge, block, clock, dot, empty, excerpt, href, html, lb, livePart, markdown, page, raw, resetBlocks, scopedBlocks, secs, short, size, tokens, usd, wall, when, type LivePart, type Raw } from "./html.ts";
 import { conversationOf, matchingTurns, segmentList, segmentOf, type Conversation, type SegmentRow, type Span } from "./sessions.ts";
+import { spanTimeline, turnTimes, turnWaterfall, type TurnTimes } from "./timeline.ts";
 import {
   chatById,
   chatEventsPage,
@@ -29,6 +30,7 @@ import {
   eventsBetween,
   neighbours,
   outboundOf,
+  outboundOfTurns,
   toolNames,
   turnById,
   turnPrewarms,
@@ -973,6 +975,9 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
       ? [html`<span class="prewarm" title="links in this turn's messages looked up ahead (media prewarm), and whether video_probe then used them">prewarmed: ${pre.used ? html`<b class="c-done">${pre.used} used</b>` : ""}${pre.used && pre.unused ? " / " : ""}${pre.unused ? html`<b class="c-stopped">${pre.unused} unused</b>` : ""}</span>`]
       : []),
   ];
+  // Where the turn's time went (timeline.ts), on the Conversation tab only: its bars link to the chips there.
+  const times = tab === "conversation" ? turnTimes(turn, steps, outboundOf(ctx.db, turn.id), ctx.now ?? Date.now()) : null;
+  const waterfall = times ? turnWaterfall(times, argsSummary) : null;
   const headRaw = html`<div class="head">
 <a class="back" href="${href("/turns", f)}">← All chats</a>
 <div class="title">${badge(turn.status)}<h1>Turn ${turn.id}</h1><a href="/chats/${chat.id}#e${turn.toSeq}">${chatName(chat)}</a>${settingsLink(chat.id)}<span class="meta" title="${when(turn.startedAt, ctx.timeZone, true)}">${when(turn.startedAt, ctx.timeZone)} · ${ago(turn.startedAt, ctx.now)}</span>
@@ -982,6 +987,7 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
 ${trigger ? html`<p class="trigger">Triggered by ${eventPreview(trigger.kind, trigger.payload)} <span class="mono">#${trigger.seq}</span></p>` : ""}
 ${place ? html`<p class="trigger context">In <a href="${href(`/segments/${place.id}`, f)}">the segment of ${when(turnById(ctx.db, place.id)?.startedAt, ctx.timeZone)}</a> (turn ${place.turnIds.indexOf(turn.id) + 1} of ${place.turnIds.length}), of <a href="${href(`/conversations/${place.conversation.id}`, f)}">${inSentence(conversationLabel(place.conversation))}</a></p>` : ""}
 <p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
+${waterfall ?? ""}
 ${turn.error ? html`<div class="banner">${turn.status === "stopped" ? "Stopped" : "Why it ended that way"}<span class="mono">${turn.error}</span></div>` : ""}
 </div>`;
   const head = livePart("head", headRaw, true);
@@ -1100,6 +1106,15 @@ function spanDetail(
     ...(level === "segment" && compactions ? [html`<span class="c-lost">compacted</span>`] : []),
   ];
   const missing = turns.filter((t) => !getTranscript(ctx.db, t.id));
+  // Where the span's time went (timeline.ts): its recorded turns on one axis, the silences between them folded.
+  const now = ctx.now ?? Date.now();
+  const written = outboundOfTurns(ctx.db, sp.turnIds);
+  const lanes = spanTimeline(
+    turns.map((t) => turnTimes(t, allSteps.get(t.id) ?? [], written.get(t.id) ?? [], now)).filter((x): x is TurnTimes => x !== null),
+    ctx.timeZone,
+    argsSummary,
+    (id) => href(`/turns/${id}`, f),
+  );
   const headRaw = html`<div class="head">
 <a class="back" href="${href("/turns", f)}">← All chats</a>
 <div class="title">${badge(outcome)}<h1>${title}</h1><a href="${href(`/chats/${chat.id}`, f)}#e${first.toSeq}">${chatName(chat)}</a>${settingsLink(chat.id)}
@@ -1108,6 +1123,7 @@ ${context}
 <p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
 ${filtered ? html`<p class="trigger context"><span class="c-accent">${matches.size} of ${turns.length} turns</span> match the filter; they are marked below.</p>` : ""}
 ${missing.length ? html`<p class="note left">${absenceOf(ctx, missing, turns.length)}</p>` : ""}
+${lanes ?? ""}
 </div>`;
   const head = livePart("head", headRaw, true);
   const aside = html`<nav class="tabs"><span class="on">${level === "segment" ? "Segment" : "Conversation"}</span><span class="aside"><a href="${href(`${base}/${sp.id}`, expandAll ? f : { ...f, expand: "1" })}">${expandAll ? "collapse all" : "expand all"}</a> · j / k: next / previous segment</span></nav>`;
