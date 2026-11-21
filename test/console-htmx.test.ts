@@ -81,7 +81,7 @@ describe("the shell", () => {
     expect((await js.text()).length).toBeGreaterThan(10_000);
     const res = await get(db, "/turns");
     const csp = res.headers.get("content-security-policy")!;
-    expect(csp).toBe("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    expect(csp).toBe("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     const html = await res.text();
     expect(html).toMatch(/<script src="\/htmx\.min\.js\?v=[0-9a-f]{12}" defer><\/script>/);
     expect(html).toContain(`<body hx-boost="true" hx-indicator="#progress">`);

@@ -1,7 +1,8 @@
 // The console's own script (same origin; the pages work without it, and without htmx). Copy buttons, j / k to
 // move through the turn list, a line when the console cannot be reached, selecting messages to delete
 // (below: the "⋯" menu, the pill, the snackbar with its undo; pages.ts `pickable` / `deleteBar`, delete-write.ts),
-// and live pages (last: the stream from /live that keeps a chat's log, a segment, a turn and the list current; live.ts).
+// and live pages (the stream from /live that keeps a chat's log, a segment, a turn and the list current; live.ts), and
+// last, registering the app's service worker (pwa.ts).
 // htmx (html.ts `page`) swaps pages in place, so nothing here holds on to an element of a page: clicks and keys
 // are handled on the document, and what a new page needs is done for each piece htmx puts in (`htmx.onLoad`), or
 // once without htmx.
@@ -789,3 +790,8 @@ if (window.htmx) {
   document.addEventListener("htmx:sendError", () => offline(true));
   document.addEventListener("htmx:afterRequest", (e) => e.detail.xhr?.status && offline(false));
 } else document.addEventListener("DOMContentLoaded", () => arrive(document));
+
+// The app's service worker (pwa.ts): it answers only a page load that cannot reach the console, with its offline
+// page. Registering again on every load is what the browser expects; it fetches /sw.js and changes nothing unless
+// that changed.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

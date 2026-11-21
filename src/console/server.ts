@@ -26,6 +26,7 @@ import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.t
 import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
 import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } from "./delete-write.ts";
 import { openLive, type LiveHub } from "./live.ts";
+import { pwaFile } from "./pwa.ts";
 
 /**
  * The console's HTTP side: who may look, and which page answers which URL.
@@ -96,6 +97,9 @@ import { openLive, type LiveHub } from "./live.ts";
  * and sign-in, its own session's streams capped, nothing written. EventSource is a same-origin request, so the CSP
  * needs nothing beyond `connect-src 'self'`. Bun's idle timeout is lifted for it (`serveConsole`); its heartbeat
  * keeps a proxy from cutting it.
+ * THE APP (pwa.ts): the manifest, the service worker, its offline page and the icons are public like the assets (a
+ * browser fetches the manifest without credentials); the CSP's `manifest-src` and `worker-src` allow them, from this
+ * origin only. The worker answers only a GET page load that fails, with the offline page, and caches nothing else.
  */
 
 export interface ConsoleDeps {
@@ -148,7 +152,8 @@ export const SESSION_MS = 7 * 24 * 3600_000;
 const SECURITY_HEADERS: Record<string, string> = {
   // Inline style attributes only (a size bar's width, a speaker's colour); no inline script at all.
   // connect-src: htmx's requests, to this origin only.
-  "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  // manifest-src, worker-src: the app's manifest and service worker (pwa.ts).
+  "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "x-content-type-options": "nosniff",
   // Not `no-referrer`: under it a browser serializes a form POST's Origin as `null` (Fetch, "append a
   // request Origin header"), and every write from the Settings page would be refused. `same-origin` sends
@@ -320,6 +325,9 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     const a = await serveAsset(asset, url.searchParams.get("v"));
     return respond(a.body, 200, a.type, { "cache-control": a.cacheControl });
   }
+  // The app's manifest, worker, offline page and icons: public too (pwa.ts says why).
+  const pwa = pwaFile(path);
+  if (pwa) return respond(pwa.body, 200, pwa.type, { "cache-control": pwa.cacheControl, ...(pwa.csp ? { "content-security-policy": pwa.csp } : {}) });
   try {
     const auth = await authenticate(deps, req, path);
     if (!auth.ok) return auth.response;

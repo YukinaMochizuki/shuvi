@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- The console's app icon (docs/console.md, "Installing it"): a ribbon "s" with a face and a
+       hair clip, on peach into lavender. The PNGs beside it are rendered from it by
+       scripts/pwa-icons.ts, the maskable one with #mark drawn at 80% for a mask's safe zone. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffc9b0"/><stop offset="1" stop-color="#b49af0"/></linearGradient>
+    <linearGradient id="s" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#ffe2d4"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity=".28"/></filter>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <g id="mark">
+    <g filter="url(#shadow)">
+      <path d="M350 172 C320 122 200 116 178 186 C158 256 350 244 346 328 C342 408 208 414 160 352" fill="none" stroke="url(#s)" stroke-width="68" stroke-linecap="round"/>
+      <path d="M350 172 C320 122 200 116 178 186 C158 256 350 244 346 328 C342 408 208 414 160 352" fill="none" stroke="#f3b49c" stroke-width="6" stroke-linecap="round" opacity=".5" transform="translate(10 6)"/>
+    </g>
+    <ellipse cx="234" cy="242" rx="9" ry="13" fill="#5a3aa8"/><ellipse cx="284" cy="254" rx="9" ry="13" fill="#5a3aa8"/>
+    <circle cx="231" cy="237" r="3.5" fill="#fff"/><circle cx="281" cy="249" r="3.5" fill="#fff"/>
+    <ellipse cx="216" cy="262" rx="11" ry="6" fill="#f59a9a" opacity=".6"/><ellipse cx="304" cy="274" rx="11" ry="6" fill="#f59a9a" opacity=".6"/>
+    <g transform="translate(318 118) rotate(-32) scale(.8)"><rect x="0" y="0" width="86" height="22" rx="11" fill="#fff"/><rect x="10" y="32" width="86" height="22" rx="11" fill="#fff" opacity=".8"/></g>
+  </g>
+</svg>
