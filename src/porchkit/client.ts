@@ -284,6 +284,11 @@ export interface BrowseAnswer {
   title?: string | null;
   /** The page as text, already capped by the desktop; absent for a screenshot. */
   snapshot?: string | null;
+  /**
+   * `"delta"`: `snapshot` is only what changed since the last page text of the same page (porchkit's rule: the
+   * refs of the earlier page text still hold); absent: the whole page.
+   */
+  snapshot_kind?: "delta" | string | null;
   tabs?: { index: number; url?: string | null; title?: string | null; active?: boolean }[];
   /** porchkit thinks the page is a checkout: placing the order needs `approved`. */
   checkout?: boolean;
@@ -334,7 +339,7 @@ export interface BrowseAnswer {
   urls?: string[] | null;
   tile_scale?: number | null;
   sheet?: BrowseImage | null;
-  /** find: up to 40 matching lines of the page text (the refs are then the whole tree's), out of `total`. */
+  /** find: up to 40 matching lines of the page text (a text line's match has no ref), out of `total`. */
   query?: string | null;
   matches?: { ref?: string | null; line?: string | null; context?: string | null }[] | null;
   total?: number | null;

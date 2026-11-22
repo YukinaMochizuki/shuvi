@@ -42,7 +42,10 @@ import { createHash } from "node:crypto";
  *                       `GET /browse/sessions/<s>/downloads` lists `browse.downloads` (`addDownload` puts one there,
  *                       its file served by GET /files/<key> once completed); the act `pdf` answers `pdf: {key,
  *                       bytes}` (a small made-up PDF). `browse.reportBytes` makes a screenshot's or a PDF's answer
- *                       claim that size (a large file without the bytes).
+ *                       claim that size (a large file without the bytes). A `scroll` or `wait` that stays on the
+ *                       page answers only what changed, as porchkit does on the same document: `snapshot_kind:
+ *                       "delta"` and a page text that says nothing changed (`DELTA_NOTHING`, then the URL and
+ *                       title); with `whole: true` (porchkit's flag) it answers the whole page instead.
  *
  * Errors by URL (any endpoint but /browse): one containing `private` is 422 unavailable, `busy` 429 (Retry-After 180),
  * `internal.example` 403 egress_refused, `broken` 502, `slow` 504. `failNext(path, …)` queues one answer for
@@ -160,6 +163,9 @@ export interface FakeBrowse {
   /** A size a screenshot's or a PDF's answer claims instead of its own. */
   reportBytes?: number;
 }
+
+/** The desktop's page text of a delta where nothing changed (porchkit_desktop.snapshot's own words). */
+export const DELTA_NOTHING = "(same page as your last page text: nothing in it changed, and its refs still hold)";
 
 /** The fake page's PDF. */
 export const FAKE_PDF = new TextEncoder().encode("%PDF-1.4\n% a made-up PDF for tests\n%%EOF\n");
@@ -498,8 +504,12 @@ export class FakePorchkit {
         if (body.offset !== undefined) from = Number(body.offset);
         break;
       case "wait":
-      case "scroll":
-        break;
+      case "scroll": {
+        // The same page: only what changed (nothing, here), as porchkit answers a delta.
+        if (body.whole === true) break;
+        const p = SHOP_PAGES[here];
+        return reply({ snapshot: [DELTA_NOTHING, `URL: ${here}`, `Title: ${p?.title ?? ""}`].join("\n"), snapshot_kind: "delta", tabs: tabsOf(here) });
+      }
       case "hover": {
         if (!page?.refs[String(body.ref)]) return fail(422, "bad_ref", "no such ref in the latest snapshot");
         notes.push(`hovering ${String(body.ref)}`);

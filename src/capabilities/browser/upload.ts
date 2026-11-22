@@ -19,10 +19,14 @@ export function overLimit(name: string, bytes: number): string | null {
   return bytes > UPLOAD_LIMIT ? `${name} is ${sizeLabel(bytes)}; a page can be given files up to ${sizeLabel(UPLOAD_LIMIT)}. Nothing was uploaded.` : null;
 }
 
-/** Post the file, then set it (`ref`) or arm the next file chooser with it. Throws porchkit's errors. */
+/**
+ * Post the file, then set it (`ref`) or arm the next file chooser with it. Throws porchkit's errors. Its answer is
+ * always the whole page (`whole: true`): this module keeps no record of what the model has read (fresh.ts does, for
+ * the browser's own acts), and an upload is rare enough to answer in full.
+ */
 export async function uploadToPage(porch: Porchkit, session: string, file: { name: string; bytes: Uint8Array }, ref?: string): Promise<BrowseAnswer> {
   const held = await porch.browseUpload(session, file.name, file.bytes);
-  return porch.browseAct(session, { action: "upload", files: [held.id], ...(ref ? { ref } : {}) });
+  return porch.browseAct(session, { action: "upload", files: [held.id], whole: true, ...(ref ? { ref } : {}) });
 }
 
 /** The line before the page text: what happened, and in armed mode what to do next. */

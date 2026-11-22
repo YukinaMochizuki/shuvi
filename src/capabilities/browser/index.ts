@@ -11,6 +11,7 @@ import { attachmentPass } from "./attachments.ts";
 import { extraLines, imagesOf, matchLines, pointerLines, rememberShot, situationLines, targetText } from "./look.ts";
 import { lookTools } from "./pointer.ts";
 import { fileTools } from "./files.ts";
+import { seenWhole, unseen, wholeFlag } from "./fresh.ts";
 import { sessionOf } from "./keys.ts";
 import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_MS, USE_WITHIN_MS, releaseCarry, releasePurchase, requester, requestPurchase } from "./purchase.ts";
 
@@ -21,7 +22,11 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *
  *   tools     browser_open, browser_snapshot, browser_click, browser_type, browser_press, browser_scroll,
  *             browser_back, browser_tab, browser_wait, browser_dialog (answers a page's confirm / prompt): one action each, answered with the page as text (porchkit's
- *             snapshot, passed through as it comes: it is capped there), so she rarely needs browser_snapshot;
+ *             snapshot, passed through as it comes: it is capped there), so she rarely needs browser_snapshot. On the
+ *             same page (porchkit's rule, the owner's of 2026-11-22) an action answers only what changed
+ *             (`snapshot_kind: "delta"`: porchkit's text says so in its first line, else `DELTA_LINE` does), and the
+ *             refs of the page text she already has still hold; browser_snapshot reads the whole page again. The first
+ *             page text of a conversation (after /new, a switch, a compaction) is asked for whole (fresh.ts);
  *             browser_screenshot: the page as an image (porchkit's file, fetched here with the token);
  *             browser_close; browser_status: the desktop, signed in or not, takeover, the live view's link;
  *             browser_request_purchase: the owner's card before an order is placed (purchase.ts);
@@ -89,7 +94,7 @@ export const BROWSER_SECTION = `## Your browser
 
 This chat has a browser of your own: a real Chrome on the owner's home machine, signed in to your own accounts (not the owner's). Use it when \`read_link\` falls short (a page that needs a login, clicks or a form), or when someone asks you to do something on a site.
 
-Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). Refs belong to the latest page text only; after anything changes the page, use the new ones. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
+Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). On the same page, an action answers only what changed, and the refs of the page text you already have still hold; a ref of an element that is gone, or of an earlier page, is refused. \`browser_snapshot\` reads the whole page again. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
 
 The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
 
@@ -129,7 +134,7 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
     case "stale_page":
       return "The page changed since its last page text. Nothing was done. Take a new snapshot (browser_snapshot) and act on what it shows.";
     case "bad_ref":
-      return "That ref is not on the latest page text (refs change whenever the page does). Nothing was done. Take a new snapshot (browser_snapshot) and use a ref from it.";
+      return "That ref is not on the page any more (its element is gone, or it is from an earlier page). Nothing was done. Take a new snapshot (browser_snapshot) and use a ref from it.";
     case "timeout":
       return "The browser did not finish that in time. It may or may not have happened: take a new snapshot to see where the page is.";
     case "desktop":
@@ -179,6 +184,21 @@ export function dialogLine(d: NonNullable<BrowseAnswer["dialog"]>): string {
   return `The page asks: "${d.message ?? ""}" (${kind}) — answer with browser_dialog (accept true or false) before anything else.`;
 }
 
+/**
+ * The line before a page text that is only what changed (porchkit's `snapshot_kind: "delta"`), when porchkit's text
+ * does not begin by saying so itself (its own first line, `(same page as your last page text: ...)`).
+ */
+export const DELTA_LINE = "Only what changed on this page is below; the rest of your last page text, and its refs, still hold (browser_snapshot reads the whole page):";
+
+/** The acts whose answer may be only what changed (porchkit's own list: not open, snapshot or tab). */
+const MAY_DELTA: ReadonlySet<string> = new Set(["click", "type", "press", "scroll", "back", "forward", "wait", "wait_for", "hover", "select", "upload", "dialog"]);
+
+/** The answer gave the model the whole page text (not only what changed, a part of it, or find's matches). */
+function givesWholePage(body: BrowseAction, a: BrowseAnswer): boolean {
+  if (typeof a.snapshot !== "string" || a.snapshot_kind === "delta" || body.action === "find") return false;
+  return !(body.action === "snapshot" && (body.ref !== undefined || body.offset !== undefined));
+}
+
 /** An action's answer, as the model reads it: the page text as porchkit gives it, then tabs, notes, warnings. */
 export function renderAnswer(a: BrowseAnswer, opts: { approved?: number; carries?: boolean; carried?: number; liveUrl?: string | null; action?: string } = {}): string {
   // What the action did, and hints about the page, first (look.ts).
@@ -191,6 +211,7 @@ export function renderAnswer(a: BrowseAnswer, opts: { approved?: number; carries
   const matches = matchLines(a);
   if (matches) out.push(...matches);
   const snap = a.snapshot?.trimEnd();
+  if (snap && a.snapshot_kind === "delta" && !snap.startsWith("(same page")) out.push(DELTA_LINE);
   out.push(snap ? snap : `${a.title ?? "(no title)"} — ${a.url ?? "(no address)"}`);
   out.push(...extraLines(a));
   const tabs = a.tabs ?? [];
@@ -226,7 +247,7 @@ const link = z
   .min(1)
   .regex(/^https?:\/\/\S+$/i, "an http(s) link")
   .describe("The page's address (http or https)");
-const ref = z.string().min(1).max(32).describe('An element\'s ref from the latest page text, e.g. "e12"');
+const ref = z.string().min(1).max(32).describe('An element\'s ref from the page text, e.g. "e12"');
 const approval = positiveInt.optional().describe("The owner's purchase approval id, only for the one action that places an approved order");
 
 type Approved = { approval?: number };
@@ -262,11 +283,15 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
       if (why) return err(`Refused: ${why}. Nothing was done. Without a usable approval, call browser_request_purchase and wait for the owner's answer.`);
     }
     if (approvalId !== undefined || carriedId !== undefined) body = { ...body, approved: true };
+    // The first page text of a conversation is whole: the model has not read porchkit's last one (fresh.ts).
+    const asked = MAY_DELTA.has(String(body.action)) ? { ...body, ...wholeFlag(db, chat.id) } : body;
     let a: BrowseAnswer;
     try {
-      a = await porch.browseAct(session, body);
+      a = await porch.browseAct(session, asked);
     } catch (e) {
       const nothing = e instanceof PorchkitError && DID_NOTHING.has(e.code);
+      // porchkit may have given a page text the model never got (not when it refused before the desktop).
+      if (!nothing && !(e instanceof PorchkitError && e.code === "approval_required")) unseen(db, chat.id);
       if (nothing && approvalId !== undefined) releasePurchase(db, approvalId);
       if (nothing && carriedId !== undefined) releaseCarry(db, carriedId);
       const used = approvalId ?? carriedId;
@@ -274,6 +299,7 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
       if (opts.timeout && e instanceof PorchkitError && e.code === "timeout") return err(opts.timeout);
       return err(`${describeBrowse(e, e instanceof PorchkitError && e.code === "owner_only" ? await liveUrl() : undefined)}${kept}`);
     }
+    if (givesWholePage(body, a)) seenWhole(db, chat.id);
     // An approved action that opened a confirm / prompt carries its approval on to that one dialog (not a carried one).
     const carries = approvalId !== undefined && !!a.dialog;
     if (carries) grantCarry(db, approvalId!, session);
@@ -297,7 +323,8 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
 
   const snapshot: ToolDef<{ ref?: string; offset?: number }> = {
     name: "browser_snapshot",
-    description: "The current page as text again, with fresh refs (every other action already answers with it). `ref`: only that part of the page; `offset`: read on where a long page text was cut.",
+    description:
+      "The whole current page as text again. Every other action answers with the page too, but on the same page only with what changed (the refs of earlier page text still hold); this reads it all. `ref`: only that part of the page (links whole); `offset`: read on where a long page text was cut.",
     inputSchema: {
       ref: ref.optional().describe("Only this element and what is inside it"),
       offset: z.number().int().nonnegative().optional().describe("Where to start, as the cut page text says"),

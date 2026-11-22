@@ -6,7 +6,8 @@ import { textOf, type ToolDef, type ToolResult } from "agent-runtime";
 import { buildSystemPrompt } from "../src/agent/prompt.ts";
 import { ownerAuthority, runTurn, type TurnState } from "../src/agent/turn.ts";
 import { TriggerScan, type BotIdentity } from "../src/agent/triggers.ts";
-import { BROWSER_SECTION, browser, CHECKOUT_NOTE, describeBrowse, DID_NOTHING, SIGNED_OUT, spentNote, type BrowserConfig } from "../src/capabilities/browser/index.ts";
+import { BROWSER_SECTION, browser, CHECKOUT_NOTE, DELTA_LINE, describeBrowse, DID_NOTHING, renderAnswer, SIGNED_OUT, spentNote, type BrowserConfig } from "../src/capabilities/browser/index.ts";
+import { turns, turnSteps } from "../src/store/schema.ts";
 import { PURCHASE_KIND } from "../src/capabilities/browser/purchase.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { chatCapabilities, type TurnContext } from "../src/capabilities/types.ts";
@@ -17,7 +18,7 @@ import { recordBatch } from "../src/server/poller.ts";
 import type { Db } from "../src/store/db.ts";
 import { allChats, ensureChat, type Chat } from "../src/store/events.ts";
 import { claimTurn } from "../src/store/turns.ts";
-import { FakePorchkit, PROFILE, SHOP, SHOP_CHECKOUT, SHOP_DONE, TINY_PNG } from "./fake-porchkit.ts";
+import { DELTA_NOTHING, FakePorchkit, PROFILE, SHOP, SHOP_CHECKOUT, SHOP_DONE, TINY_PNG } from "./fake-porchkit.ts";
 import { groupUpdate, memDb, OWNER, ScriptedAdapter } from "./helpers.ts";
 
 const BOT: BotIdentity = { id: 1, username: "shuvi_test_bot" };
@@ -165,6 +166,58 @@ describe("each tool's request", () => {
     expect(p.calls.at(-1)).toMatchObject({ method: "DELETE", path: `/browse/sessions/chat-${chat.id}` });
   });
 
+  test("an answer of only what changed on the same page says so before it; the whole page is not marked", async () => {
+    const p = porch();
+    const db = memDb();
+    const t = toolsFor(db, p, dm(db));
+    const whole = text(await t.browser_open!({ url: SHOP }));
+    expect(whole).not.toContain(DELTA_LINE);
+    // porchkit's own first line says it is partial: said once, not twice.
+    const r = text(await t.browser_scroll!({ direction: "down" }));
+    expect(r).toBe(`${DELTA_NOTHING}\nURL: ${SHOP}\nTitle: Example Shop`);
+    // The refs of the earlier page text still hold.
+    expect((await t.browser_click!({ ref: "e3" })).isError).toBeFalsy();
+    expect(text(await t.browser_snapshot!())).not.toContain(DELTA_LINE);
+    // A delta whose text does not say so gets the line; its cut says what the offset reads.
+    const bare = renderAnswer({ url: SHOP, snapshot: "in page:\n[e9] button \"New\"", snapshot_kind: "delta", next_offset: 40 });
+    expect(bare.split("\n")).toEqual([DELTA_LINE, "in page:", '[e9] button "New"', "(The whole page text is cut after 40 lines: browser_snapshot with offset 40 reads what comes after the cut.)"]);
+  });
+
+  test("the first page text of a conversation is asked for whole: after /new, a compaction, or an answer that may be lost", async () => {
+    const p = porch();
+    const db = memDb();
+    const chat = dm(db);
+    const t = toolsFor(db, p, chat);
+    const wholeOf = () => acts(p).at(-1)!.whole;
+    await t.browser_scroll!({ direction: "down" }); // nothing seen yet in this conversation
+    expect(wholeOf()).toBe(true);
+    await t.browser_open!({ url: SHOP });
+    expect(wholeOf()).toBeUndefined(); // open never answers a delta
+    expect(text(await t.browser_scroll!({ direction: "down" }))).toStartWith(DELTA_NOTHING);
+    expect(wholeOf()).toBeUndefined();
+    // /new: the next turn opens a fresh conversation.
+    db.insert(turns).values({ chatId: chat.id, status: "done", fromSeq: 0, toSeq: 0, opening: "new" }).run();
+    expect(text(await t.browser_scroll!({ direction: "down" }))).toContain('[e1] link "A teapot"');
+    expect(wholeOf()).toBe(true);
+    expect(text(await t.browser_wait!({ seconds: 1 }))).toStartWith(DELTA_NOTHING); // seen whole: deltas again
+    // A turn that resumes it changes nothing.
+    db.insert(turns).values({ chatId: chat.id, status: "done", fromSeq: 0, toSeq: 0, opening: "resumed" }).run();
+    await t.browser_wait!({ seconds: 1 });
+    expect(wholeOf()).toBeUndefined();
+    // A compaction: the model sees a summary of what came before.
+    const turn = db.insert(turns).values({ chatId: chat.id, status: "done", fromSeq: 0, toSeq: 0, opening: "resumed" }).returning().get();
+    db.insert(turnSteps).values({ turnId: turn.id, n: 0, kind: "compaction" }).run();
+    await t.browser_wait!({ seconds: 1 });
+    expect(wholeOf()).toBe(true);
+    await t.browser_wait!({ seconds: 1 });
+    expect(wholeOf()).toBeUndefined();
+    // An answer lost on the way: the model may not have read it.
+    p.failNext(`/browse/sessions/chat-${chat.id}/act`, 504, { error: "timeout", detail: "slow" });
+    expect((await t.browser_wait!({ seconds: 1 })).isError).toBe(true);
+    await t.browser_wait!({ seconds: 1 });
+    expect(wholeOf()).toBe(true);
+  });
+
   test("browser_screenshot fetches porchkit's file and returns it as an image", async () => {
     const p = porch();
     const db = memDb();
@@ -225,7 +278,7 @@ describe("errors, as the model reads them", () => {
     [503, "unavailable", "The browser is not available right now (the desktop is down or not set up): no desktop is configured. Say so, or try again later."],
     [422, "ref_required", "On this page, typing needs the field it goes into. Nothing was done. Give the field's ref from the page text (browser_type with ref)."],
     [409, "stale_page", "The page changed since its last page text. Nothing was done. Take a new snapshot (browser_snapshot) and act on what it shows."],
-    [422, "bad_ref", "That ref is not on the latest page text (refs change whenever the page does). Nothing was done. Take a new snapshot (browser_snapshot) and use a ref from it."],
+    [422, "bad_ref", "That ref is not on the page any more (its element is gone, or it is from an earlier page). Nothing was done. Take a new snapshot (browser_snapshot) and use a ref from it."],
     [504, "timeout", "The browser did not finish that in time. It may or may not have happened: take a new snapshot to see where the page is."],
     [502, "desktop", "The browser crashed and is being restarted; its windows are gone. Open the page again."],
   ];
@@ -272,7 +325,7 @@ describe("errors, as the model reads them", () => {
     expect(text(await t.browser_open!({ url: SHOP }))).toStartWith("The browser is busy");
     p.browse.sessions.clear();
     await t.browser_open!({ url: SHOP });
-    expect(text(await t.browser_click!({ ref: "e9" }))).toStartWith("That ref is not on the latest page text");
+    expect(text(await t.browser_click!({ ref: "e9" }))).toStartWith("That ref is not on the page any more");
     p.browse.takeover = true;
     expect(text(await t.browser_snapshot!())).toStartWith("The owner is using the browser right now");
     p.browse.available = false;
