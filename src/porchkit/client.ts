@@ -387,7 +387,12 @@ export interface BrowseSituation {
   changes?: { subtree?: string | null; added?: number | null; removed?: number | null }[] | null;
   visible_change_pct?: number | null;
   nothing_visible_changed?: boolean | null;
-  /** Verbatim: "page: canvas-heavy", "blocked-by: captcha", "native-popup: press Escape". */
+  /** A click, Enter or a select waited for the page (requests, then its text) and gave up at porchkit's limit. */
+  still_loading?: boolean | null;
+  /**
+   * Verbatim: "page: canvas-heavy", "blocked-by: captcha", "native-popup: press Escape", "page: may still be loading
+   * (wait, then read it again)" (with `still_loading`).
+   */
   hints?: string[] | null;
 }
 

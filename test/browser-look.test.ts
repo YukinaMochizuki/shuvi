@@ -11,7 +11,7 @@ import type { TurnContext } from "../src/capabilities/types.ts";
 import { answerApproval, getApproval } from "../src/control/approvals.ts";
 import type { Db } from "../src/store/db.ts";
 import { ensureChat, type Chat } from "../src/store/events.ts";
-import { CANVAS, CAPTCHA, FakePorchkit, FORM, POPUP_PAGE, SHOP, SHOP_CHECKOUT, SHOP_DONE } from "./fake-porchkit.ts";
+import { CANVAS, CAPTCHA, FakePorchkit, FORM, LOADING_HINT, POPUP_PAGE, SHOP, SHOP_CHECKOUT, SHOP_DONE, SLOW } from "./fake-porchkit.ts";
 import { memDb, OWNER } from "./helpers.ts";
 
 const fakes: { stop(): void }[] = [];
@@ -265,6 +265,14 @@ describe("the other tools beyond the page text", () => {
     expect(lines(await t.browser_open!({ url: POPUP_PAGE }))[0]).toBe('Hint: native-popup: press Escape — a browser popup is open: browser_press("Escape").');
     await t.browser_press!({ key: "Escape" });
     expect(p.browse.popupClosed).toBe(true);
+  });
+
+  test("a page that may still be loading: the hint says to wait and read what changed before acting on it", async () => {
+    const { t } = world();
+    await t.browser_open!({ url: SLOW });
+    expect(lines(await t.browser_click!({ ref: "e1" }))[0]).toBe(
+      `Hint: ${LOADING_HINT} — the page was still loading when this was read, so what you see may be the old content: browser_wait (1–2 s) and read what changed before acting on it.`,
+    );
   });
 });
 
