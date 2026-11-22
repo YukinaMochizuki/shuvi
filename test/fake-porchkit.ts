@@ -77,7 +77,7 @@ export const CAPTCHA = "https://blocked.example.com/";
 export const POPUP_PAGE = "https://cookies.example.com/";
 /** A form with a dropdown. */
 export const FORM = "https://forms.example.com/apply";
-/** A page whose acts porchkit answers before it finished loading (its wait gave up at the limit). */
+/** A page whose acts porchkit answers before it finished loading (its wait gave up at the limit), its open included. */
 export const SLOW = "https://slow.example.com/results";
 export const LOADING_HINT = "page: may still be loading (wait, then read it again)";
 /** porchkit's hints per page (the fake's own). */
