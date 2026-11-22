@@ -13,8 +13,8 @@ import { kvGet, kvSet } from "../../store/events.ts";
  *              visible changed (the action may have missed), and porchkit's hints verbatim with what to do.
  *   pointer    `target` (or, with dry_run, only that), `settled` / `settle_ms`, `changed_pct`, `changed_bbox`; a
  *              pointer answer has no page text, and says the last one's refs still hold.
- *   find       `matches[].line` (the page text's own line) and where it is, out of `total`; the refs are then the
- *              whole tree's.
+ *   find       `matches[].line` (the page text's own line) and where it is, out of `total`; the matches' refs hold
+ *              from then on, as a page text's do, and a line of text has none (act on what it is in).
  *   images     `screenshot`, `closeup`, `zoom`, `sheet` are fetched from `/files/<key>` with the token and returned
  *              as image blocks, each after a line saying what it is and its pixel size. Coordinates for
  *              browser_pointer are in the pixels of the LAST SCREENSHOT the model was shown: its width is kept per
@@ -140,7 +140,7 @@ export function matchLines(a: BrowseAnswer): string[] | null {
     return `${withRef}${str(m.context) ? ` — in ${m.context}` : ""}`;
   });
   return [
-    `${total !== undefined && total > a.matches.length ? `${a.matches.length} of ${total} matches` : `${a.matches.length} match${a.matches.length === 1 ? "" : "es"}`}${str(a.query) ? ` for "${a.query}"` : ""} (refs now count across the whole page):`,
+    `${total !== undefined && total > a.matches.length ? `${a.matches.length} of ${total} matches` : `${a.matches.length} match${a.matches.length === 1 ? "" : "es"}`}${str(a.query) ? ` for "${a.query}"` : ""} (act on a ref; a line of text has none, act on what it is in):`,
     ...lines,
   ];
 }
@@ -149,7 +149,12 @@ export function matchLines(a: BrowseAnswer): string[] | null {
 export function extraLines(a: BrowseAnswer): string[] {
   const out: string[] = [];
   const next = num(a.next_offset);
-  if (next !== undefined) out.push(`(The page text was cut: browser_snapshot with offset ${next} reads on.)`);
+  if (next !== undefined)
+    out.push(
+      a.snapshot_kind === "delta"
+        ? `(The whole page text is cut after ${next} lines: browser_snapshot with offset ${next} reads what comes after the cut.)`
+        : `(The page text was cut: browser_snapshot with offset ${next} reads on.)`,
+    );
   if (a.wait_for && typeof a.wait_for === "object") {
     const s = num(a.wait_for.seconds);
     out.push(a.wait_for.met === false ? `Waited${s !== undefined ? ` ${s}s` : ""}: it did not happen.` : `Waited${s !== undefined ? ` ${s}s` : ""}: it happened.`);

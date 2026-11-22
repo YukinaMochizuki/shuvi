@@ -197,7 +197,7 @@ describe("the other tools beyond the page text", () => {
     await t.browser_open!({ url: FORM });
     const r = await t.browser_find!({ query: "country" });
     expect(lastAct(p)).toEqual({ action: "find", query: "country" });
-    expect(lines(r)).toEqual(['1 match for "country" (refs now count across the whole page):', '[e2] combobox "Country" — in A long form', `A long form — ${FORM}`]);
+    expect(lines(r)).toEqual(['1 match for "country" (act on a ref; a line of text has none, act on what it is in):', '[e2] combobox "Country" — in A long form', `A long form — ${FORM}`]);
     expect(lines(await t.browser_find!({ query: "zebra" }))[0]).toBe('No element matches "zebra" on this page.');
   });
 

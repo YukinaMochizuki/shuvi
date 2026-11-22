@@ -102,7 +102,7 @@ describe("browser_upload: a file someone sent, or a download", () => {
       const held = p.browse.uploads.get(`chat-${chat}`)!;
       expect(held.map((u) => [u.name, [...u.bytes]])).toEqual([["me.jpg", [...photo]]]);
       expect(p.browse.chosen.get(`chat-${chat}`)).toEqual(["me.jpg"]);
-      expect(p.of(`/browse/sessions/chat-${chat}/act`).find((c) => c.body.action === "upload")!.body).toEqual({ action: "upload", files: ["u1"] });
+      expect(p.of(`/browse/sessions/chat-${chat}/act`).find((c) => c.body.action === "upload")!.body).toEqual({ action: "upload", files: ["u1"], whole: true });
       expect(server.downloads).toEqual(["file-me"]);
       expect(kvGet(db, `browser_attach:${seq}`)).toBeUndefined();
       expect(existsSync(join(dataDir, "browser-uploads")) ? readdirSync(join(dataDir, "browser-uploads")) : []).toEqual([]);
@@ -126,7 +126,7 @@ describe("browser_upload: a file someone sent, or a download", () => {
     expect(text(results(a)[1]!)).toStartWith("Put form.pdf (1 KB) into the file field e2.\n");
     expect(p.browse.inputs.get(`chat-${chat} e2`)).toEqual(["form.pdf"]);
     expect(p.browse.armed.size).toBe(0);
-    expect(p.of(`/browse/sessions/chat-${chat}/act`).find((c) => c.body.action === "upload")!.body).toEqual({ action: "upload", files: ["u1"], ref: "e2" });
+    expect(p.of(`/browse/sessions/chat-${chat}/act`).find((c) => c.body.action === "upload")!.body).toEqual({ action: "upload", files: ["u1"], whole: true, ref: "e2" });
   });
 
   test("over 20 MB is refused before anything is fetched or posted; a bad source, another chat's message or one without a file too", async () => {
