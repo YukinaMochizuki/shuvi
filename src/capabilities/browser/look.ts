@@ -54,6 +54,8 @@ function hintAdvice(hint: string): string {
   if (h.startsWith("blocked-by: captcha")) return "stop here: send the owner the live view link (browser_status) and ask him to get past it";
   if (h.startsWith("blocked-by")) return "something stands in the way: look (browser_screenshot) before acting";
   if (h.startsWith("native-popup")) return 'a browser popup is open: browser_press("Escape")';
+  if (h.startsWith("page: may still be loading"))
+    return "the page was still loading when this was read, so what you see may be the old content: browser_wait (1–2 s) and read what changed before acting on it";
   return "";
 }
 

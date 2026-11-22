@@ -77,8 +77,16 @@ export const CAPTCHA = "https://blocked.example.com/";
 export const POPUP_PAGE = "https://cookies.example.com/";
 /** A form with a dropdown. */
 export const FORM = "https://forms.example.com/apply";
+/** A page whose acts porchkit answers before it finished loading (its wait gave up at the limit). */
+export const SLOW = "https://slow.example.com/results";
+export const LOADING_HINT = "page: may still be loading (wait, then read it again)";
 /** porchkit's hints per page (the fake's own). */
-const PAGE_HINTS: Record<string, string[]> = { [CANVAS]: ["page: canvas-heavy"], [CAPTCHA]: ["blocked-by: captcha"], [POPUP_PAGE]: ["native-popup: press Escape"] };
+const PAGE_HINTS: Record<string, string[]> = {
+  [CANVAS]: ["page: canvas-heavy"],
+  [CAPTCHA]: ["blocked-by: captcha"],
+  [POPUP_PAGE]: ["native-popup: press Escape"],
+  [SLOW]: [LOADING_HINT],
+};
 /** A dropdown's options, by `<page> <ref>`. */
 const SELECT_OPTIONS: Record<string, string[]> = { [`${FORM} e2`]: ["Japan", "Taiwan", "United States"] };
 
@@ -110,6 +118,7 @@ const SHOP_PAGES: Record<string, { title: string; refs: Record<string, [string, 
   [CANVAS]: { title: "Canvas game", refs: { e1: ["canvas", "", null] } },
   [CAPTCHA]: { title: "Just a moment...", refs: { e1: ["checkbox", "I am human", null] } },
   [POPUP_PAGE]: { title: "Cookies", refs: { e1: ["link", "Home", SHOP] } },
+  [SLOW]: { title: "Results", refs: { e1: ["button", "Apply filter", null] } },
   [FORM]: { title: "A long form", refs: { e1: ["textbox", "Name", null], e2: ["combobox", "Country", null], e3: ["button", "Next", null], e4: ["link", "Terms", null] } },
 };
 /** Google sign-in and account security (password, 2-Step, passkeys, recovery, deleting the account): the owner's. */
@@ -478,6 +487,8 @@ export class FakePorchkit {
       const now = h.at(-1)!;
       situation.url_changed = now !== here;
       situation.hints = PAGE_HINTS[now] ?? [];
+      if (now === SLOW) situation.still_loading = true;
+      else delete situation.still_loading;
       return Response.json({ session: id, url: now, title: SHOP_PAGES[now]?.title ?? "", checkout: now === SHOP_CHECKOUT, notes, ...(withSituation ? { situation } : {}), ...fields });
     };
     /** A snapshot answer's own fields: the page text (cut at `browse.cutAt` refs, with `next_offset`), tabs. */
