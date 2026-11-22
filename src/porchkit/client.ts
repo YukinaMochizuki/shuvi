@@ -303,7 +303,7 @@ export interface BrowseAnswer {
    * loosely all the same: a field of another shape is skipped, never an error.
    */
   situation?: BrowseSituation | null;
-  /** The image's size and scale (a screenshot, a zoom, a pointer, a watch, a canvas page's ref act). */
+  /** The image's size and scale (a screenshot, a zoom, a pointer, a watch; a ref act carries no image). */
   width?: number | null;
   height?: number | null;
   scale?: number | null;
@@ -315,7 +315,7 @@ export interface BrowseAnswer {
   /** pointer: the kind it did, and what was under the point. */
   kind?: string | null;
   target?: BrowseTarget | null;
-  /** pointer (and a ref act on a canvas-heavy page): whether the page settled, in how long, and how much changed. */
+  /** pointer: whether the page settled, in how long, and how much changed. */
   settled?: boolean | null;
   settle_ms?: number | null;
   changed_pct?: number | null;

@@ -49,7 +49,8 @@ const boxText = (b: BrowseBox) => `x ${b.x}, y ${b.y}, ${b.w}×${b.h}`;
 /** What to do about a hint, by its kind (the part before the colon). The hint itself is shown verbatim. */
 function hintAdvice(hint: string): string {
   const h = hint.toLowerCase();
-  if (h.startsWith("page: canvas")) return "its controls are drawn, not in the page text: browser_screenshot with grid, then browser_pointer, and check the screenshot it returns";
+  if (h.startsWith("page: canvas"))
+    return "part of this page is drawn (a map, a canvas); the page text and refs still work for everything else. Only if what you need is not in the page text: browser_screenshot with grid, then browser_pointer";
   if (h.startsWith("blocked-by: captcha")) return "stop here: send the owner the live view link (browser_status) and ask him to get past it";
   if (h.startsWith("blocked-by")) return "something stands in the way: look (browser_screenshot) before acting";
   if (h.startsWith("native-popup")) return 'a browser popup is open: browser_press("Escape")';
@@ -106,7 +107,7 @@ function namesText(t: BrowseTarget): string {
   return `${hit ? ` reads ${quote(hit)}` : ""}${inside.length ? `${hit ? "," : ""} inside ${inside.map(quote).join(" in ")}` : ""}`;
 }
 
-/** A pointer's lines (and a canvas-heavy page's ref act's): what was under the point, and what the action did. */
+/** A pointer's lines: what was under the point, and what the action did (a ref act's answer has none of it). */
 export function pointerLines(a: BrowseAnswer): string[] {
   const out: string[] = [];
   const target = targetText(a.target);
