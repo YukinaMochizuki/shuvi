@@ -363,3 +363,20 @@ With neither variable set, the console is off. Transcripts are recorded and prun
 
 Over the tunnel, open it as `http://127.0.0.1:8787` (or `localhost`): those are the origins a Settings change
 is accepted from.
+
+## Installing it
+
+The console is an installable app (a PWA): added to a phone's or a computer's home screen, it opens as
+"shuvi", in a window of its own without the browser's bars, at the turns.
+
+- iOS / iPadOS Safari: Share → Add to Home Screen.
+- Android Chrome: ⋮ → Install app (or Add to Home screen).
+- Desktop Chrome or Edge: the install icon at the end of the address bar.
+
+It needs a secure origin, which the tailnet's HTTPS name is (and `http://127.0.0.1` over the tunnel).
+
+Nothing of a chat is kept on the device. The app's service worker does one thing: when a page load cannot reach
+the console (the device offline, the tailnet or the machine down), it shows a page saying so, with Try again,
+instead of the browser's error. Every page, live stream and change still goes to the console itself.
+`src/console/pwa.ts` holds the manifest, the worker and that page; the icons are `src/console/pwa/*.png`,
+rendered from `pwa/icon.svg` with `bun scripts/pwa-icons.ts` (needs a local Chromium).

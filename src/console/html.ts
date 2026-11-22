@@ -7,6 +7,7 @@
 
 import { createHash } from "node:crypto";
 import { assetUrl, assetsVersion, type Asset } from "./assets.ts";
+import { APPLE_ICON_PATH, MANIFEST_PATH, THEME_COLOR } from "./pwa.ts";
 
 export class Raw {
   constructor(readonly s: string) {}
@@ -78,6 +79,8 @@ const HTMX_CONFIG = JSON.stringify({
  * two. A boosted navigation keeps the head it started with, so such a page is reached with a full load: its
  * links into it carry `hx-boost="false"` (home.ts), and it upgrades what a later swap brings itself.
  *
+ * THE APP: every page names the manifest and the icon a home screen shows (pwa.ts); console.js registers the worker.
+ *
  * `keyboard: "resizes"` (the Home page, where one types in a full-height editor): on Android Chrome the on-screen
  * keyboard shrinks the page (`interactive-widget=resizes-content`) instead of covering its bottom, so a pane sized in
  * `dvh` ends on the keyboard. Other pages keep the browser's default (the keyboard overlays the page).
@@ -88,6 +91,12 @@ export function page(title: string, body: Raw, who?: string, here?: "turns" | "h
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1${keyboard === "resizes" ? ", interactive-widget=resizes-content" : ""}">
 <meta name="robots" content="noindex">
+<meta name="theme-color" content="${THEME_COLOR}">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="shuvi">
+<link rel="manifest" href="${MANIFEST_PATH}">
+<link rel="apple-touch-icon" href="${APPLE_ICON_PATH}">
 <title>${title} · shuvi</title>
 <meta name="htmx-config" content="${HTMX_CONFIG}">
 <meta name="assets" content="${assetsVersion()}">
