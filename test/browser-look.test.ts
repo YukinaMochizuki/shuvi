@@ -47,7 +47,7 @@ function world() {
 const lastAct = (p: FakePorchkit) => p.calls.filter((c) => c.path.endsWith("/act")).at(-1)!.body;
 
 const CANVAS_HINT =
-  "Hint: page: canvas-heavy — its controls are drawn, not in the page text: browser_screenshot with grid, then browser_pointer, and check the screenshot it returns.";
+  "Hint: page: canvas-heavy — part of this page is drawn (a map, a canvas); the page text and refs still work for everything else. Only if what you need is not in the page text: browser_screenshot with grid, then browser_pointer.";
 const NOT_FOR_POINTER = "for browser_pointer use the screenshot's pixels, not these";
 
 describe("browser_pointer", () => {
@@ -242,7 +242,7 @@ describe("the other tools beyond the page text", () => {
     expect(text(rest)).not.toContain("cut");
   });
 
-  test("browser_hover and browser_press holding a key; a ref act on a canvas page carries settling and a screenshot", async () => {
+  test("browser_hover and browser_press holding a key; a ref act on a canvas page answers text only, the hint with it", async () => {
     const { p, t } = world();
     await t.browser_open!({ url: FORM });
     expect(text(await t.browser_hover!({ ref: "e4" }))).toContain("Note: hovering e4");
@@ -252,9 +252,11 @@ describe("the other tools beyond the page text", () => {
 
     await t.browser_open!({ url: CANVAS });
     const r = await t.browser_click!({ ref: "e1" });
-    expect(text(r)).toContain("After it: the page settled in 80 ms; nothing on it changed.");
+    expect(lines(r)[0]).toBe(CANVAS_HINT);
     expect(text(r)).toContain('[e1] canvas ""');
-    expect(texts(r).slice(1)).toEqual(["Screenshot (coordinates are in this image's pixels: 1280×666):"]);
+    expect(text(r)).not.toContain("After it:");
+    expect(texts(r)).toHaveLength(1);
+    expect(images(r)).toHaveLength(0);
   });
 
   test("hints as the model reads them: a captcha says to stop and send the owner the live link; a native popup, press Escape", async () => {

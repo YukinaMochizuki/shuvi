@@ -484,8 +484,6 @@ export class FakePorchkit {
       const shown = cut ? rest.slice(0, b.cutAt) : rest;
       return { snapshot: [`URL: ${now}`, `Title: ${p?.title ?? ""}`, ...shown].join("\n"), tabs: tabsOf(now), ...(cut ? { next_offset: from + b.cutAt! } : {}) };
     };
-    /** What a ref act on a canvas-heavy page adds: settling, the change, a screenshot. */
-    const canvasExtra = () => (here === CANVAS ? { settled: true, settle_ms: 80, width: 1280, height: 666, scale: 1, changed_pct: 0, screenshot: img(`canvas-${here}`, 1280, 666) } : {});
     switch (action) {
       case "open": {
         const url = String(body.url ?? "");
@@ -602,7 +600,7 @@ export class FakePorchkit {
           b.armed.delete(id);
           notes.push(`file chooser: ${armed.join(", ")} (set)`);
         }
-        return reply({ ...snapshot(), ...canvasExtra() });
+        return reply(snapshot());
       }
       case "upload": {
         const held = b.uploads.get(id) ?? [];
