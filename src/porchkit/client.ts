@@ -325,6 +325,8 @@ export interface BrowseAnswer {
   settle_ms?: number | null;
   changed_pct?: number | null;
   changed_bbox?: BrowseBox | null;
+  /** pointer: the share of the screen that moved on its own just before (a carousel, a video), left out of `changed_pct`. */
+  moving_excluded_pct?: number | null;
   /** pointer with dry_run: nothing was pressed; `target` says what is there. */
   dry_run?: boolean | null;
   /** pointer: a close-up around the point (its region in the screenshot's pixels, enlarged by `factor`). */
@@ -339,9 +341,13 @@ export interface BrowseAnswer {
   urls?: string[] | null;
   tile_scale?: number | null;
   sheet?: BrowseImage | null;
-  /** find: up to 40 matching lines of the page text (a text line's match has no ref), out of `total`. */
+  /**
+   * find: up to 40 matching lines of the page text (a text line's match has no ref), out of `total`. Every word of the
+   * query must be in a match, in any order; a query in double quotes is one exact phrase. `within`: no single line has
+   * every word, this element's part of the page does. A merged line's `ref` is its refs, space-separated.
+   */
   query?: string | null;
-  matches?: { ref?: string | null; line?: string | null; context?: string | null }[] | null;
+  matches?: { ref?: string | null; line?: string | null; context?: string | null; within?: boolean | null }[] | null;
   total?: number | null;
   /** snapshot: where to read on when the page text was cut. */
   next_offset?: number | null;
@@ -387,6 +393,8 @@ export interface BrowseSituation {
   changes?: { subtree?: string | null; added?: number | null; removed?: number | null }[] | null;
   visible_change_pct?: number | null;
   nothing_visible_changed?: boolean | null;
+  /** The share of the screen that moved on its own just before the act (a carousel, a video): left out of the two above. */
+  moving_excluded_pct?: number | null;
   /** A click, Enter or a select waited for the page (requests, then its text) and gave up at porchkit's limit. */
   still_loading?: boolean | null;
   /**

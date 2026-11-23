@@ -27,7 +27,11 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *             (`snapshot_kind: "delta"`: porchkit's text says so in its first line, else `DELTA_LINE` does), and the
  *             refs of the page text she already has still hold, but for an element whose role or name changed: it has a
  *             new ref and its old one is refused (porchkit's rule, the owner's, after a Maps filter refilled a result
- *             list; a link that only gains Google Maps' visited-link suffix keeps its ref, porchkit's rule of round 4);
+ *             list; a link that only gains Google Maps' visited-link suffix keeps its ref, porchkit's rule of round 4; a
+ *             node the page drew again with the same content keeps its ref when its place is unique, round 6). Identical
+ *             siblings come as one line with all their refs (`[e5 e9] button "讚" ×2`), identical lines nothing acts
+ *             on as one `×N` line, and a mass rename as one summary line (porchkit's, round 6); `type` whose text did
+ *             not land is `not_typed`, a ref act whose point is covered is `covered` (nothing pressed);
  *             browser_snapshot reads the whole page again. A click, Enter or a select waits for the page (up to
  *             1.5 s more, porchkit's), and an open, a back, or an act that changes the URL waits for the new page (up
  *             to 3 s, porchkit's, the owner's of 2026-11-22); its hint when it may still be loading is look.ts's. The first
@@ -99,7 +103,7 @@ export const BROWSER_SECTION = `## Your browser
 
 This chat has a browser of your own: a real Chrome on the owner's home machine, signed in to your own accounts (not the owner's). Use it when \`read_link\` falls short (a page that needs a login, clicks or a form), or when someone asks you to do something on a site.
 
-Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). On the same page, an action answers only what changed, and the refs of the page text you already have still hold; a ref of an element that is gone, or of an earlier page, is refused. An element whose name changed (a list a filter refilled with other entries) is shown with a new ref, and its old ref is refused: never act on a ref you have not seen with what it names now. After opening a page, going back, a click, Enter or a choice, the browser waits a moment for the page to load; if it says the page may still be loading, \`browser_wait\` and read what changed. \`browser_snapshot\` reads the whole page again. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
+Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). Identical elements side by side are one line with all their refs, \`[e5 e9 e13] button "Like" ×3\`: each ref is its own element, in that order. Identical lines you cannot act on are one line with ×N and no ref. On the same page, an action answers only what changed, and the refs of the page text you already have still hold, also for a part the page drew again with the same content; a ref of an element that is gone, or of an earlier page, is refused. An element whose name changed (a list a filter refilled with other entries) is shown with a new ref, and its old ref is refused: never act on a ref you have not seen with what it names now. When many in one list are renamed at once, one line says so ("in list … [e300]: 70 checkboxes renamed (new refs)"): read them with \`browser_snapshot\` with that ref, or \`browser_find\`. After opening a page, going back, a click, Enter or a choice, the browser waits a moment for the page to load; if it says the page may still be loading, \`browser_wait\` and read what changed. \`browser_snapshot\` reads the whole page again. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
 
 The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
 
@@ -136,6 +140,13 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
       return `The browser is not available right now (the desktop is down or not set up): ${detail} Say so, or try again later.`;
     case "ref_required":
       return "On this page, typing needs the field it goes into. Nothing was done. Give the field's ref from the page text (browser_type with ref).";
+    case "not_typed":
+      // `acted: false` (porchkit's): no click and no key reached the page. Otherwise something may have happened there.
+      return e.body.acted === false
+        ? `The text did not go into the field: ${detail} Nothing was done. Click the field first (browser_click with its ref), then browser_type again with its ref.`
+        : `The text did not go into the field: ${detail} The click or some keys did reach the page (a newline or a tab in the text may have submitted or pressed something), so take a new snapshot (browser_snapshot) before anything else; then click the field and type again with its ref.`;
+    case "covered":
+      return `That element is covered at the point it would be clicked: ${detail} Nothing was pressed. Close or scroll away what covers it (a banner, a dialog, a menu), or scroll it into view, then try again.`;
     case "stale_page":
       return "The page changed since its last page text. Nothing was done. Take a new snapshot (browser_snapshot) and act on what it shows.";
     case "bad_ref":
@@ -171,7 +182,7 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
  * given back. Nothing else is: `unavailable`, `unreachable`, a timeout or a crash can come after the wrapper acted
  * (a dropped connection while the answer was read), and giving the approval back then could place two orders.
  */
-export const DID_NOTHING: ReadonlySet<string> = new Set(["takeover", "busy", "bad_ref", "ref_required", "stale_page", "target_changed", "dialog_open", "owner_only", "egress_refused", "forbidden", "bad_request", "unauthorized"]);
+export const DID_NOTHING: ReadonlySet<string> = new Set(["takeover", "busy", "bad_ref", "ref_required", "stale_page", "target_changed", "covered", "dialog_open", "owner_only", "egress_refused", "forbidden", "bad_request", "unauthorized"]);
 
 /** What follows the error when an approved action failed in a way that may have come after the click. */
 export const spentNote = (id: number) =>
@@ -352,7 +363,8 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
 
   const type: ToolDef<{ ref?: string; text: string; submit?: boolean } & Approved> = {
     name: "browser_type",
-    description: "Type text, into the element `ref` (focused first) or wherever the focus is. `submit` presses Enter after. Never a password or payment details.",
+    description:
+      "Type text, into the element `ref` (clicked first) or the field that has the focus. `submit` presses Enter after. If the text does not land in the field, it is an error and nothing is submitted: click the field, then type with its ref. Never a password or payment details.",
     inputSchema: {
       ref: ref.optional(),
       text: z.string().max(5000).describe("What to type"),

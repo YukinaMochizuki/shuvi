@@ -9,12 +9,15 @@ import { kvGet, kvSet } from "../../store/events.ts";
  *
  *   situation  every act answer's `situation` becomes a few lines at the TOP: the URL changed (not after an
  *              open, which is the point of it), a popup opened, a dialog opened (when the answer does not show the
- *              dialog itself), what changed where (`changes[].subtree`), how much of the screen changed, that nothing
- *              visible changed (the action may have missed), and porchkit's hints verbatim with what to do.
+ *              dialog itself), what changed where (`changes[].subtree`), how much of the screen changed (leaving out
+ *              what moved on its own just before, a carousel or a video: `moving_excluded_pct`, said when there was
+ *              any), that nothing visible changed (the action may have missed; never after a find, which only reads:
+ *              `READS`), and porchkit's hints verbatim with what to do.
  *   pointer    `target` (or, with dry_run, only that), `settled` / `settle_ms`, `changed_pct`, `changed_bbox`; a
  *              pointer answer has no page text, and says the last one's refs still hold.
  *   find       `matches[].line` (the page text's own line) and where it is, out of `total`; the matches' refs hold
- *              from then on, as a page text's do, and a line of text has none (act on what it is in).
+ *              from then on, as a page text's do, and a line of text has none (act on what it is in). A `within`
+ *              match holds every word in the lines under it, not in its own.
  *   images     `screenshot`, `closeup`, `zoom`, `sheet` are fetched from `/files/<key>` with the token and returned
  *              as image blocks, each after a line saying what it is and its pixel size. Coordinates for
  *              browser_pointer are in the pixels of the LAST SCREENSHOT the model was shown: its width is kept per
@@ -59,9 +62,19 @@ function hintAdvice(hint: string): string {
   return "";
 }
 
+/** A find only reads the page: nothing it did could have missed, so no line about what changed on the screen. */
+const READS: ReadonlySet<string> = new Set(["find"]);
+
+/** " (not counting the 40% of the screen that moves on its own)", when porchkit left some out. */
+function movingText(v: unknown): string {
+  const m = num(v);
+  return m !== undefined && m > 0 ? ` (not counting the ${pct(m)} of the screen that moves on its own: a carousel, a video)` : "";
+}
+
 /**
  * The situation lines for the top of an answer (none when nothing is worth saying). `action`: the act it answers
- * (after `open` a changed URL is no news); a dialog the answer shows itself (`dialog`) is not announced twice.
+ * (after `open` a changed URL is no news; after a read, nothing on the screen is); a dialog the answer shows itself
+ * (`dialog`) is not announced twice.
  */
 export function situationLines(s: BrowseSituation | null | undefined, a: Pick<BrowseAnswer, "url" | "dialog">, action?: string): string[] {
   if (!s || typeof s !== "object") return [];
@@ -72,8 +85,10 @@ export function situationLines(s: BrowseSituation | null | undefined, a: Pick<Br
   const changes = Array.isArray(s.changes) ? s.changes.filter((c) => c && typeof c === "object") : [];
   if (changes.length) out.push(`Changed: ${changes.map((c) => `${str(c.subtree) ?? "page"} (+${num(c.added) ?? 0} −${num(c.removed) ?? 0})`).join(", ")}.`);
   const visible = num(s.visible_change_pct);
-  if (visible !== undefined && visible > 0) out.push(`About ${pct(visible)} of the screen changed.`);
-  if (s.nothing_visible_changed === true) out.push("Nothing visible changed — your action may have missed. Look (browser_screenshot) or try another way; do not just repeat it.");
+  const read = action !== undefined && READS.has(action);
+  if (!read && visible !== undefined && visible > 0) out.push(`About ${pct(visible)} of the screen changed${movingText(s.moving_excluded_pct)}.`);
+  if (!read && s.nothing_visible_changed === true)
+    out.push(`Nothing visible changed${movingText(s.moving_excluded_pct)} — your action may have missed. Look (browser_screenshot) or try another way; do not just repeat it.`);
   for (const h of Array.isArray(s.hints) ? s.hints : []) {
     const hint = str(h);
     if (!hint) continue;
@@ -124,7 +139,7 @@ export function pointerLines(a: BrowseAnswer): string[] {
   const changed = num(a.changed_pct);
   if (changed !== undefined) {
     const b = box(a.changed_bbox);
-    bits.push(changed > 0 ? `${pct(changed)} of it changed${b ? ` (around ${boxText(b)})` : ""}` : "nothing on it changed");
+    bits.push((changed > 0 ? `${pct(changed)} of it changed${b ? ` (around ${boxText(b)})` : ""}` : "nothing on it changed") + movingText(a.moving_excluded_pct));
   }
   if (bits.length) out.push(`After it: ${bits.join("; ")}.`);
   if (a.kind && !a.snapshot) out.push("(The page text was not read again: the last page text's refs still hold.)");
@@ -139,7 +154,9 @@ export function matchLines(a: BrowseAnswer): string[] | null {
   const lines = a.matches.map((m) => {
     const line = str(m.line) ?? (str(m.ref) ? `[${m.ref}]` : "(a match)");
     const withRef = str(m.ref) && !line.includes(`[${m.ref}]`) ? `[${m.ref}] ${line}` : line;
-    return `${withRef}${str(m.context) ? ` — in ${m.context}` : ""}`;
+    const first = str(m.ref)?.split(" ")[0];
+    const within = m.within === true ? ` — the words are in its lines${first ? ` (browser_snapshot with ref ${first} reads them)` : ""}` : "";
+    return `${withRef}${str(m.context) ? ` — in ${m.context}` : ""}${within}`;
   });
   return [
     `${total !== undefined && total > a.matches.length ? `${a.matches.length} of ${total} matches` : `${a.matches.length} match${a.matches.length === 1 ? "" : "es"}`}${str(a.query) ? ` for "${a.query}"` : ""} (act on a ref; a line of text has none, act on what it is in):`,
