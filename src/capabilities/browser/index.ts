@@ -27,8 +27,10 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *             (`snapshot_kind: "delta"`: porchkit's text says so in its first line, else `DELTA_LINE` does), and the
  *             refs of the page text she already has still hold, but for an element whose role or name changed: it has a
  *             new ref and its old one is refused (porchkit's rule, the owner's, after a Maps filter refilled a result
- *             list); browser_snapshot reads the whole page again. A click, Enter or a select waits for the page (up to
- *             1.5 s more, porchkit's); its hint when it may still be loading is look.ts's. The first
+ *             list; a link that only gains Google Maps' visited-link suffix keeps its ref, porchkit's rule of round 4);
+ *             browser_snapshot reads the whole page again. A click, Enter or a select waits for the page (up to
+ *             1.5 s more, porchkit's), and an open, a back, or an act that changes the URL waits for the new page (up
+ *             to 3 s, porchkit's, the owner's of 2026-11-22); its hint when it may still be loading is look.ts's. The first
  *             page text of a conversation (after /new, a switch, a compaction) is asked for whole (fresh.ts);
  *             browser_screenshot: the page as an image (porchkit's file, fetched here with the token);
  *             browser_close; browser_status: the desktop, signed in or not, takeover, the live view's link;
@@ -97,7 +99,7 @@ export const BROWSER_SECTION = `## Your browser
 
 This chat has a browser of your own: a real Chrome on the owner's home machine, signed in to your own accounts (not the owner's). Use it when \`read_link\` falls short (a page that needs a login, clicks or a form), or when someone asks you to do something on a site.
 
-Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). On the same page, an action answers only what changed, and the refs of the page text you already have still hold; a ref of an element that is gone, or of an earlier page, is refused. An element whose name changed (a list a filter refilled with other entries) is shown with a new ref, and its old ref is refused: never act on a ref you have not seen with what it names now. After a click, Enter or a choice, the browser waits a moment for the page to load; if it says the page may still be loading, \`browser_wait\` and read what changed. \`browser_snapshot\` reads the whole page again. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
+Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). On the same page, an action answers only what changed, and the refs of the page text you already have still hold; a ref of an element that is gone, or of an earlier page, is refused. An element whose name changed (a list a filter refilled with other entries) is shown with a new ref, and its old ref is refused: never act on a ref you have not seen with what it names now. After opening a page, going back, a click, Enter or a choice, the browser waits a moment for the page to load; if it says the page may still be loading, \`browser_wait\` and read what changed. \`browser_snapshot\` reads the whole page again. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
 
 The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
 
@@ -320,7 +322,7 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
 
   const open: ToolDef<{ url: string }> = {
     name: "browser_open",
-    description: "Open a page in your browser (this chat's window). Answers with the page as text, its elements with refs.",
+    description: "Open a page in your browser (this chat's window). Answers with the page as text once it has loaded (it waits a few seconds at most), its elements with refs.",
     inputSchema: { url: link },
     handler: (a) => act({ action: "open", url: a.url }),
   };
@@ -395,7 +397,7 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
   const wait: ToolDef<{ seconds: number }> = {
     name: "browser_wait",
     description:
-      "Wait for the page to finish something (loading, a search), up to 10 seconds, then see what changed. A click, Enter or a choice already waits a moment for the page; use this when the answer says it may still be loading, or for something slower.",
+      "Wait for the page to finish something (loading, a search), up to 10 seconds, then see what changed. Opening a page, going back, a click, Enter or a choice already waits a moment for the page; use this when the answer says it may still be loading, or for something slower.",
     inputSchema: { seconds: z.number().positive().max(10) },
     handler: (a) => act({ action: "wait", seconds: a.seconds }),
   };

@@ -269,7 +269,10 @@ describe("the other tools beyond the page text", () => {
 
   test("a page that may still be loading: the hint says to wait and read what changed before acting on it", async () => {
     const { t } = world();
-    await t.browser_open!({ url: SLOW });
+    // An open waits for the new page too (porchkit, round 4), and may give up at its limit.
+    expect(lines(await t.browser_open!({ url: SLOW }))).toContain(
+      `Hint: ${LOADING_HINT} — the page was still loading when this was read, so what you see may be the old content: browser_wait (1–2 s) and read what changed before acting on it.`,
+    );
     expect(lines(await t.browser_click!({ ref: "e1" }))[0]).toBe(
       `Hint: ${LOADING_HINT} — the page was still loading when this was read, so what you see may be the old content: browser_wait (1–2 s) and read what changed before acting on it.`,
     );
