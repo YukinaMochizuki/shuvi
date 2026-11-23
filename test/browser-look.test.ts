@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { textOf, type ToolDef, type ToolResult } from "agent-runtime";
 import type { TurnState } from "../src/agent/turn.ts";
 import { BROWSER_SECTION, browser, type BrowserConfig } from "../src/capabilities/browser/index.ts";
-import { pointerLines, rememberShot, situationLines, targetText } from "../src/capabilities/browser/look.ts";
+import { matchLines, pointerLines, rememberShot, situationLines, targetText } from "../src/capabilities/browser/look.ts";
 import { POINTER_ACTION_FIELD } from "../src/capabilities/browser/pointer.ts";
 import type { TurnContext } from "../src/capabilities/types.ts";
 import { answerApproval, getApproval } from "../src/control/approvals.ts";
@@ -201,6 +201,29 @@ describe("the other tools beyond the page text", () => {
     expect(lines(await t.browser_find!({ query: "zebra" }))[0]).toBe('No element matches "zebra" on this page.');
   });
 
+  test("browser_find: every word in any order, a quoted phrase whole; a match held by the lines under it says so", async () => {
+    const { p, t } = world();
+    await t.browser_open!({ url: FORM });
+    expect(lines(await t.browser_find!({ query: "try coun" }))[1]).toBe('[e2] combobox "Country" — in A long form');
+    expect(lines(await t.browser_find!({ query: '"try coun"' }))[0]).toBe('No element matches "\"try coun\"" on this page.');
+    expect(lastAct(p)).toEqual({ action: "find", query: '"try coun"' });
+    const within = matchLines({ query: "最新趨勢話題 顯示更多", total: 1, matches: [{ ref: "e40", line: 'complementary "側欄"', context: "", within: true }] });
+    expect(within![1]).toBe('[e40] complementary "側欄" — the words are in its lines (browser_snapshot with ref e40 reads them)');
+    // A merged line's refs, as its bracket has them.
+    expect(matchLines({ query: "讚", total: 1, matches: [{ ref: "e5 e9", line: 'button "讚" ×2', context: "" }] })![1]).toBe('[e5 e9] button "讚" ×2');
+  });
+
+  test("browser_type whose text did not land is an error that says to click the field", async () => {
+    const { p, t } = world();
+    await t.browser_open!({ url: FORM });
+    p.browse.notTypedNext = true;
+    const r = await t.browser_type!({ ref: "e1", text: "tea", submit: true });
+    expect(r.isError).toBe(true);
+    expect(text(r)).toStartWith("The text did not go into the field: the text did not land");
+    expect(text(r)).toContain("take a new snapshot (browser_snapshot) before anything else");
+    expect((await t.browser_type!({ ref: "e1", text: "tea" })).isError ?? false).toBe(false);
+  });
+
   test("browser_wait_for: met says how long; a timeout says it did not happen; one condition only", async () => {
     const { p, t } = world();
     await t.browser_open!({ url: FORM });
@@ -305,6 +328,22 @@ describe("the situation", () => {
       "Hint: something new",
     ]);
     expect(situationLines({ url_changed: false, dialog_opened: false, popup_opened: false, hints: [] }, {})).toEqual([]);
+  });
+
+  test("a find has no line about the screen; what moved on its own is said when it was left out", () => {
+    const still = { visible_change_pct: 0, nothing_visible_changed: true, hints: [] };
+    expect(situationLines(still, {}, "find")).toEqual([]);
+    expect(situationLines({ ...still, visible_change_pct: 4 }, {}, "find")).toEqual([]);
+    expect(situationLines(still, {}, "click")[0]).toStartWith("Nothing visible changed — your action may have missed.");
+    expect(situationLines({ visible_change_pct: 1.5, moving_excluded_pct: 46.7, hints: [] }, {}, "click")).toEqual([
+      "About 1.5% of the screen changed (not counting the 46.7% of the screen that moves on its own: a carousel, a video).",
+    ]);
+    expect(situationLines({ ...still, moving_excluded_pct: 40 }, {}, "type")[0]).toBe(
+      "Nothing visible changed (not counting the 40% of the screen that moves on its own: a carousel, a video) — your action may have missed. Look (browser_screenshot) or try another way; do not just repeat it.",
+    );
+    expect(pointerLines({ kind: "click", changed_pct: 0.4, moving_excluded_pct: 30 })).toContain(
+      "After it: 0.4% of it changed (not counting the 30% of the screen that moves on its own: a carousel, a video).",
+    );
   });
 
   test("after an open a changed URL is no news; a dialog the answer shows is not announced twice", () => {

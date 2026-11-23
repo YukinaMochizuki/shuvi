@@ -167,6 +167,8 @@ export interface FakeBrowse {
   cutAt?: number;
   /** The next pointer act answers 409 target_changed (the point holds something else now). */
   targetChangedNext?: boolean;
+  /** The next `type` answers porchkit's `not_typed` (the field did not take the text). */
+  notTypedNext?: boolean;
   /** What a watch's `urls` says (default: the page's URL at every frame). */
   watchUrls?: string[];
   /** A size a screenshot's or a PDF's answer claims instead of its own. */
@@ -536,9 +538,11 @@ export class FakePorchkit {
         return reply({ ...snapshot(), select: { selected: option, value: option.toLowerCase().replace(/\s+/g, "-"), via: "select" } });
       }
       case "find": {
-        const q = String(body.query ?? "").toLowerCase();
+        // porchkit's rule (round 6): every word, in any order; a query in double quotes is one phrase.
+        const q = String(body.query ?? "").trim().toLowerCase();
+        const words = /^".+"$/.test(q) ? [q.slice(1, -1)] : q.split(/\s+/).filter(Boolean);
         const found = Object.entries(page?.refs ?? {})
-          .filter(([, [, name]]) => name.toLowerCase().includes(q))
+          .filter(([, [, name]]) => words.every((w) => name.toLowerCase().includes(w)))
           .map(([ref, [role, name]]) => ({ ref, line: `[${ref}] ${role} "${name}"`, context: page?.title ?? "" }));
         return reply({ tabs: tabsOf(here), query: String(body.query ?? ""), matches: found.slice(0, 40), total: found.length });
       }
@@ -642,6 +646,14 @@ export class FakePorchkit {
         if (body.ref !== undefined && !page?.refs[String(body.ref)]) return fail(422, "bad_ref", "no such ref in the latest snapshot");
         const g = needs(isCheckout && body.submit === true);
         if (g) return g;
+        if (b.notTypedNext) {
+          // porchkit's `not_typed` (round 6): the field did not take the text, after its click and keys (`acted`).
+          b.notTypedNext = false;
+          return Response.json(
+            { error: "not_typed", detail: "the text did not land: the keys were sent but the field's text did not change (it may take keys only once a click gave it the focus)", acted: true },
+            { status: 409 },
+          );
+        }
         break;
       }
       case "press": {

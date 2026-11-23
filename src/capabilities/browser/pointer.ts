@@ -105,7 +105,8 @@ export function lookTools(x: { act: Act; db: Db; chatId: number }): ToolDef[] {
 
   const find: ToolDef<{ query: string }> = {
     name: "browser_find",
-    description: "Find elements on the page by what they say or are (a button's words, a heading, a field's label), with their refs: on a big page, before scrolling.",
+    description:
+      'Find elements on the page by what they say or are (a button\'s words, a heading, a field\'s label), with their refs: on a big page, before scrolling. Several words match an element that has all of them, in any order (or the part of the page that holds them all); put the query in double quotes for one exact phrase ("顯示更多").',
     inputSchema: { query: z.string().min(1).max(200) },
     handler: (a) => act({ action: "find", query: a.query }),
   };

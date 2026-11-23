@@ -708,7 +708,7 @@ chats:
   });
 
   test("refusals porchkit makes before the desktop give the approval back: each code", async () => {
-    expect([...DID_NOTHING].sort()).toEqual(["bad_ref", "bad_request", "busy", "dialog_open", "egress_refused", "forbidden", "owner_only", "ref_required", "stale_page", "takeover", "target_changed", "unauthorized"]);
+    expect([...DID_NOTHING].sort()).toEqual(["bad_ref", "bad_request", "busy", "covered", "dialog_open", "egress_refused", "forbidden", "owner_only", "ref_required", "stale_page", "takeover", "target_changed", "unauthorized"]);
     const p = porch();
     const db = memDb();
     const { chat, t, id } = await approvedAtCheckout(db, p);
@@ -717,6 +717,25 @@ chats:
       expect(text(await t.browser_click!({ ref: "e2", approval: id }))).toEndWith(`(Approval #${id} was not used up.)`);
       expect(getApproval(db, id)!.data).toMatchObject({ used: false });
     }
+  });
+
+  test("type whose text did not land, and a covered element: what happened, and what to do", async () => {
+    // Nothing reached the page (porchkit's `acted: false`): nothing was done.
+    expect(describeBrowse(new PorchkitError(409, "not_typed", "nothing was typed: no text field has the focus", { acted: false }))).toBe(
+      "The text did not go into the field: nothing was typed: no text field has the focus. Nothing was done. Click the field first (browser_click with its ref), then browser_type again with its ref.",
+    );
+    // The click or keys reached the page (`acted`, or not said): never "nothing was submitted".
+    for (const body of [{ acted: true }, {}]) {
+      const s = describeBrowse(new PorchkitError(409, "not_typed", "the text did not land: the keys were sent but the field's text did not change", body));
+      expect(s).toStartWith("The text did not go into the field: the text did not land");
+      expect(s).toContain("take a new snapshot (browser_snapshot) before anything else");
+      expect(s).not.toMatch(/Nothing was (done|submitted)/);
+    }
+    expect(describeBrowse(new PorchkitError(409, "covered", "ref 'e7' is covered by 「廣告」 at its point"))).toBe(
+      "That element is covered at the point it would be clicked: ref 'e7' is covered by 「廣告」 at its point. Nothing was pressed. Close or scroll away what covers it (a banner, a dialog, a menu), or scroll it into view, then try again.",
+    );
+    // An approved type that did not land used its approval: it reached the desktop.
+    expect(DID_NOTHING.has("not_typed")).toBe(false);
   });
 
   test("a ref-less type with an approval, refused ref_required, gives the approval back", async () => {
