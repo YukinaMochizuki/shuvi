@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { fileSource } from "../src/secrets/source.ts";
 import type { ToolBoundary } from "agent-runtime";
 import { driverModel, makeDriver } from "../src/agent/backend.ts";
 import {
@@ -61,7 +62,7 @@ describe("the model catalog", () => {
     expect(() => addProvider(memDb(), { name: "x", kind: vllm, baseUrl: "http://127.0.0.1:8000/v1" })).toThrow('unknown provider kind "vllm"');
     const model = { id: "x/m", provider: { kind: vllm, name: "x" }, model: { model: "m" } } as unknown as CatalogModel;
     expect(() => driverModel(model)).toThrow('unknown provider kind "vllm"');
-    expect(() => makeDriver({ db: memDb(), chatId: 1, model, boundary: {} as ToolBoundary, note: () => {}, secretsFile: "/nonexistent" })).toThrow(
+    expect(() => makeDriver({ db: memDb(), chatId: 1, model, boundary: {} as ToolBoundary, note: () => {}, secrets: fileSource("/nonexistent") })).toThrow(
       'unknown provider kind "vllm"',
     );
   });

@@ -1680,6 +1680,59 @@ details.addp[open] > summary::before {
   width: 150px;
   height: 26px;
 }
+/* The Secrets page (secrets.ts): a value is typed into a textarea, never shown; a grant is a line under its profile. */
+.sform textarea {
+  width: 100%;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: var(--s1) var(--s2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.sform textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.grantf {
+  gap: var(--s2);
+}
+.grantf select {
+  height: 26px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 var(--s1);
+  font-size: var(--t-small);
+}
+.sform.note label {
+  grid-column: 1 / -1;
+  text-align: left;
+}
+.note-sum {
+  margin-top: var(--s1);
+  font-size: var(--t-small);
+  color: var(--ink);
+  max-width: var(--measure);
+  word-break: break-word;
+}
+.grantline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s3);
+  margin-top: var(--s1);
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.grantline b {
+  color: var(--ink);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 .foot {
   margin-top: var(--s6);
 }

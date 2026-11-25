@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fileSource } from "../src/secrets/source.ts";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,14 +37,14 @@ describe("the driver a model runs on", () => {
     expect(driverModel(findModel(db, "claude/default")!)).toBeUndefined();
     addModel(db, { provider: "claude", model: "opus" });
     expect(driverModel(findModel(db, "claude/opus")!)).toBe("opus");
-    expect(makeDriver({ db, chatId: 1, model: findModel(db, "claude/opus")!, boundary: {}, note: () => {}, secretsFile: "/nonexistent" }).id).toBe("claude-agent-sdk");
+    expect(makeDriver({ db, chatId: 1, model: findModel(db, "claude/opus")!, boundary: {}, note: () => {}, secrets: fileSource("/nonexistent") }).id).toBe("claude-agent-sdk");
   });
 
   test("an OpenAI-compatible key is read from the secrets file; one missing fails naming only its reference", () => {
     const db = openDb(":memory:", { migrate: true });
     const m = endpoint(db);
-    expect(makeDriver({ db, chatId: 1, model: m, boundary: {}, note: () => {}, secretsFile: secretsFile({ endpoint: { API_KEY: "test-key" } }) }).id).toBe("openai-compat");
-    expect(() => makeDriver({ db, chatId: 1, model: m, boundary: {}, note: () => {}, secretsFile: secretsFile({ other: { API_KEY: "x" } }) })).toThrow(/the key endpoint\.API_KEY is not in the secrets file/);
+    expect(makeDriver({ db, chatId: 1, model: m, boundary: {}, note: () => {}, secrets: fileSource(secretsFile({ endpoint: { API_KEY: "test-key" } })) }).id).toBe("openai-compat");
+    expect(() => makeDriver({ db, chatId: 1, model: m, boundary: {}, note: () => {}, secrets: fileSource(secretsFile({ other: { API_KEY: "x" } })) })).toThrow(/the key endpoint\.API_KEY is not among the secret profiles/);
   });
 });
 
@@ -63,7 +64,7 @@ describe("OpenAI-compatible backend factory over mocked fetch", () => {
   ];
   const answer = (text: string) => [chunk({ role: "assistant", content: text }), chunk({}, "stop", { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 })];
   const driver = (db: Db, boundary: ToolBoundary) =>
-    makeDriver({ db, chatId: 7, model: findModel(db, "endpoint/test-model") ?? endpoint(db), boundary, note: () => {}, secretsFile: secretsFile({ endpoint: { API_KEY: "test-key" } }) });
+    makeDriver({ db, chatId: 7, model: findModel(db, "endpoint/test-model") ?? endpoint(db), boundary, note: () => {}, secrets: fileSource(secretsFile({ endpoint: { API_KEY: "test-key" } })) });
 
   test("persists a successful and refused boundary call, then resumes through the same factory", async () => {
     const dir = mkdtempSync(join(tmpdir(), "shuvi-backend-wire-"));

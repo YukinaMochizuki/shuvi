@@ -1,5 +1,6 @@
 import { dot, href, html, type Raw } from "./html.ts";
 import type { Flash } from "./home.ts";
+import { anchor } from "./settings.ts";
 
 /**
  * The last three sections of a chat's settings page (chat-settings.ts draws the page; DESIGN.md "A chat's
@@ -44,14 +45,17 @@ export interface SchedulesView {
 export interface GrantRow {
   id: number;
   profile: string;
-  /** Its variable names, from the secrets file; null when the file cannot be used. */
+  /** Its variable names, from the secret profiles; null when the secrets file cannot be used. */
   vars: string[] | null;
-  /** The profile is no longer in the file. */
+  /** The profile is no longer there. */
   gone: boolean;
-  expiresAt: string;
+  /** null: until revoked. */
+  expiresAt: string | null;
   grantedAt: string | null;
   /** "you", or "an operator, Ann". */
   askedBy: string;
+  /** An owner grant: every chat's, for the owner's requests (revoked on the Secrets page). */
+  everyChat: boolean;
 }
 
 export interface SecretsView {
@@ -271,10 +275,15 @@ export function schedulesSection(c: Ctx, v: SchedulesView): Raw {
 // ---- secrets -----------------------------------------------------------------------------------------------
 
 function grantRow(c: Ctx, g: GrantRow): Raw {
-  const vars = g.vars === null ? html`<span class="faint">variables unknown while the file cannot be used</span>` : g.gone ? html`<span class="c-refused">no longer in the secrets file</span>` : g.vars.length ? html`<span class="mono">${g.vars.join(", ")}</span>` : html`<span class="faint">no variables</span>`;
-  const left = Date.parse(g.expiresAt) - c.now;
-  return html`<div class="crow grow2"><div class="stext"><b><span class="mono">${g.profile}</span> <span class="faint num">${span(left)} left</span></b> <span>${vars}</span> <span>until ${whenDay(g.expiresAt, c.timeZone, c.now)} · asked for by ${g.askedBy} · grant #${g.id}</span></div>
-<form method="post" action="${base(c)}/revoke">${csrfField(c)}<input type="hidden" name="grant" value="${g.id}"><button type="submit" class="btn danger">Revoke now</button></form></div>`;
+  const vars = g.vars === null ? html`<span class="faint">variables unknown while the file cannot be used</span>` : g.gone ? html`<span class="c-refused">no longer a secret profile</span>` : g.vars.length ? html`<span class="mono">${g.vars.join(", ")}</span>` : html`<span class="faint">no variables</span>`;
+  const left = g.expiresAt ? html`<span class="faint num">${span(Date.parse(g.expiresAt) - c.now)} left</span>` : html`<span class="faint">until revoked</span>`;
+  const until = g.expiresAt ? `until ${whenDay(g.expiresAt, c.timeZone, c.now)} · ` : "";
+  const scope = g.everyChat ? "every chat, your turns only" : `asked for by ${g.askedBy}`;
+  const act = g.everyChat
+    ? html`<a class="btn" href="/settings/secrets#${anchor("p", g.profile)}">On the Secrets page</a>`
+    : html`<form method="post" action="${base(c)}/revoke">${csrfField(c)}<input type="hidden" name="grant" value="${g.id}"><button type="submit" class="btn danger">Revoke now</button></form>`;
+  return html`<div class="crow grow2"><div class="stext"><b><span class="mono">${g.profile}</span> ${left}</b> <span>${vars}</span> <span>${until}${scope} · grant #${g.id}</span></div>
+${act}</div>`;
 }
 
 export function secretsSection(c: Ctx, v: SecretsView): Raw {
@@ -284,8 +293,8 @@ export function secretsSection(c: Ctx, v: SecretsView): Raw {
   const body = v.off
     ? html`<p class="hint">${v.off}</p>`
     : v.rows.length
-      ? html`${v.rows.map((g) => grantRow(c, g))}<p class="hint">Only names are shown, never a value. A grant is made only from your answer to her request in the control bot. A background job already running keeps the values it started with.</p>`
-      : html`<p class="xline">No secret is granted here now. She asks with <span class="mono">request_secret</span>; you grant it on its card in the control bot.</p>`;
+      ? html`${v.rows.map((g) => grantRow(c, g))}<p class="hint">Only names are shown, never a value. A grant to this chat is made from your answer to her request in the control bot; one to every chat, there or on the <a href="/settings/secrets">Secrets page</a>. A background job already running keeps the values it started with.</p>`
+      : html`<p class="xline">No secret is granted here now. She asks with <span class="mono">request_secret</span>; you grant it on its card in the control bot, or to every chat on the <a href="/settings/secrets">Secrets page</a>.</p>`;
   return html`<section class="cs" id="secrets"><div class="cshd"><h2>Secrets</h2> <span class="faint">granted to this chat's computer</span></div>${flashLine(v.flash)}${file}${body}</section>`;
 }
 

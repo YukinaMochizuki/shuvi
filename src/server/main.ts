@@ -136,7 +136,7 @@ void loop(
   1000,
 );
 // Started in the background; the rows say what is asked, so a restart's interrupted ones start again here.
-void loop("catalog", async () => void backgroundPass(db, { secretsFile: cfg.secretsFile }), 1000);
+void loop("catalog", async () => void backgroundPass(db, { secrets: cfg.secrets }), 1000);
 // Awaited at exit (`shutdown`), so the server never exits in the middle of a send.
 const senders: Promise<void>[] = [loop("sender", async () => (await sendPass(db, api)).backoffMs, 300)];
 void loop(
@@ -194,6 +194,7 @@ if (consoleOn(cfg.console)) {
           ownerId: cfg.ownerId,
           transcriptDays: cfg.transcriptDays,
           home: cfg.home,
+          secrets: cfg.secrets,
           // Home's Preview builds a chat's prompt as a turn would (the owner's name is a turn's own, from his message).
           prompt: { capabilities, policy: () => policies.current(), ownerId: cfg.ownerId, owner: cfg.ownerLanguage ? { language: cfg.ownerLanguage } : {} },
         },

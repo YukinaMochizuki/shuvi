@@ -1,7 +1,7 @@
 import { ClaudeBackend } from "agent-runtime/claude";
 import { OpenAICompatBackend } from "agent-runtime/openai-compat";
 import type { BackendAdapter, ToolBoundary } from "agent-runtime";
-import { loadProfiles } from "../secrets/redaction.ts";
+import { allProfiles, type SecretSource } from "../secrets/source.ts";
 import { conversationStore } from "../store/conversations.ts";
 import type { Db } from "../store/db.ts";
 import { CLI_DEFAULT_MODEL, unknownKind, type CatalogModel } from "../store/models.ts";
@@ -28,8 +28,8 @@ export interface DriverOptions {
   boundary: ToolBoundary;
   /** A line for the turn's transcript. */
   note: (text: string) => void;
-  /** The secrets file the provider's key is read from (env.ts `SHUVI_SECRETS_FILE`). */
-  secretsFile: string;
+  /** Where the provider's key is read from (env.ts `secrets`: the secrets file, and the console's profiles). */
+  secrets: SecretSource;
 }
 
 /** The model id the driver is given for the turn: the provider's own, or none for the CLI's default. */
@@ -63,7 +63,7 @@ function claudeDriver(o: DriverOptions): BackendAdapter {
 function openAICompatDriver(o: DriverOptions): BackendAdapter {
   const { provider, model } = o.model;
   if (!provider.baseUrl) throw new Error(`the provider "${provider.name}" has no base URL`);
-  const apiKey = provider.apiKey ? providerKey(provider.apiKey, o.secretsFile) : undefined;
+  const apiKey = provider.apiKey ? providerKey(o.db, provider.apiKey, o.secrets) : undefined;
   return new OpenAICompatBackend({
     provider: { name: provider.name, baseURL: provider.baseUrl, ...(apiKey ? { apiKey } : {}) },
     defaultModel: model.model,
@@ -79,14 +79,15 @@ function openAICompatDriver(o: DriverOptions): BackendAdapter {
 }
 
 /**
- * The key `<profile>.<VAR>` names in the secrets file. Throws, naming only the reference, when it is not there.
+ * The key `<profile>.<VAR>` names among the secret profiles (the file's or the console's). Throws, naming only the
+ * reference, when it is not there.
  * Also what the server's probes and `/models` listings send (server/probes.ts).
  */
-export function providerKey(ref: string, file: string): string {
+export function providerKey(db: Db, ref: string, src: SecretSource): string {
   const dot = ref.indexOf(".");
-  const loaded = loadProfiles(file);
+  const loaded = allProfiles(db, src);
   if ("error" in loaded) throw new Error(`the key ${ref} cannot be read: ${loaded.error}`);
   const value = loaded.profiles[ref.slice(0, dot)]?.[ref.slice(dot + 1)];
-  if (!value) throw new Error(`the key ${ref} is not in the secrets file ${file}`);
+  if (!value) throw new Error(`the key ${ref} is not among the secret profiles (the file ${src.file}, or the console's)`);
   return value;
 }

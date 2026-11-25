@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fileSource } from "../src/secrets/source.ts";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,7 +65,7 @@ async function realTurn(db: ReturnType<typeof memDb>) {
   const model = enterChatModel(db, getChat(db, chatId)!);
   const outcome = await runTurn({
     db, turnId: turn.id, home: join(tmp("shuvi-home-"), "home"), timeZone: "UTC", model: model.model.model, capabilities: [],
-    makeAdapter: (boundary, note) => makeDriver({ db, chatId, model, boundary, note, secretsFile: "/nonexistent" }),
+    makeAdapter: (boundary, note) => makeDriver({ db, chatId, model, boundary, note, secrets: fileSource("/nonexistent") }),
   });
   return { outcome, turn: getTurn(db, turn.id)!, steps: stepsOf(db, turn.id) };
 }

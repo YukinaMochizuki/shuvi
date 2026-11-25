@@ -1,5 +1,6 @@
 import { DEFAULT_SECRETS_FILE, dataDirFrom } from "../../env.ts";
 import { porchkitConfig, type PorchkitConfig } from "../../porchkit/client.ts";
+import { secretSource, type SecretSource } from "../../secrets/source.ts";
 import type { Env } from "../types.ts";
 import type { HangarConfig } from "./hangar/client.ts";
 
@@ -38,8 +39,8 @@ export interface ComputerConfig {
   readyMs: number;
   /** How often a background job is polled. */
   pollEveryMs: number;
-  /** The host-side file of secret profiles (outside home/ and git, mode 600). */
-  secretsFile: string;
+  /** Where secret profiles come from: the host-side file (outside home/ and git, mode 600) and the store's, sealed under its key. */
+  secrets: SecretSource;
   /** The most each step of applying ~/.computer.yaml (apt, setup) may run (declared.ts). */
   applyStepSec: number;
   /** How long a turn waits for a file someone sent to land in ~/inbox before showing it anyway. */
@@ -88,7 +89,7 @@ export function computerConfig(env: Env): ComputerConfig | null {
     jobMaxSec: 24 * 3600,
     readyMs: positive(env.SHUVI_COMPUTER_READY_SEC, 180) * 1000,
     pollEveryMs: positive(env.SHUVI_COMPUTER_POLL_SEC, 5) * 1000,
-    secretsFile: env.SHUVI_SECRETS_FILE || DEFAULT_SECRETS_FILE,
+    secrets: secretSource(env, DEFAULT_SECRETS_FILE),
     applyStepSec: positive(env.SHUVI_COMPUTER_APPLY_STEP_SEC, 900),
     inboxWaitMs: positive(env.SHUVI_COMPUTER_INBOX_WAIT_SEC, 30) * 1000,
     mediaOn: porchkitConfig(env) !== null,

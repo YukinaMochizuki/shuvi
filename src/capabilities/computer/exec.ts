@@ -12,6 +12,7 @@ import { declaredNote } from "./declared.ts";
 import { awaitInbox } from "./files.ts";
 import type { Redaction } from "../../secrets/redaction.ts";
 import { secretsForChat } from "./secrets.ts";
+import { redactionFor } from "../../secrets/source.ts";
 import { acquireLease, COMPUTER_JOB_KIND, getComputer, releaseLease, runningComputerJobs } from "./state.ts";
 import { authorisation, type Acting } from "../../agent/acting.ts";
 
@@ -176,9 +177,9 @@ export interface SyncOutcome {
 export async function runSync(
   x: ExecContext,
   command: string[],
-  opts: { timeoutSec: number; secrets?: boolean; label?: string; keepStdout?: number; stdin?: Uint8Array },
+  opts: { timeoutSec: number; secrets?: boolean; forOwner?: boolean; label?: string; keepStdout?: number; stdin?: Uint8Array },
 ): Promise<SyncOutcome> {
-  const { env, profiles, red, warning } = secretsForChat(x.db, x.cfg.secretsFile, x.chat.id);
+  const { env, profiles, red, warning } = secretsForChat(x.db, x.cfg.secrets, x.chat.id, opts.forOwner === true);
   const useEnv = opts.secrets === false ? {} : env;
   const out = new Capture();
   const err = new Capture();
@@ -323,8 +324,9 @@ export async function startJob(x: ExecContext, a: { spec: JobSpec; title: string
       await x.computers.boost(x.chat, a.spec.boost, job.id);
       boosted = true;
     }
-    // Only a model's own exec gets the chat's secrets; the framework's media jobs never do.
-    const s = a.spec.tool === "exec" ? secretsForChat(x.db, x.cfg.secretsFile, x.chat.id) : { env: {}, profiles: [] as string[], warning: undefined };
+    // Only a model's own exec gets the chat's secrets; the framework's media jobs never do. The owner's grants for
+    // every chat only when the call says it acts for him: never by the default above, which is only a record's.
+    const s = a.spec.tool === "exec" ? secretsForChat(x.db, x.cfg.secrets, x.chat.id, a.acting?.by === "owner") : { env: {}, profiles: [] as string[], warning: undefined };
     const { env, profiles, warning } = s;
     const r = await x.computers.withLease(x.chat, 60_000, async () => {
       await awaitInbox(x.db, x.chat.id, x.cfg.inboxWaitMs);
@@ -449,7 +451,7 @@ export function computerJobKind(cfg: ComputerConfig, computersOf: (db: Db) => Co
       const row = getComputer(db, job.chatId);
       const chat = getChat(db, job.chatId);
       if (!row || !chat) return { state: "failed", result: "This job's computer is gone." };
-      const red = secretsForChat(db, cfg.secretsFile, job.chatId).red;
+      const red = redactionFor(db, cfg.secrets);
       const lease = acquireLease(db, job.chatId, Date.now() + 90_000);
       if ("busy" in lease) return { state: "running", note: `the computer is busy (${lease.busy})` };
       try {
@@ -519,7 +521,7 @@ export async function readJob(x: ExecContext, job: Job, a: { since?: number; gre
     }
   }
   const since = a.since ?? 0;
-  const { red } = secretsForChat(x.db, x.cfg.secretsFile, x.chat.id);
+  const red = redactionFor(x.db, x.cfg.secrets);
   // Read wider than asked by the longest secret on each side, so a value the window's edges cut is redacted whole.
   const from = Math.max(0, since - red.maxLen);
   const want = since - from + READ_MAX_BYTES + red.maxLen;
@@ -544,7 +546,7 @@ export async function readJob(x: ExecContext, job: Job, a: { since?: number; gre
 
 /** cancel_job: stop the job's process group and end the job now. */
 export async function cancelJob(x: ExecContext, job: Job): Promise<string> {
-  const { red } = secretsForChat(x.db, x.cfg.secretsFile, x.chat.id);
+  const red = redactionFor(x.db, x.cfg.secrets);
   const { value } = await x.computers.withLease(x.chat, 60_000, () =>
     x.computers.hangar.run(getComputer(x.db, x.chat.id)!.container, { command: ["bash", "-c", killScript(job.id, red.maxLen)], workingDir: HOME_DIR }),
   );

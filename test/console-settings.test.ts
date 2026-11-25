@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fileSource } from "../src/secrets/source.ts";
 import { eq } from "drizzle-orm";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -294,7 +295,7 @@ describe("adding a provider lists its models through the server's background pas
     expect(l).toMatchObject({ provider: "lab", state: "listing" });
     expect(getCard(db, l.cardId)!.idemKey).toStartWith("console-listing:");
     // The same pass that serves the control bot's cards.
-    expect(backgroundPass(db, { secretsFile })).toBe(1);
+    expect(backgroundPass(db, { secrets: fileSource(secretsFile) })).toBe(1);
     await backgroundSettled();
     html = await get(db, "/settings");
     expect(text(html)).toContain("lists 2 models. ✓ = in the catalog.");
@@ -309,7 +310,7 @@ describe("adding a provider lists its models through the server's background pas
     expect(text(await write(db, "/settings/listings/add", { card: String(l.cardId), index: "0" }))).toContain("lab/qwen3 is already in the catalog.");
     expect(text(await write(db, "/settings/listings/add", { card: String(l.cardId), index: "7" }))).toContain("That listing is closed");
 
-    expect(backgroundPass(db, { secretsFile })).toBe(2);
+    expect(backgroundPass(db, { secrets: fileSource(secretsFile) })).toBe(2);
     await backgroundSettled();
     expect(findModel(db, "lab/qwen3")!.model.probeStatus).toBe("ok");
     expect(text(await get(db, "/settings"))).toContain("probe ok,");
@@ -327,7 +328,7 @@ describe("adding a provider lists its models through the server's background pas
     await write(db, "/settings/listings/close", { card: String(first.cardId) });
     expect(consoleListing(db)).toBeUndefined();
     expect(getProvider(db, "lab")).toBeDefined();
-    expect(backgroundPass(db, { secretsFile: secrets() })).toBe(0);
+    expect(backgroundPass(db, { secrets: fileSource(secrets()) })).toBe(0);
     await write(db, "/settings/providers/list", { provider: "lab" });
     expect(consoleListing(db)).toMatchObject({ provider: "lab", state: "listing" });
     expect(consoleListing(db)!.cardId).not.toBe(first.cardId);
@@ -343,7 +344,7 @@ describe("adding a provider lists its models through the server's background pas
     expect(text(html)).toContain("Listing the models of claude (Claude login, the server user's login)…");
     expect(text(html)).toContain("Claude Code is asked what it offers this login; that takes a few seconds and spends nothing.");
     const l = consoleListing(db)!;
-    expect(backgroundPass(db, { secretsFile: secrets(), listClaude })).toBe(1);
+    expect(backgroundPass(db, { secrets: fileSource(secrets()), listClaude })).toBe(1);
     await backgroundSettled();
     html = await get(db, "/settings");
     expect(text(html)).toContain("lists 4 models. ✓ = in the catalog.");
@@ -371,7 +372,7 @@ describe("adding a provider lists its models through the server's background pas
     const db = setup();
     const url = fakeEndpoint({ refuse: true });
     await write(db, "/settings/providers/add", { name: "lab", kind: "openai-compat", base_url: url, api_key: "lab.LAB_KEY" });
-    backgroundPass(db, { secretsFile: secrets() });
+    backgroundPass(db, { secrets: fileSource(secrets()) });
     await backgroundSettled();
     const l = consoleListing(db)!;
     expect(l.state).toBe("failed");
@@ -528,7 +529,7 @@ describe("review fixes", () => {
     });
     const base = `http://127.0.0.1:${endpoint.port}`;
     await write(db, "/settings/providers/add", { name: "lab", kind: "openai-compat", base_url: `${base}/v1` });
-    backgroundPass(db, { secretsFile: secrets() });
+    backgroundPass(db, { secrets: fileSource(secrets()) });
     await backgroundSettled();
     let html = await get(db, "/settings");
     expect(consoleListing(db)!.state).toBe("listed");
@@ -546,7 +547,7 @@ describe("review fixes", () => {
     expect(html).toContain("http: 401 &quot;&gt;&lt;script&gt;alert(3)&lt;/script&gt;");
     // And one that failed against the endpoint's own hostile body.
     await write(db, "/settings/providers/add", { name: "deny", kind: "openai-compat", base_url: `${base}/deny/v1` });
-    backgroundPass(db, { secretsFile: secrets() });
+    backgroundPass(db, { secrets: fileSource(secrets()) });
     await backgroundSettled();
     expect(consoleListing(db)).toMatchObject({ provider: "deny", state: "failed" });
     expect(await get(db, "/settings")).not.toContain("<script>");

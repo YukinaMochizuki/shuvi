@@ -648,22 +648,37 @@ once. Changing the file is owner-only because every computer tool is: only a com
 and each follows `ownerAuthority` (src/agent/turn.ts), refused at call time in a turn with no message from
 the owner.
 
-**Secrets** are named profiles (e.g. `modal`: a set of env vars) kept in a host-side store outside
-`home/` and git; policy names them, never their values.
+**Secrets** are named profiles (e.g. `modal`: a set of env vars) kept outside `home/` and git: in a
+host-side file, or in the store, sealed under a key only the environment holds; policy names them, never
+their values.
 
-- A chat's computer gets a profile only when the assistant asks (`request_secret`) and the owner
-  approves, for 4 h / 1 d / 3 d; the owner can revoke it, on its card in the control bot or from the chat's
-  settings page in the console, which presses the same card (only names are shown there, never a value; nothing
-  is granted from the console). Groups have none by default.
+- A computer gets a profile only when the owner grants it: on the card the assistant's `request_secret`
+  puts to him, or, for every chat, on the console's Secrets page. A grant is for THIS CHAT (4 h / 1 d / 3 d)
+  or for EVERY CHAT (4 h / 1 d / 3 d / until revoked). An every-chat grant is the owner's: it goes into a
+  command only in a call that acts for him (agent/acting.ts), never in an operator's, so delegating a
+  group's computer (§8) never hands it over; an operator's request card does not offer it. A call acts for
+  him whenever his own message is in the turn (`ownerAuthority`), so in a group that delegates its computer,
+  a turn holding both his message and an operator's runs with every chat's grants: that is his presence
+  lending them, as it lends every owner-only tool. The owner can
+  revoke any grant on its card in the control bot or from the console, which presses the same card (only
+  names are shown there, never a value). Groups have none by default.
 - A granted profile is injected as env into the one `exec` process that runs, never written to `$HOME`.
 - Known secret values are replaced with `[REDACTED:<profile>]` in any output before the model or the
   chat sees it.
 - Only a turn the owner triggered can use one, or, in a group that delegates its computer, a turn one of
-  its operators triggered (§8).
-- As built: profiles live in `/etc/shuvi.secrets.yaml` (mode 600); `request_secret` puts an approval card
-  (§13) naming the variables to the owner; a grant puts a "Revoke now" card beside it. Every value in the
-  file, and every value it ever held (kept beside it, mode 600), is redacted, also where output is cut at a
-  byte offset; a file holding one is not sent; with nothing to redact by, output is withheld.
+  its operators triggered (§8), and then only that chat's own grants.
+- Each profile may carry a NOTE, which is not secret: a one-line summary in her prompt beside its name (what
+  it is for, so she knows it is there) and details she reads when she needs them (scope, account or org
+  ids, how to use it), so what was found out once is not found out again. The owner writes it in the console;
+  she keeps what she learns with `update_secret_note`, in the owner's turns only. A note holding a secret
+  value is refused.
+- As built: the file's profiles live in `/etc/shuvi.secrets.yaml` (mode 600); the console's in
+  `secret_profiles`, AES-256-GCM under `SHUVI_SECRETS_KEY` with the profile's name as additional data
+  (src/secrets/vault.ts), so the database and its backups hold no readable value; a name is one or the
+  other, the file's winning. `request_secret` puts an approval card (§13) naming the variables to the owner;
+  every grant puts a "Revoke now" card beside it. Every value either holds, and every value either ever held
+  (kept beside the file, mode 600), is redacted, also where output is cut at a byte offset; a file holding
+  one is not sent; with nothing to redact by, output is withheld. Notes live in `secret_notes`.
 
 ## 16. Deployment
 

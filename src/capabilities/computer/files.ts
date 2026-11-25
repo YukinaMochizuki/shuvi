@@ -10,7 +10,7 @@ import type { TelegramFiles } from "../../telegram/files.ts";
 import { HOME_DIR, type ComputerConfig } from "./config.ts";
 import { ComputerError, type Computers } from "./computer.ts";
 import { resolvePath, shq, type ExecContext } from "./exec.ts";
-import { redactionFor } from "../../secrets/redaction.ts";
+import { redactionFor } from "../../secrets/source.ts";
 import { acquireLease, getComputer, opHeld, releaseLease } from "./state.ts";
 
 /**
@@ -149,7 +149,7 @@ export async function readFromComputer(x: ExecContext, cfg: ComputerConfig, path
   if (size > limit) throw new ComputerError(tooLarge(mb(size)));
   const read = (await run(`p=${shq(path)}; ${resolvePath("p")}; cat -- "$p"`, limit + 1)).value;
   if (read.code !== 0) throw new ComputerError(read.stderr.trim() || `cannot read ${path} (exit ${read.code})`);
-  const red = redactionFor(cfg.secretsFile);
+  const red = redactionFor(x.db, cfg.secrets);
   const leaked = red.contains(read.stdout);
   if (leaked === "?") throw new ComputerError(`${path} was not ${verb}: ${red.why}, so it cannot be checked for secret values.`);
   if (leaked) throw new ComputerError(`${path} contains the value of the secret profile "${leaked}"; it was not ${verb}.`);
@@ -172,7 +172,7 @@ export async function sendFromComputer(x: ExecContext, s: TurnState, cfg: Comput
         : `${a.path} is ${size}; Telegram's limit for a file sent by a bot is 50 MB. Compress it or split it (e.g. zip, split -b 45m) and send the parts.`,
     "sent",
   );
-  const caption = a.caption ? redactionFor(cfg.secretsFile).redact(a.caption).slice(0, 1024) : undefined;
+  const caption = a.caption ? redactionFor(x.db, cfg.secrets).redact(a.caption).slice(0, 1024) : undefined;
   queueBotFile(x.db, { dataDir: cfg.dataDir, chatId: x.chat.id, turnId: s.turnId, n: s.n++, as: a.as, name: safeName(a.path), bytes, source: a.path, ...(caption ? { caption } : {}) });
   return `Sent ${a.as === "photo" ? "the photo" : "the file"} ${a.path} (${mb(bytes.length)}).`;
 }

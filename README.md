@@ -61,7 +61,7 @@ bun scripts/e2e-openai-compat.ts  # the same on an OpenAI-compatible model, agai
 bun scripts/e2e-switch.ts    # one chat switched between Claude and an endpoint, lossless, lossy and clean, checked on the wire
 bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
 bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
-bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec
+bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec, an owner grant
 bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
 bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed read, a probe, sheets of a link, a fetch into ~/inbox
 bun scripts/e2e-read.ts      # reading links on the same fakes (read_link, save_link, the prewarm), and her browser: open a page, click
@@ -229,8 +229,10 @@ turn with nothing from the owner is refused. To review it, ask her to send it
 
 ### Secrets
 
-Credentials a task needs (an API token) are named profiles in a host-side file, outside `home/` and git,
-readable only by the user shuvi runs as (`SHUVI_SECRETS_FILE`, default `/etc/shuvi.secrets.yaml`):
+Credentials a task needs (an API token) are named profiles. They come from two places: a host-side file,
+outside `home/` and git, readable only by the user shuvi runs as (`SHUVI_SECRETS_FILE`, default
+`/etc/shuvi.secrets.yaml`), and the console's Secrets page (`/settings/secrets`), where the owner adds,
+replaces and deletes profiles himself:
 
 ```yaml
 # chmod 600 /etc/shuvi.secrets.yaml
@@ -239,12 +241,25 @@ modal:
   MODAL_TOKEN_SECRET: as-…
 ```
 
+A profile kept in the console is sealed in `shuvi.db` (AES-256-GCM) under `SHUVI_SECRETS_KEY`, 32 bytes as
+base64 (`openssl rand -base64 32`), which lives in the environment only: a copy of the database holds no
+readable value. Without the key, nothing can be kept there, and what was kept is not given out. A name is the
+file's or the console's, never both (the file's wins).
+
 The assistant asks for one with `request_secret`; the control bot shows the owner the variable names (never
-the values) with buttons for 4 hours, 1 day, 3 days or deny. A grant is for that chat only; it puts a
-"Revoke now" card in the control bot. Granted values go only into the environment of that chat's execs,
-and every known value is shown to the model and the chat as `[REDACTED:<profile>]`. Every value ever read
-from the file is also kept in `<secrets file>.known` (mode 600, beside it), so a value rotated out of the
-file, or a file that turns unreadable, is still redacted; with neither usable, output is withheld.
+the values) with buttons for this chat (4 hours, 1 day, 3 days), every chat (4 hours, 1 day, 3 days, until
+revoked) or deny. A grant to every chat is an *owner grant*: every chat's computer gets it, but only in
+calls made for the owner, never in a group operator's. The owner can also grant a profile to every chat from
+the Secrets page. Every grant puts a "Revoke now" card in the control bot. Granted values go only into the
+environment of the execs they cover, and every known value is shown to the model and the chat as
+`[REDACTED:<profile>]`. Every value ever read, from the file or the console, is also kept in
+`<secrets file>.known` (mode 600, beside it), so a value rotated out, or a file that turns unreadable, is still
+redacted; with neither usable, output is withheld.
+
+Each profile can carry a note, which is not secret: a one-line summary in her prompt beside the profile's
+name, and details she reads with `secret_info` (scope, account or org ids, how to use it). The owner edits
+it on the Secrets page; she keeps what she learns there with `update_secret_note`. A note holding a secret
+value is refused.
 
 ## Deploying
 

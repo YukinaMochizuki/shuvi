@@ -2,9 +2,9 @@ import { eq } from "drizzle-orm";
 import { computersFor } from "../capabilities/computer/index.ts";
 import { DISK_MAX, sizeLabel, type ComputerConfig } from "../capabilities/computer/config.ts";
 import { describeError } from "../capabilities/computer/hangar/client.ts";
-import { liveGrants } from "../capabilities/computer/secrets.ts";
+import { liveGrants, ownerGrants } from "../capabilities/computer/secrets.ts";
 import { getComputer, hasLiveLease, opHeld, runningComputerJobs } from "../capabilities/computer/state.ts";
-import { loadProfiles, redactionFor } from "../secrets/redaction.ts";
+import { allProfiles, redactionFor } from "../secrets/source.ts";
 import type { Db } from "../store/db.ts";
 import { activeSchedules, nextAfterResume } from "../store/schedules.ts";
 import { approvals } from "../store/schema.ts";
@@ -13,8 +13,8 @@ import type { Flash } from "./home.ts";
 
 /**
  * What a chat's settings page shows of its schedules, secrets and computer (chat-extras.ts draws it), read from the
- * store and, for the secrets' variable NAMES, the secrets file (never a value: `loadProfiles` is asked for names
- * only, and a job's command is passed through the chat's redaction before it is shown). Reads only; the one
+ * store and, for the secrets' variable NAMES, the secret profiles (never a value: only the names `allProfiles`
+ * gives are kept, and a job's command is passed through the redaction before it is shown). Reads only; the one
  * outside call, the disk's size from Hangar, is `diskFacts`, which the page fetches after it has loaded.
  */
 
@@ -71,21 +71,22 @@ export function loadSchedules(deps: ExtrasDeps, chatId: number, q: URLSearchPara
 export function loadSecrets(deps: ExtrasDeps, chatId: number, now: number, flash?: Flash): SecretsView {
   const cfg = deps.computer;
   if (!cfg) return { rows: [], file: "", off: "The computer is off in this process, so no secret can be granted here.", ...(flash ? { flash } : {}) };
-  const file = loadProfiles(cfg.secretsFile);
-  const names = "profiles" in file ? Object.fromEntries(Object.entries(file.profiles).map(([p, vars]) => [p, Object.keys(vars)])) : null;
-  const rows: GrantRow[] = liveGrants(deps.db, chatId, now).map((g) => {
-    const card = deps.db.select({ requestedBy: approvals.requestedBy, answeredAt: approvals.answeredAt }).from(approvals).where(eq(approvals.id, g.approvalId)).get();
+  const all = allProfiles(deps.db, cfg.secrets);
+  const names = "profiles" in all ? Object.fromEntries(Object.entries(all.profiles).map(([p, vars]) => [p, Object.keys(vars)])) : null;
+  const rows: GrantRow[] = [...liveGrants(deps.db, chatId, now), ...ownerGrants(deps.db, now)].map((g) => {
+    const card = g.approvalId != null ? deps.db.select({ requestedBy: approvals.requestedBy, answeredAt: approvals.answeredAt }).from(approvals).where(eq(approvals.id, g.approvalId)).get() : undefined;
     return {
       id: g.id,
       profile: g.profile,
       vars: names ? (names[g.profile] ?? []) : null,
       gone: !!names && !names[g.profile],
       expiresAt: g.expiresAt,
-      grantedAt: card?.answeredAt ?? null,
+      grantedAt: card?.answeredAt ?? g.createdAt,
       askedBy: card?.requestedBy != null ? personName(deps.db, chatId, card.requestedBy) : "you",
+      everyChat: g.chatId == null,
     };
   });
-  return { rows, file: cfg.secretsFile, ...("error" in file ? { fileError: file.error } : {}), ...(flash ? { flash } : {}) };
+  return { rows, file: cfg.secrets.file, ...("error" in all ? { fileError: all.error } : {}), ...(flash ? { flash } : {}) };
 }
 
 export function loadComputer(deps: ExtrasDeps, chatId: number, now: number): ComputerView {
@@ -94,7 +95,7 @@ export function loadComputer(deps: ExtrasDeps, chatId: number, now: number): Com
   if (!cfg) return { ...empty, state: "none", off: "The computer is off in this process: SHUVI_HANGAR_API, _PROJECT, _TOKEN and SHUVI_COMPUTER_IMAGE are not all set." };
   const row = getComputer(deps.db, chatId);
   if (!row || !row.created) return { ...empty, size: sizeLabel(cfg.size), state: "none" };
-  const red = redactionFor(cfg.secretsFile);
+  const red = redactionFor(deps.db, cfg.secrets);
   const jobs = runningComputerJobs(deps.db, chatId).map((j) => {
     const spec = j.spec as { command?: string; tool?: string; startedAt?: string; boost?: unknown };
     // Redacted as its output is; with nothing to redact by (the file unusable), not shown at all.

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fileSource } from "../src/secrets/source.ts";
 import { eq } from "drizzle-orm";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -344,8 +345,8 @@ describe("/provider", () => {
     const id = lastCard(db).id;
     expect(getProvider(db, "lab")).toMatchObject({ kind: "openai-compat", apiKey: "lab.LAB_KEY" });
     expect(getCard(db, id)!.text).toBe(`Added provider lab (${fake.url}, key lab.LAB_KEY). Listing its models…`);
-    expect(backgroundPass(db, { secretsFile })).toBe(1);
-    expect(backgroundPass(db, { secretsFile })).toBe(0); // one at a time
+    expect(backgroundPass(db, { secrets: fileSource(secretsFile) })).toBe(1);
+    expect(backgroundPass(db, { secrets: fileSource(secretsFile) })).toBe(0); // one at a time
     await backgroundSettled();
     expect(fake.auth).toEqual(["Bearer sk-example-not-real"]);
     expect(getCard(db, id)!.text).toBe(`lab (${fake.url}, key lab.LAB_KEY) lists 3 models. Press one to add it. ✓ = in the catalog.`);
@@ -358,7 +359,7 @@ describe("/provider", () => {
     expect(findModel(db, "lab/qwen3")!.model).toMatchObject({ contextWindow: 32768, probeStartedAt: expect.any(String) });
     expect(getCard(db, id)!.text).toContain("lab/qwen3: probe checking…");
 
-    expect(backgroundPass(db, { secretsFile })).toBe(2);
+    expect(backgroundPass(db, { secrets: fileSource(secretsFile) })).toBe(2);
     await backgroundSettled();
     const qwen = findModel(db, "lab/qwen3")!.model;
     expect(qwen).toMatchObject({ probeStatus: "ok", probeError: null, probeVision: false, vision: false });
@@ -380,7 +381,7 @@ describe("/provider", () => {
   test("a listing that fails is shown on the card, and the provider stays", async () => {
     const { db } = setup();
     say(db, "/provider add down http://127.0.0.1:9/v1");
-    backgroundPass(db, { secretsFile: "/nonexistent" });
+    backgroundPass(db, { secrets: fileSource("/nonexistent") });
     await backgroundSettled();
     const card = lastCard(db);
     expect(card.status).toBe("closed");
@@ -413,7 +414,7 @@ describe("/provider", () => {
     const listClaude = async (configDir: string | null) => (asked.push(configDir), CLAUDE_CHOICES);
     say(db, "/provider add work claude /srv/example-claude");
     const id = lastCard(db).id;
-    expect(backgroundPass(db, { secretsFile: "/nonexistent", listClaude })).toBe(1);
+    expect(backgroundPass(db, { secrets: fileSource("/nonexistent"), listClaude })).toBe(1);
     await backgroundSettled();
     expect(asked).toEqual(["/srv/example-claude"]);
     expect(getCard(db, id)!.text).toBe("work (/srv/example-claude) lists 7 models (page 1/2). Press one to add it. ✓ = in the catalog.");
@@ -436,7 +437,7 @@ describe("/provider", () => {
     press(db, button(db, /^✓ sonnet /));
     expect(getCard(db, id)!.text.split("\n")[1]).toBe("work/sonnet is already in the catalog.");
     // Nothing is probed: a Claude model is the CLI's.
-    expect(backgroundPass(db, { secretsFile: "/nonexistent", listClaude })).toBe(0);
+    expect(backgroundPass(db, { secrets: fileSource("/nonexistent"), listClaude })).toBe(0);
   });
 
   test("a Claude listing that fails, finds nothing, or outlasts the timeout says so, and the login stays", async () => {
@@ -447,7 +448,7 @@ describe("/provider", () => {
     ] as const) {
       const { db } = setup();
       say(db, "/provider add work claude");
-      backgroundPass(db, { secretsFile: "/nonexistent", listClaude, timeoutMs: 20 });
+      backgroundPass(db, { secrets: fileSource("/nonexistent"), listClaude, timeoutMs: 20 });
       await backgroundSettled();
       const card = lastCard(db);
       expect(card.status).toBe("closed");
@@ -482,12 +483,12 @@ describe("probes", () => {
     // As a restart leaves it: a probe asked, with no probe running in this process.
     db.update(models).set({ probeStartedAt: new Date().toISOString() }).where(eqId(m.model.id)).run();
     db.update(models).set({ vision: true }).where(eqId(m.model.id)).run();
-    expect(backgroundPass(db, { secretsFile: "/nonexistent" })).toBe(1);
+    expect(backgroundPass(db, { secrets: fileSource("/nonexistent") })).toBe(1);
     await backgroundSettled();
     expect(findModel(db, "lab/qwen3")!.model).toMatchObject({ probeStatus: "ok", vision: false, probeVision: false });
     setModelVision(db, "lab/qwen3", true);
     markProbing(db, m.model.id);
-    backgroundPass(db, { secretsFile: "/nonexistent" });
+    backgroundPass(db, { secrets: fileSource("/nonexistent") });
     await backgroundSettled();
     expect(findModel(db, "lab/qwen3")!.model).toMatchObject({ probeStatus: "ok", vision: true, visionSet: true });
     // Claude models are not probed.
@@ -510,7 +511,7 @@ describe("probes", () => {
     addProvider(db, { name: "lab", kind: "openai-compat", baseUrl: fake.url });
     const m = addModel(db, { provider: "lab", model: "qwen3", contextWindow: 32768 });
     markProbing(db, m.model.id);
-    backgroundPass(db, { secretsFile: "/nonexistent" });
+    backgroundPass(db, { secrets: fileSource("/nonexistent") });
     db.delete(models).where(eqId(m.model.id)).run();
     await backgroundSettled();
     expect(findModel(db, "lab/qwen3")).toBeUndefined();
@@ -655,11 +656,11 @@ describe("cards stay bounded, current and safe", () => {
     addProvider(db, { name: "keyed", kind: "openai-compat", baseUrl: "http://127.0.0.1:9/v1", apiKey: "lab.MISSING" });
     const m = addModel(db, { provider: "keyed", model: "q", contextWindow: 8000 });
     markProbing(db, m.model.id);
-    backgroundPass(db, { secretsFile: "/nonexistent" });
+    backgroundPass(db, { secrets: fileSource("/nonexistent") });
     await backgroundSettled();
     const row = findModel(db, "keyed/q")!;
     expect(row.model).toMatchObject({ probeStatus: "failed", probeLatencyMs: null });
-    expect(probeText(row)).toBe("⚠ failed: the key lab.MISSING is not in the secrets file /nonexistent");
+    expect(probeText(row)).toBe("⚠ failed: the key lab.MISSING is not among the secret profiles (the file /nonexistent, or the console's)");
 
     const fake = fakeEndpoint();
     say(db, `/provider add lab ${fake.url}`);
@@ -667,7 +668,7 @@ describe("cards stay bounded, current and safe", () => {
     expect(buttons(db).map((b) => b.text)).toEqual(["Cancel"]);
     press(db, button(db, "Cancel"));
     expect(getCard(db, id)).toMatchObject({ status: "closed", text: "Cancelled. The provider lab stays; /provider remove lab removes it." });
-    backgroundPass(db, { secretsFile: "/nonexistent" });
+    backgroundPass(db, { secrets: fileSource("/nonexistent") });
     await backgroundSettled();
     expect(getCard(db, id)!.text).toStartWith("Cancelled.");
     expect(getProvider(db, "lab")).toBeDefined();

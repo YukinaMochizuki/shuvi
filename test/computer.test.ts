@@ -321,7 +321,7 @@ describe("secrets", () => {
     expect(card.body).toContain("MODAL_TOKEN, MODAL_ID");
     expect(card.body).not.toContain(SECRET);
     expect(card.body).toContain("to deploy the app");
-    expect(JSON.parse(card.options).map((o: { id: string }) => o.id)).toEqual(["4h", "1d", "3d", "deny"]);
+    expect(JSON.parse(card.options).map((o: { id: string }) => o.id)).toEqual(["4h", "1d", "3d", "all-4h", "all-1d", "all-3d", "all-forever", "deny"]);
 
     answerApproval(t.db, card.id, 1, { id: OWNER, name: "Owner" });
     // The approval event wakes the chat; that turn (the owner's answer) may use the grant.

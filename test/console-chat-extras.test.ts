@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fileSource } from "../src/secrets/source.ts";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -109,7 +110,7 @@ async function turn(w: World, script: Step[]): Promise<void> {
 
 /** A live grant of "modal" in the DM, as the owner's answer to her request makes it. */
 function grant(w: World, requestedBy?: number): number {
-  const r = requestSecret(w.db, w.secretsFile, { chatId: w.dm, profile: "modal", ttl: "1d", reason: "to deploy", ...(requestedBy ? { requestedBy } : {}) });
+  const r = requestSecret(w.db, fileSource(w.secretsFile), { chatId: w.dm, profile: "modal", ttl: "1d", reason: "to deploy", ...(requestedBy ? { requestedBy } : {}) });
   if (!("approvalId" in r)) throw new Error(r.error);
   answerApproval(w.db, r.approvalId, 1, { id: OWNER, name: "Owner" });
   syncGrants(w.db);

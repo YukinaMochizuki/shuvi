@@ -6,7 +6,8 @@ import { buildSystemPrompt } from "../src/agent/prompt.ts";
 import { runAtBoundary } from "agent-runtime";
 import { pruneTranscriptMedia, recordingBoundary, redactDeep, TRANSCRIPT_MEDIA, TurnRecorder } from "../src/agent/transcript.ts";
 import { runTurn } from "../src/agent/turn.ts";
-import { LiveRedaction, redactor } from "../src/secrets/redaction.ts";
+import { redactor } from "../src/secrets/redaction.ts";
+import { fileSource, LiveRedaction } from "../src/secrets/source.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { defineCapability } from "../src/capabilities/types.ts";
 import { getChat, resetConversation } from "../src/store/events.ts";
@@ -262,7 +263,7 @@ describe("the turn transcript", () => {
     const file = join(dir, "secrets.yaml");
     writeFileSync(file, "example:\n  EXAMPLE_KEY: first-example-value\n", { mode: 0o600 });
     let now = 0;
-    const live = new LiveRedaction(file, 1000, () => now);
+    const live = new LiveRedaction(memDb(), fileSource(file), 1000, () => now);
     expect(live.redact("a first-example-value b")).toBe("a [REDACTED:example] b");
     expect(live.problem()).toBeNull();
     writeFileSync(file, "example:\n  EXAMPLE_KEY: second-example-value\n", { mode: 0o600 });

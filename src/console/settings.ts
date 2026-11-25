@@ -203,11 +203,11 @@ const waitedLine = (iso: string | null, now: number, each = false, limitMs = DEF
  * A write form's htmx attributes: post in the background, mark the form busy and disable its button until the
  * answer, then put the answer's `<main>` (the Settings page, or a refusal) in this page's place.
  */
-const writes = (path: string, disable = "find button") =>
+export const writes = (path: string, disable = "find button") =>
   html` hx-post="${path}" hx-target="main.settings" hx-select="main" hx-swap="outerHTML" hx-push-url="false" hx-indicator="#progress, closest form" hx-disabled-elt="${disable}"`;
 
 /** An in-page link's: the same swap, for a GET (an Edit, a Remove asked, a Cancel), keeping the URL. */
-const inPage = raw(` hx-target="main.settings" hx-select="main" hx-swap="outerHTML"`);
+export const inPage = raw(` hx-target="main.settings" hx-select="main" hx-swap="outerHTML"`);
 
 /**
  * A pending part's: fetch itself from `from` every second, in its own place, inheriting nothing. `data-poll`
@@ -216,10 +216,10 @@ const inPage = raw(` hx-target="main.settings" hx-select="main" hx-swap="outerHT
  */
 const polls = (from: string) => html` hx-get="${from}" hx-trigger="every 1s" hx-target="this" hx-swap="outerHTML" hx-indicator="unset" hx-disinherit="*" data-poll`;
 
-const csrfField = (ctx: SettingsContext) => html`<input type="hidden" name="csrf" value="${ctx.csrf}">`;
+export const csrfField = (ctx: SettingsContext) => html`<input type="hidden" name="csrf" value="${ctx.csrf}">`;
 
 /** A POST form holding one button. */
-function action(ctx: SettingsContext, path: string, label: string, fields: Record<string, string>, cls = ""): Raw {
+export function action(ctx: SettingsContext, path: string, label: string, fields: Record<string, string>, cls = ""): Raw {
   return html`<form method="post" action="${path}" class="inline"${writes(path)}>${csrfField(ctx)}${Object.entries(fields).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}<button type="submit" class="btn ${cls}">${label}</button></form>`;
 }
 
@@ -270,7 +270,7 @@ function chatLinks(chats: SettingsChat[]): Raw {
   return html`${chats.map((c, i) => html`${i ? ", " : ""}<a href="/chats/${c.id}">${c.name}</a>`)}`;
 }
 
-const rowNote = (v: SettingsView, id: string) => (v.note?.on === id ? html`<p class="row-note ${v.note.tone}" role="status">${v.note.text}</p>` : "");
+export const rowNote = (v: { note?: SettingsNote }, id: string) => (v.note?.on === id ? html`<p class="row-note ${v.note.tone}" role="status">${v.note.text}</p>` : "");
 
 // ---- providers -------------------------------------------------------------------------------------------
 
@@ -477,7 +477,7 @@ export function settingsBody(ctx: SettingsContext, v: SettingsView): Raw {
   return html`<main class="settings">
 <div class="head"><div class="title"><h1>Settings</h1><span class="meta">the model catalog</span></div>
 <p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
-<nav class="jump small"><a href="#providers">Providers</a><a href="#models">Models</a><a href="#add">Add a provider</a></nav></div>
+<nav class="jump small"><a href="#providers">Providers</a><a href="#models">Models</a><a href="#add">Add a provider</a><a href="/settings/secrets">Secrets →</a></nav></div>
 ${globalNote}
 <section class="sset" id="providers">
 <div class="shd"><h2>Providers</h2><span class="meta">where models run</span></div>

@@ -856,28 +856,62 @@ export const computers = sqliteTable("computers", {
 });
 
 /**
- * Secret profiles granted to a chat's computer (docs/design.md §15, computer/secrets.ts). A grant is made
- * from the owner's answer to a `secret` approval card, once per approval; it names the profile, never a
- * value. It ends at `expires_at`, or when the owner presses "Revoke" on its revoke card
- * (`revoke_approval_id`) in the control bot.
+ * Secret profiles granted to the computers (docs/design.md §15, computer/secrets.ts). A grant is made from the
+ * owner's answer to a `secret` approval card, once per approval, or by the owner in the console (no approval);
+ * it names the profile, never a value. It ends at `expires_at` (null: when revoked), or when the owner presses
+ * "Revoke" on its revoke card (`revoke_approval_id`) in the control bot, or in the console, which presses it.
+ *
+ * `chat_id` null is an OWNER grant: every chat's computer gets it, in calls that act for the owner only (never
+ * an operator's, agent/acting.ts).
  */
 export const secretGrants = sqliteTable(
   "secret_grants",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    chatId: integer("chat_id")
-      .notNull()
-      .references(() => chats.id),
+    /** The chat it is for; null: every chat, for the owner (an owner grant). */
+    chatId: integer("chat_id").references(() => chats.id),
     profile: text("profile").notNull(),
-    /** The approval the owner granted it on. One grant per approval. */
-    approvalId: integer("approval_id").notNull().unique(),
-    expiresAt: text("expires_at").notNull(),
+    /** The approval the owner granted it on (one grant per approval); null: made by the owner in the console. */
+    approvalId: integer("approval_id").unique(),
+    /** When it ends; null: when it is revoked. */
+    expiresAt: text("expires_at"),
     /** The control-bot card that revokes it. */
     revokeApprovalId: integer("revoke_approval_id"),
     createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
   (t) => [index("secret_grants_chat").on(t.chatId)],
 );
+
+/**
+ * Secret profiles the owner keeps in the console (src/secrets/source.ts), beside the secrets file's. The
+ * variables' values are SEALED (src/secrets/vault.ts: AES-256-GCM under SHUVI_SECRETS_KEY, the name as
+ * additional data); only the profile's name and its variables' NAMES are stored in the clear.
+ */
+export const secretProfiles = sqliteTable("secret_profiles", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  /** The variables' names, in order, for showing (never a value). */
+  varNames: text("var_names", { mode: "json" }).$type<string[]>().notNull(),
+  sealed: blob("sealed", { mode: "buffer" }).notNull(),
+  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  updatedAt: text("updated_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
+
+/**
+ * What the assistant knows about a secret profile, NOT secret (src/secrets/notes.ts): a one-line `summary` that
+ * is in her prompt (what it is for), and `details` she reads with `secret_info` (its scope, the account or org
+ * ids it acts on, how to use it, what was tried). Keyed by the profile's name, so a profile of the secrets file
+ * has one as well as one kept in the console. Written by the owner in the console or by her
+ * (`update_secret_note`); never holding a secret value (refused when it does).
+ */
+export const secretNotes = sqliteTable("secret_notes", {
+  name: text("name").primaryKey(),
+  summary: text("summary").notNull().default(""),
+  details: text("details").notNull().default(""),
+  /** Who wrote it last: `console` (the owner, with his login if known) or `assistant` (with the chat). */
+  updatedBy: text("updated_by").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
 
 /**
  * Schedules (docs/design.md §10): a one-shot (`at`) or a cron expression, set in a chat. When `next_at`
