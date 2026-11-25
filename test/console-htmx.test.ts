@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { fileSource } from "../src/secrets/source.ts";
 import { eq } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -198,10 +199,10 @@ describe("the background pass stops what is no longer asked", () => {
     const qwen = findModel(db, "vllm/qwen")!;
     recordProbe(db, qwen.model.id, { status: "ok", error: null, latencyMs: 120, vision: false });
     markProbing(db, qwen.model.id);
-    expect(backgroundPass(db, { secretsFile: "/nonexistent" })).toBe(1);
+    expect(backgroundPass(db, { secrets: fileSource("/nonexistent") })).toBe(1);
     await until(() => ep.asked.length === 1);
     expect(cancelProbe(db, qwen.model.id)).toBe(true);
-    expect(backgroundPass(db, { secretsFile: "/nonexistent" })).toBe(0);
+    expect(backgroundPass(db, { secrets: fileSource("/nonexistent") })).toBe(0);
     await until(() => ep.aborted.length === 1);
     await backgroundSettled();
     expect(findModel(db, "vllm/qwen")!.model).toMatchObject({ probeStartedAt: null, probeStatus: "ok", probeLatencyMs: 120 });
@@ -212,15 +213,15 @@ describe("the background pass stops what is no longer asked", () => {
     const db = setup(ep.url);
     const qwen = findModel(db, "vllm/qwen")!;
     markProbing(db, qwen.model.id, Date.now() - 5000);
-    backgroundPass(db, { secretsFile: "/nonexistent" });
+    backgroundPass(db, { secrets: fileSource("/nonexistent") });
     await until(() => ep.asked.length === 1);
     db.update(models).set({ probeStartedAt: new Date().toISOString() }).where(eq(models.id, qwen.model.id)).run();
-    expect(backgroundPass(db, { secretsFile: "/nonexistent" })).toBe(0); // the old one still ending
+    expect(backgroundPass(db, { secrets: fileSource("/nonexistent") })).toBe(0); // the old one still ending
     await until(() => ep.aborted.length === 1);
-    await until(() => backgroundPass(db, { secretsFile: "/nonexistent" }) === 1);
+    await until(() => backgroundPass(db, { secrets: fileSource("/nonexistent") }) === 1);
     await until(() => ep.asked.length === 2);
     db.delete(models).where(eq(models.id, qwen.model.id)).run();
-    backgroundPass(db, { secretsFile: "/nonexistent" });
+    backgroundPass(db, { secrets: fileSource("/nonexistent") });
     await until(() => ep.aborted.length === 2);
     await backgroundSettled();
   });
@@ -229,10 +230,10 @@ describe("the background pass stops what is no longer asked", () => {
     const ep = hangingEndpoint();
     const db = setup(ep.url);
     const card = openConsoleListing(db, "vllm", "k2")!;
-    expect(backgroundPass(db, { secretsFile: "/nonexistent" })).toBe(1);
+    expect(backgroundPass(db, { secrets: fileSource("/nonexistent") })).toBe(1);
     await until(() => ep.asked.includes("/v1/models"));
     closeConsoleListing(db, card.id);
-    backgroundPass(db, { secretsFile: "/nonexistent" });
+    backgroundPass(db, { secrets: fileSource("/nonexistent") });
     await until(() => ep.aborted.includes("/v1/models"));
     await backgroundSettled();
     expect(consoleListing(db)).toBeUndefined();

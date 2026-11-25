@@ -1,10 +1,10 @@
 # The console
 
 A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
-timeline. It is for the owner, to debug and tune her. It is read-only, except for four things: **Settings**,
-which manages the model catalog, **Home**, where her files are edited, **a chat's settings** (its model,
-profile, conversation, permissions, schedules and secret grants), and **deleting chat messages and whole
-turns** (all below). Nothing else in it can change anything.
+timeline. It is for the owner, to debug and tune her. It is read-only, except for five things: **Settings**,
+which manages the model catalog, **Secrets**, her credentials, **Home**, where her files are edited, **a
+chat's settings** (its model, profile, conversation, permissions, schedules and secret grants), and **deleting
+chat messages and whole turns** (all below). Nothing else in it can change anything.
 
 ## What it shows
 
@@ -46,6 +46,7 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
   conversation; its permissions; its schedules, secrets and computer. See below.
 - **Home** (`/home`): her files in `home/`, edited by hand, with each file's history. See below.
 - **Settings** (`/settings`): the model catalog. See below.
+- **Secrets** (`/settings/secrets`): her secret profiles, their notes and the grants to every chat. See below.
 
 ## Live pages
 
@@ -126,7 +127,7 @@ The same operations as the control bot's `/models` and `/provider`, through the 
 (`src/store/models.ts`, `src/control/model-cards.ts`), so a change in either shows in the other:
 
 - **Providers**: each one's kind (Claude login or OpenAI-compatible), base URL or config dir, key reference
-  (`<profile>.<VAR>`, a name in the secrets file: a key is never entered or shown), and model count. Add one
+  (`<profile>.<VAR>`, a name among the secret profiles: a key is never entered or shown here), and model count. Add one
   (its models are then listed, to add from with one press: an OpenAI-compatible provider's `/models`, where one
   whose listing gives no context length asks for it; or what Claude Code offers a Claude login, each alias,
   which follows new versions, beside the fixed version it stands for now), list its models again, or remove it
@@ -142,6 +143,25 @@ Probes and listings run in the server, as for the control bot. While one is pend
 panel) updates itself every second with how long it has waited and how long a request may take, and has a
 Cancel: cancelling stops the request itself, and a cancelled probe leaves the model's last result as it was.
 Without script, reload the page to see one finish.
+
+## Secrets: her credentials
+
+`/settings/secrets` (`src/console/secrets.ts` draws it, `secrets-write.ts` writes; the rules are
+`src/secrets/source.ts`, `notes.ts` and `src/capabilities/computer/secrets.ts`):
+
+- **Profiles**: every secret profile, the secrets file's (read only: its values change where shuvi is deployed)
+  and those kept here, with their variables' names, never a value. A profile kept here is sealed in the store
+  under `SHUVI_SECRETS_KEY`; without the key, or under another one, it is marked and given to nothing.
+- **Add a profile**: a name, `NAME=value` lines, and optionally a grant to every chat. **Replace values** gives
+  every variable again (what is left out is gone). Values are only ever typed in: a refused form comes back
+  with its name and grant choice, never its values; a replaced or deleted value stays redacted. **Delete** asks
+  first, and deletes the profile's note too.
+- **Grant to every chat**, for 4 hours, 1 day, 3 days or until revoked: an owner grant, which every chat's
+  computer gets in calls made for you, never in a group operator's. Each grant to every chat is listed under
+  its profile, with **Revoke now**, which presses its card in the control bot.
+- **Notes**: a profile's summary (one line, in her prompt beside the name) and details (what she reads with
+  `secret_info`: scope, account or org ids, how to use it), with who wrote them last, you or her
+  (`update_secret_note`). A note holding a secret value is refused, and not shown back.
 
 ## Home: her files
 
@@ -256,10 +276,11 @@ Every button comes back to the tab it is on, with its result shown once.
   paused is run, not even once; a paused one-off whose time has passed is cancelled instead, and the page says so.
   **Cancel** asks first.
 - **Secrets**: the secret profiles granted to the chat's computer now: the profile, its variable names (never a
-  value: nothing else is read from the secrets file), time left, who asked for it. **Revoke now** presses the same
-  button as the grant's "Revoke now" card in the control bot, so the card says it is revoked too. A secrets file
-  that cannot be used (readable by others, not valid YAML) is said plainly. Nothing is granted from here: a grant
-  is still her `request_secret` and your answer to its card.
+  value), time left, who asked for it, and the grants to every chat (which apply here in your turns only).
+  **Revoke now** presses the same button as the grant's "Revoke now" card in the control bot, so the card says it
+  is revoked too; a grant to every chat is revoked on the Secrets page. A secrets file that cannot be used
+  (readable by others, not valid YAML) is said plainly. Nothing is granted to a single chat from here: that is
+  still her `request_secret` and your answer to its card.
 - **Computer**, read only: not created, running, stopped or boosted (for which job); when it stops if left idle;
   its disk's allocated size and the most it may grow to (asked of Hangar after the page has loaded, waiting at most
   3 s, else "unknown"; it is the disk's size, not how much of it is used); its running background jobs (the
@@ -298,8 +319,9 @@ same either way.
 The runner child records each turn while it runs (`src/agent/transcript.ts`, tables in
 `src/store/schema.ts`): the prompt by hash (`prompt_texts`, shared by every turn that sent the same bytes),
 the input (`turn_transcripts`) and the timeline (`turn_steps`). Every text is passed through the secret
-redaction first (`src/secrets/redaction.ts`: every value `SHUVI_SECRETS_FILE` holds or ever held, also in its
-JSON-escaped form, becomes `[REDACTED:<profile>]`); an unusable secrets file is alerted and noted in the turn.
+redaction first (`src/secrets/source.ts`, `redaction.ts`: every value `SHUVI_SECRETS_FILE` or the console's
+profiles hold or ever held, also in its JSON-escaped form, becomes `[REDACTED:<profile>]`); an unusable secrets
+file is alerted and noted in the turn.
 Images are stored as paths under `media/`, never as bytes. Recording is best effort: a failure is logged and
 the turn goes on.
 

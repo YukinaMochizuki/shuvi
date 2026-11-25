@@ -2,6 +2,7 @@ import type { ModelChoice } from "agent-runtime";
 import { listOpenAICompatModels, probeModel, type ModelProbe, type OpenAICompatProvider } from "agent-runtime/openai-compat";
 import { providerKey } from "../agent/backend.ts";
 import { cardsListing, catalogChanged, claudeListed, finishListing, type Listed } from "../control/model-cards.ts";
+import type { SecretSource } from "../secrets/source.ts";
 import type { Db } from "../store/db.ts";
 import { getProvider, modelByRowId, modelsToProbe, recordProbe, unknownKind, type ProbeRecord, type Provider } from "../store/models.ts";
 import { IMMEDIATE } from "../store/turns.ts";
@@ -32,8 +33,8 @@ import { listClaudeInChild } from "./list-claude.ts";
  */
 
 export interface BackgroundDeps {
-  /** The secrets file a provider's key is read from (env.ts `SHUVI_SECRETS_FILE`). */
-  secretsFile: string;
+  /** Where a provider's key is read from (env.ts `secrets`). */
+  secrets: SecretSource;
   /** How long one probe request or listing may take. Default 5 minutes: a scaled-to-zero endpoint boots first. */
   timeoutMs?: number;
   /** Test seam. */
@@ -102,9 +103,9 @@ export function backgroundPass(db: Db, deps: BackgroundDeps): number {
 }
 
 /** The provider as agent-runtime sends to it, with its key read from the secrets file. */
-function connection(p: Provider, secretsFile: string): OpenAICompatProvider {
+function connection(db: Db, p: Provider, secrets: SecretSource): OpenAICompatProvider {
   if (!p.baseUrl) throw new Error(`the provider "${p.name}" has no base URL`);
-  const apiKey = p.apiKey ? providerKey(p.apiKey, secretsFile) : undefined;
+  const apiKey = p.apiKey ? providerKey(db, p.apiKey, secrets) : undefined;
   return { name: p.name, baseURL: p.baseUrl, ...(apiKey ? { apiKey } : {}) };
 }
 
@@ -137,7 +138,7 @@ async function runProbe(db: Db, rowId: number, asked: string, signal: AbortSigna
   let c: OpenAICompatProvider | null = null;
   let record: ProbeRecord;
   try {
-    c = connection(m.provider, deps.secretsFile);
+    c = connection(db, m.provider, deps.secrets);
     const r = await probeModel(c, m.model.model, { timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal, vision: !m.model.visionSet, ...(deps.fetch ? { fetch: deps.fetch } : {}) });
     record = probeRecord(r, (s) => scrub(s, c));
   } catch (e) {
@@ -181,7 +182,7 @@ async function runListing(db: Db, cardId: number, providerName: string, signal: 
         break;
       }
       case "openai-compat":
-        c = connection(p, deps.secretsFile);
+        c = connection(db, p, deps.secrets);
         listed = (await listOpenAICompatModels(c, deps.fetch ?? fetch, bounded)).map((l) => ({ model: l.model, ...(l.reported.contextWindow ? { contextWindow: l.reported.contextWindow } : {}) }));
         break;
       default:

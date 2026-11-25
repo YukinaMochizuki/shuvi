@@ -20,7 +20,9 @@ import { awaitInbox, inboxNote, inboxPass, sendFromComputer } from "./files.ts";
 import { browserSaveTool, browserUploadTool } from "./browser-save.ts";
 import { applyResultText, DECLARED_PATH } from "./declared.ts";
 import { DEFAULT_GRID, GRID_MAX, SHEET_EDGE, SHEET_MAX_FRAMES, sheetActsForOwner, sheetCommand, sheetOptions, type SheetArgs } from "./media.ts";
-import { liveGrants, requestSecret, syncGrants, TTLS, type Ttl } from "./secrets.ts";
+import { grantedNames, grantsFor, requestSecret, syncGrants, TTLS, untilLabel, type Ttl } from "./secrets.ts";
+import { allProfiles, profileNames } from "../../secrets/source.ts";
+import { allNotes, DETAILS_MAX, getNote, setNote, SUMMARY_MAX } from "../../secrets/notes.ts";
 import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, releaseOp, runningComputerJobs } from "./state.ts";
 
 /**
@@ -71,6 +73,7 @@ import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, relea
  *   SHUVI_COMPUTER_APPLY_STEP_SEC the most each step of applying ~/.computer.yaml may run (default 900)
  *   SHUVI_COMPUTER_INBOX_WAIT_SEC how long a turn waits for a sent file to land in ~/inbox (default 30)
  *   SHUVI_SECRETS_FILE            the secret profiles (default /etc/shuvi.secrets.yaml, mode 600)
+ *   SHUVI_SECRETS_KEY             the key the console's secret profiles are sealed under (src/secrets/vault.ts)
  */
 
 export const COMPUTER = `## Your computer
@@ -82,7 +85,24 @@ This chat has a computer of its own: a Linux machine (Debian, with python3, pip,
 - Files the owner sends here are copied into ~/inbox/ when the computer next runs (the message says where; your next command waits for them). Photos are not copied unless you ask: \`save_photo\` with the photo's #number. \`send_file\` and \`send_photo\` send a file from the computer to this chat. \`browser_save\` puts one of this chat's browser downloads (or a PDF \`browser_send\` made) in ~/inbox/browser/; \`browser_upload_from_computer\` gives the browser's page a file from here.
 - Installing for yourself needs nothing more: \`pip install --user\`, npm packages installed into ~, programs in ~/.local/bin all stay. Your commands run as a user without root; system packages (apt) go into ${DECLARED_PATH}: \`apt:\` a list of Debian packages, and optionally \`setup:\`, a shell script run after them (both as root; no other keys). It is applied by itself before your next command once it changes, and again whenever the computer's image changes (anything else outside ~ is gone then); \`apply_computer_config\` applies it at once and shows what failed. Keep it to what you need.
 - To look at a video, use \`video_sheet\` rather than writing ffmpeg commands yourself: it gives contact sheets, frames tiled in order with each one's time under it, and an index of the times. Start with the whole video (the default spacing), then zoom into a part with a window (\`from\` / \`to\`) and a smaller \`every\`; \`scene: true\` takes a frame at each cut.
-- Credentials are never on the computer. If a task needs one (an API key), \`request_secret\` asks the owner for a named profile; once granted, its variables are in the environment of your commands here, and their values are hidden from you as [REDACTED:<profile>].`;
+- Credentials are never on the computer. If a task needs one (an API key), \`request_secret\` asks the owner for a named profile; once granted, its variables are in the environment of your commands here, and their values are hidden from you as [REDACTED:<profile>]. The owner may grant a profile to this chat only, or to every chat for his own requests (then your commands get it in any chat, whenever he is the one asking).`;
+
+/**
+ * The section's lines on the secrets there are now: each profile's name, its note's summary and whether it is
+ * granted (never a value, never the note's details), sorted, so the same state gives the same bytes.
+ */
+function secretsLine(db: Db, cfg: ComputerConfig, chatId: number): string {
+  const names = profileNames(db, cfg.secrets);
+  if (!names.length) return "";
+  const g = grantedNames(db, chatId);
+  const notes = allNotes(db);
+  const lines = names.map((n) => {
+    const summary = notes.get(n)?.summary;
+    const granted = g.owner.includes(n) ? " [granted for the owner in every chat]" : g.chat.includes(n) ? " [granted in this chat]" : "";
+    return `\n  - ${n}${summary ? `: ${summary}` : ""}${granted}`;
+  });
+  return `\n- Secret profiles there are (\`secret_info\` gives how to use one; when you learn something about one that would save looking it up again, its scope, an account or org id, what works, keep it with \`update_secret_note\`):${lines.join("")}`;
+}
 
 const oneLine = (s: string, n = 120) => {
   const t = s.replace(/\s+/g, " ").trim();
@@ -210,11 +230,11 @@ export const computer = defineCapability<ComputerConfig>({
   label: "computer (owner only)",
   gives: "this chat's own computer: exec, files, secrets, photos, video contact sheets.",
   enable: computerConfig,
-  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config"],
+  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "secret_info", "update_secret_note", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config"],
   // A sheet of a file on the computer is the owner's; one of a link (media's video_sheet) is anyone's.
   ownerOnlyWhen: { video_sheet: sheetActsForOwner },
   ownerOnlyNote: { video_sheet: SHEET_FILE_NOTE },
-  delegable: ["exec", "read_job", "cancel_job", "request_secret", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config", "video_sheet"],
+  delegable: ["exec", "read_job", "cancel_job", "request_secret", "secret_info", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config", "video_sheet"],
   tools({ db, chat, state: s, chatPolicy }, cfg) {
     const computers = computersFor(db, cfg);
     const x: ExecContext = { db, chat, computers, cfg };
@@ -248,14 +268,16 @@ export const computer = defineCapability<ComputerConfig>({
           }
           const timeout = Math.min(a.timeout ?? cfg.execDefaultSec, cfg.execMaxSec);
           const capped = a.timeout && a.timeout > cfg.execMaxSec ? ` (timeout capped at ${cfg.execMaxSec}s; use background for longer work)` : "";
+          // The owner's grants for every chat go only into a command run for the owner, never an operator's.
+          const forOwner = actingFor(s, "exec")?.by === "owner";
           if (!a.boost) {
-            const r = await runSync(x, syncCommand(a.command), { timeoutSec: timeout });
+            const r = await runSync(x, syncCommand(a.command), { timeoutSec: timeout, forOwner });
             return r.isError ? err(r.text + capped) : ok(r.text + capped);
           }
           await computers.boost(chat, a.boost, null);
           let r;
           try {
-            r = await runSync(x, syncCommand(a.command), { timeoutSec: timeout });
+            r = await runSync(x, syncCommand(a.command), { timeoutSec: timeout, forOwner });
           } finally {
             await computers.restore(chat.id).catch(() => false);
           }
@@ -309,20 +331,68 @@ export const computer = defineCapability<ComputerConfig>({
     const requestSecretTool: ToolDef<{ profile: string; ttl: Ttl; reason: string }> = {
       name: "request_secret",
       description:
-        "Ask the owner to grant this chat's computer a named secret profile (a set of environment variables, such as an API token) for a while. The owner sees the profile's variable names and your reason, never the values, and answers in their control bot. Their answer arrives in this chat as an approval event; once granted, the variables are in the environment of every exec here until it expires or they revoke it. End your turn after asking.",
+        "Ask the owner to grant this chat's computer a named secret profile (a set of environment variables, such as an API token) for a while. The owner sees the profile's variable names and your reason, never the values, and answers in their control bot: for this chat, or for every chat (his own requests only, possibly until he revokes it). Their answer arrives in this chat as an approval event; once granted, the variables are in the environment of the execs it covers until it expires or they revoke it. End your turn after asking.",
       inputSchema: {
         profile: z.string().min(1).describe("The profile's name, e.g. modal"),
         ttl: z.enum(Object.keys(TTLS) as [Ttl, ...Ttl[]]).describe("How long to ask for: 4h, 1d or 3d"),
         reason: z.string().min(1).describe("Why you need it, in a sentence the owner reads"),
       },
       async handler(a) {
-        const live = liveGrants(db, chat.id).find((g) => g.profile === a.profile);
-        if (live) return ok(`"${a.profile}" is already granted here until ${live.expiresAt.slice(0, 16).replace("T", " ")} UTC; its variables are in your commands' environment.`);
         const acting = actingFor(s, "request_secret");
+        const live = grantsFor(db, chat.id, acting?.by === "owner").find((g) => g.profile === a.profile);
+        if (live) return ok(`"${a.profile}" is already granted ${live.chatId == null ? "for the owner in every chat" : "here"} ${untilLabel(live)}; its variables are in your commands' environment.`);
         // An operator's card says so, and its answer counts as theirs, never as the owner's (agent/turn.ts).
-        const r = requestSecret(db, cfg.secretsFile, { chatId: chat.id, profile: a.profile, ttl: a.ttl, reason: a.reason, ...(acting?.by === "operator" ? { requestedBy: acting.userId } : {}) });
+        const r = requestSecret(db, cfg.secrets, { chatId: chat.id, profile: a.profile, ttl: a.ttl, reason: a.reason, ...(acting?.by === "operator" ? { requestedBy: acting.userId } : {}) });
         if ("error" in r) return err(r.error);
         return ok(`Asked the owner for "${a.profile}" (${a.ttl}), approval #${r.approvalId}. Their answer comes back to this chat as an approval event. End your turn now; do not wait for it.`);
+      },
+    };
+
+    const secretInfoTool: ToolDef<{ profile?: string }> = {
+      name: "secret_info",
+      description:
+        "What is known about the secret profiles: each one's variables (names only, never a value), whether it is granted to your commands here, and its note: a one-line summary and the details (its scope, the accounts or org ids it acts on, how to use it, what was tried). Read it before working with a profile, so you need not find out again what is already known.",
+      inputSchema: { profile: z.string().optional().describe("One profile; omit for all of them") },
+      async handler(a) {
+        const all = allProfiles(db, cfg.secrets);
+        if ("error" in all) return err(`The secrets file cannot be used: ${all.error}`);
+        const names = [...Object.keys(all.profiles), ...all.unreadable.map((u) => u.name)].sort();
+        const pick = a.profile ? names.filter((n) => n === a.profile) : names;
+        if (!pick.length) return a.profile ? err(`There is no secret profile "${a.profile}". There are: ${names.join(", ") || "none"}.`) : ok("There are no secret profiles.");
+        const live = grantsFor(db, chat.id, actingFor(s, "secret_info")?.by === "owner");
+        return ok(
+          pick
+            .map((n) => {
+              const vars = all.profiles[n] ? Object.keys(all.profiles[n]!).join(", ") : `(cannot be used now: ${all.unreadable.find((u) => u.name === n)?.why})`;
+              const g = live.find((x) => x.profile === n);
+              const note = getNote(db, n);
+              return [
+                `## ${n}`,
+                `Variables: ${vars || "(none)"}`,
+                `Granted to your commands here: ${g ? `yes, ${g.chatId == null ? "for the owner in every chat" : "in this chat"}, ${untilLabel(g)}` : "no (request_secret asks)"}`,
+                `Summary: ${note?.summary || "(none)"}`,
+                `Details:${note?.details ? `\n${note.details}` : " (none)"}`,
+                ...(note ? [`(note last written by ${note.updatedBy}, ${note.updatedAt.slice(0, 16).replace("T", " ")} UTC)`] : []),
+              ].join("\n");
+            })
+            .join("\n\n"),
+        );
+      },
+    };
+
+    const updateSecretNoteTool: ToolDef<{ profile: string; summary?: string; details?: string }> = {
+      name: "update_secret_note",
+      description:
+        `Keep what you know about a secret profile in its note, for every chat and every later turn: \`summary\` (one line, at most ${SUMMARY_MAX} characters, shown beside the profile's name in your prompt: what it is for) and/or \`details\` (at most ${DETAILS_MAX} characters: its scope, the accounts or org ids it acts on, how to use it, what failed and why). Each one you give REPLACES what was there, so read it with secret_info first and write it back whole. Never a secret value: a note holding one is refused. The owner sees and edits notes in the console.`,
+      inputSchema: {
+        profile: z.string().min(1).describe("The profile's name"),
+        summary: z.string().optional().describe("One line: what it is for"),
+        details: z.string().optional().describe("How to use it: scope, ids, what works, what does not"),
+      },
+      async handler(a) {
+        const r = setNote(db, cfg.secrets, a.profile, { ...(a.summary !== undefined ? { summary: a.summary } : {}), ...(a.details !== undefined ? { details: a.details } : {}) }, `assistant in ${chatLabel(chat)}`);
+        if ("error" in r) return err(r.error);
+        return ok(`Saved the note of "${a.profile}"${a.summary !== undefined ? " (summary" : " ("}${a.summary !== undefined && a.details !== undefined ? " and " : ""}${a.details !== undefined ? "details" : ""}). It is in every chat's prompt from the next turn.`);
       },
     };
 
@@ -401,12 +471,14 @@ export const computer = defineCapability<ComputerConfig>({
       },
     };
 
-    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, sendFile, sendPhoto, savePhoto, browserSaveTool(x, chatPolicy), browserUploadTool(x, chatPolicy), ...(sheetHere ? [videoSheet] : []), applyConfig] as ToolDef[] }];
+    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, secretInfoTool, updateSecretNoteTool, sendFile, sendPhoto, savePhoto, browserSaveTool(x, chatPolicy), browserUploadTool(x, chatPolicy), ...(sheetHere ? [videoSheet] : []), applyConfig] as ToolDef[] }];
   },
-  section: (ctx) =>
-    policyDelegates(ctx.chatPolicy, "computer")
-      ? `${COMPUTER}\n- Here the owner has let this group's operators use this computer too: run what they ask for as you would for him; files they send are copied into ~/inbox/ like his. A secret they need is asked for with \`request_secret\` all the same; only the owner can grant it.`
-      : COMPUTER,
+  section: (ctx, cfg) => {
+    const secrets = ctx.db ? secretsLine(ctx.db, cfg, ctx.chat.id) : "";
+    return policyDelegates(ctx.chatPolicy, "computer")
+      ? `${COMPUTER}${secrets}\n- Here the owner has let this group's operators use this computer too: run what they ask for as you would for him; files they send are copied into ~/inbox/ like his. A secret they need is asked for with \`request_secret\` all the same; only the owner can grant it.`
+      : `${COMPUTER}${secrets}`;
+  },
   jobKinds: (cfg) => [computerJobKind(cfg, (db) => computersFor(db, cfg))],
   loops: ({ db, files, ownerId, policy }, cfg) => {
     const computers = computersFor(db, cfg);

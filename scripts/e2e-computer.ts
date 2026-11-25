@@ -21,6 +21,10 @@
  *   8. a group whose policy delegates its computer to an operator (policy.yaml `operators`, `delegate`):
  *      the operator's exec runs on the group's own computer without the owner; someone who is not an
  *      operator is refused, and nothing runs for them
+ *   9. a profile kept in the store (sealed under SHUVI_SECRETS_KEY, as the console keeps it) and granted to
+ *      every chat until revoked: the owner's turn in the group gets it, hidden as [REDACTED:github]; the
+ *      operator's turn in the same group does not; its note's summary is in the prompt, and
+ *      update_secret_note keeps what she learned, refusing a note holding the value
  *
  *   bun scripts/e2e-computer.ts
  */
@@ -28,6 +32,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Update } from "grammy/types";
+import { consoleGrant } from "../src/capabilities/computer/secrets.ts";
+import { getNote, setNote } from "../src/secrets/notes.ts";
+import { putProfile } from "../src/secrets/source.ts";
 import { openDb } from "../src/store/db.ts";
 import { FakeHangar } from "../test/fake-hangar.ts";
 import { dmUpdate, FakeTelegram, groupUpdate, OWNER, type Person } from "../test/helpers.ts";
@@ -49,6 +56,8 @@ async function until(what: string, cond: () => boolean, ms = 60_000): Promise<vo
 }
 
 const SECRET = "fake-e2e-secret-value-0123456789";
+const GH_SECRET = "fake-e2e-github-token-9876543210";
+const SECRETS_KEY = new Uint8Array(32).fill(5);
 const HAS_FFMPEG = Bun.spawnSync(["sh", "-c", "command -v ffmpeg && command -v ffprobe"]).exitCode === 0;
 let videoStep = false;
 
@@ -93,7 +102,14 @@ const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
   [/token=\[\[REDACTED:modal\]\]/, () => say("Deployed; the token stayed hidden.")],
   [/token=\[\]/, () => use("request_secret", { profile: "modal", ttl: "1d", reason: "to deploy the app" })],
   [/Asked the owner for \\"modal\\"/, () => say("I asked the owner for the modal secret.")],
-  [/· ⚙ approval\] Approval #\d+ \(secret\)[^\n]*Grant for 1 day/, () => use("exec", { command: 'echo "token=[$MODAL_TOKEN]"' })],
+  [/· ⚙ approval\] Approval #\d+ \(secret\)[^\n]*This chat, 1 day/, () => use("exec", { command: 'echo "token=[$MODAL_TOKEN]"' })],
+  [/push with github/, () => use("exec", { command: 'echo "gh=[$GH_TOKEN]"' })],
+  [/gh=\[\[REDACTED:github\]\]/, () => say("Pushed with github.")],
+  [/gh=\[\]/, () => say("There is no github token for this.")],
+  [/remember the github org/, () => use("update_secret_note", { profile: "github", details: "Org: example-org (id 1234)." })],
+  [/keep the github token in the note/, () => use("update_secret_note", { profile: "github", details: `token ${GH_SECRET}` })],
+  [/Saved the note of \\"github\\"/, () => say("Noted the github org.")],
+  [/holds the value of the secret profile/, () => say("I cannot keep a secret value in a note.")],
   [/declare a package/, () => use("exec", { command: "printf 'apt: [example-tool]\\nsetup: echo configured > configured.txt\\n' > ~/.computer.yaml && echo declared-ok" })],
   [/exit 0 · [^"]*declared-ok/, () => use("apply_computer_config", {})],
   [/Applied ~\/\.computer\.yaml in \d+s: apt: example-tool; the setup script/, () => say("The computer config is applied.")],
@@ -154,6 +170,7 @@ const env = {
   SHUVI_WEB: "off",
   ...hangar.env(),
   SHUVI_SECRETS_FILE: secretsFile,
+  SHUVI_SECRETS_KEY: Buffer.from(SECRETS_KEY).toString("base64"),
   SHUVI_COMPUTER_POLL_SEC: "1",
   SHUVI_COMPUTER_IDLE_MINUTES: "0.1",
   ANTHROPIC_BASE_URL: `http://localhost:${anthropic.port}`,
@@ -218,7 +235,10 @@ await until("the secret card", () => controlTexts().some((t) => t.includes('Secr
 const card = control.calls.find((c) => c.method === "sendMessage" && String(c.body.text).includes('Secret "modal"'))!.body;
 check(String(card.text).includes("Variables: MODAL_TOKEN") && !String(card.text).includes(SECRET), "the card names the variables, never the values");
 const keyboard = (card.reply_markup as { inline_keyboard: { callback_data: string; text: string }[][] }).inline_keyboard;
-check(keyboard.map((r) => r[0]!.text).join("|") === "Grant for 4 hours|Grant for 1 day|Grant for 3 days|Deny", "the card offers 4h / 1d / 3d and deny");
+check(
+  keyboard.map((r) => r[0]!.text).join("|") === "This chat, 4 hours|This chat, 1 day|This chat, 3 days|Every chat, 4 hours|Every chat, 1 day|Every chat, 3 days|Every chat, until revoked|Deny",
+  "the card offers this chat or every chat, for 4h / 1d / 3d (every chat: or until revoked), and deny",
+);
 control.updates.push({ update_id: 1, callback_query: { id: "cq1", from: { id: OWNER, is_bot: false, first_name: "Owner" }, chat_instance: "x", data: keyboard[1]![0]!.callback_data } } as unknown as Update);
 await replied("Deployed; the token stayed hidden.", "the owner's grant woke the chat, and its exec saw the value only as [REDACTED:modal]");
 check(hangar.execs.some((e) => e.env.MODAL_TOKEN === SECRET), "the value went into that exec's environment");
@@ -288,6 +308,37 @@ const execsAfterAlice = hangar.execs.filter((e) => e.command.join(" ").includes(
 tg.updates.push(groupUpdate(21, GROUP, bob, "@shuvi_test_bot please sort the data"));
 await replied("Only the owner or an operator can have me run that.", "8. someone who is not an operator is refused");
 check(hangar.execs.filter((e) => e.command.join(" ").includes("sorted-for-")).length === execsAfterAlice, "8. and nothing ran for them");
+await until("the turn to close", turnsIdle);
+
+// ---- 9. a profile kept in the store, granted to every chat for the owner ----------------------------------
+// As the console's Secrets page does it: sealed under the server's key, a note, an owner grant until revoked.
+const src = { file: secretsFile, key: SECRETS_KEY };
+check("created" in putProfile(db, src, "github", { GH_TOKEN: GH_SECRET }), "9. a profile was kept in the store");
+check("note" in setNote(db, src, "github", { summary: "GitHub token for example-org" }, "console"), "9. with a note");
+consoleGrant(db, "github", "forever");
+const ownerPerson: Person = { id: OWNER, first: "Owner" };
+let before = hangar.execs.length;
+tg.updates.push(groupUpdate(30, GROUP, ownerPerson, "@shuvi_test_bot push with github"));
+await replied("Pushed with github.", "9. the owner's turn in the group got the owner grant, seeing it only as [REDACTED:github]");
+check(hangar.execs.slice(before).some((e) => e.env.GH_TOKEN === GH_SECRET), "9. the value went into that exec's environment");
+check(bodies.some((b) => b.includes("github: GitHub token for example-org [granted for the owner in every chat]")), "9. the prompt names the profile with its summary, granted");
+await until("the turn to close", turnsIdle);
+before = hangar.execs.length;
+tg.updates.push(groupUpdate(31, GROUP, alice, "@shuvi_test_bot push with github"));
+await replied("There is no github token for this.", "9. the operator's turn in the same group did not get it");
+check(!hangar.execs.slice(before).some((e) => e.env.GH_TOKEN), "9. no GH_TOKEN in the operator's exec");
+await until("the turn to close", turnsIdle);
+tg.updates.push(dmUpdate(32, "remember the github org"));
+await replied("Noted the github org.", "9. update_secret_note kept what she learned");
+check(getNote(db, "github")?.details === "Org: example-org (id 1234)." && getNote(db, "github")?.summary === "GitHub token for example-org", "9. the details were replaced, the summary kept");
+await until("the turn to close", turnsIdle);
+const dump9 = ["chat_events", "secret_profiles", "secret_grants", "secret_notes", "turns"].map((t) => JSON.stringify(db.$client.query(`select * from ${t}`).all())).join("\n");
+check(!dump9.includes(GH_SECRET), "9. the value is nowhere in the store in the clear");
+check(!bodies.some((b) => b.includes(GH_SECRET)), "9. nor in anything the model was sent");
+// A model that somehow had the value (this fake one is scripted to) cannot keep it in a note.
+tg.updates.push(dmUpdate(33, "keep the github token in the note"));
+await replied("I cannot keep a secret value in a note.", "9. a note holding the value was refused");
+check(!JSON.stringify(db.$client.query("select * from secret_notes").all()).includes(GH_SECRET), "9. the value is in no note");
 await until("the turn to close", turnsIdle);
 
 log("PASS");

@@ -62,13 +62,15 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | telling the owner anything (alerts, /status, approvals) | `src/control/bot.ts`, `src/store/control.ts`, `src/control/approvals.ts` |
 | the control bot's model cards (`/model`, `/models`, `/provider`), and probing models in the background | `src/control/model-cards.ts`, `src/server/probes.ts` |
 | the sticker library: its format and index, ranking, the rules `sticker` enforces | `src/capabilities/stickers/` (`library.ts`, `find.ts`, `rules.ts`) |
-| each chat's computer (Hangar), exec, secrets, files | `src/capabilities/computer/index.ts`, then `state.ts` (who may touch it when) and `secrets.ts` (redaction: `src/secrets/`) |
+| each chat's computer (Hangar), exec, secrets, files | `src/capabilities/computer/index.ts`, then `state.ts` (who may touch it when) and `secrets.ts` (grants: a chat's, or the owner's for every chat; redaction: `src/secrets/`) |
 | what each chat may do (policy.yaml), and changing it: by the owner's approval of a proposal, or his own edit in the console | `src/policy/policy.ts`, `src/policy/load.ts`, `src/policy/write.ts`; the owner's own edit from the console, one entry in place: `src/policy/edit.ts` |
 | how policy is described: the owner's `/policy`, the model's `explain_policy` and the check on a proposal | `src/policy/view.ts`, `src/policy/explain.ts` |
 | which group messages start a turn (mention, reply, follow-up) | `src/agent/triggers.ts`, `src/server/waker.ts` |
 | what a chat may see or send to | `src/capabilities/access.ts` |
 | what a turn's transcript records, image references | `src/agent/transcript.ts`, `src/store/transcripts.ts` |
 | secret redaction (transcripts and a chat computer's output) | `src/secrets/redaction.ts` (requests and grants: `src/capabilities/computer/secrets.ts`) |
+| where secret profiles come from (the file, and the console's sealed under SHUVI_SECRETS_KEY), their notes | `src/secrets/source.ts` (`SecretSource`, `allProfiles`, `redactionFor`), `vault.ts`, `notes.ts` |
+| the console's Secrets page: profiles, values typed in and never shown, grants to every chat, notes | `src/console/secrets.ts` (draws), `secrets-write.ts` (the writes) |
 | the console: who may look (loopback, Host, tailnet login, token), its pages and design | `src/console/server.ts`, `pages.ts`, `DESIGN.md`; docs/console.md |
 | the console as an installable app (PWA): its manifest, icons, and the service worker that answers only a failed page load with an offline page | `src/console/pwa.ts` (the icons: `src/console/pwa/`, `scripts/pwa-icons.ts`); docs/console.md "Installing it" |
 | the console's live pages: the `/live` stream, its one shared poll of the store, the parts it sends and the page's cursor | `src/console/live.ts`; the parts: `pages.ts` (`liveView`); the page's side: `console.js` |

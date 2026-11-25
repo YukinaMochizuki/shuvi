@@ -5,9 +5,11 @@ import { chmodSync, readFileSync, renameSync, statSync, writeFileSync } from "no
  * output (src/capabilities/computer/), and the turn transcripts (src/agent/transcript.ts). Core, so the
  * runner child and the computer capability share it without one importing the other.
  *
- * The values come from the secret profiles (SHUVI_SECRETS_FILE, default /etc/shuvi.secrets.yaml, mode 600;
- * requests and grants are src/capabilities/computer/secrets.ts) and from every value the file ever held
- * (`knownFile`). Every one of them is replaced by `[REDACTED:<profile>]`.
+ * The values come from the secret profiles (src/secrets/source.ts: SHUVI_SECRETS_FILE, default
+ * /etc/shuvi.secrets.yaml, mode 600, and the profiles the owner keeps in the console; requests and grants are
+ * src/capabilities/computer/secrets.ts) and from every value either ever held (`knownFile`). Every one of them
+ * is replaced by `[REDACTED:<profile>]`. This module reads the file and the known file only; `redactionFor` and
+ * `LiveRedaction`, which read the store too, are in source.ts.
  */
 
 export type Profiles = Record<string, Record<string, string>>;
@@ -80,9 +82,17 @@ function readKnown(file: string): Record<string, string> {
   }
 }
 
+/**
+ * Add the values of `profiles` to the known file of `file` (value → profile), when any is new. False: a new one could
+ * not be written there (a caller about to let a value go refuses rather than stop redacting it).
+ */
+export function rememberValues(file: string, profiles: Profiles): boolean {
+  return remember(file, profiles, readKnown(file));
+}
+
 let warnedKnown = false;
-/** Add the file's current values to the known file (value → profile), when any is new. */
-function remember(file: string, profiles: Profiles, known: Record<string, string>): void {
+/** Add the profiles' current values to the known file (value → profile), when any is new. */
+function remember(file: string, profiles: Profiles, known: Record<string, string>): boolean {
   let changed = false;
   for (const [p, vars] of Object.entries(profiles)) {
     for (const v of Object.values(vars)) {
@@ -92,15 +102,17 @@ function remember(file: string, profiles: Profiles, known: Record<string, string
       }
     }
   }
-  if (!changed) return;
+  if (!changed) return true;
   try {
     const tmp = `${knownFile(file)}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(known), { mode: 0o600 });
     chmodSync(tmp, 0o600);
     renameSync(tmp, knownFile(file));
+    return true;
   } catch (e) {
     if (!warnedKnown) console.error(`secrets: cannot write ${knownFile(file)} (${e instanceof Error ? e.message : String(e)}); values rotated out of ${file} will no longer be redacted`);
     warnedKnown = true;
+    return false;
   }
 }
 
@@ -169,69 +181,18 @@ export function redaction(known: Record<string, string>, withheld?: string): Red
   };
 }
 
-/** The redaction for the secrets file as it is now, and every value it ever held. */
-export function redactionFor(file: string): Redaction {
+/**
+ * The redaction for `loaded` (every profile now, source.ts `allProfiles`, or why the file cannot be used), and
+ * every value the known file beside `file` holds; the values in `loaded` are added to it.
+ */
+export function redactionOf(file: string, loaded: { profiles: Profiles } | { error: string }): Redaction {
   const known = readKnown(file);
-  const r = loadProfiles(file);
-  if ("profiles" in r) {
-    remember(file, r.profiles, known);
+  if ("profiles" in loaded) {
+    remember(file, loaded.profiles, known);
     return redaction(known);
   }
   // Unusable: the values known so far still redact; with none known, output is withheld.
-  return Object.keys(known).length ? redaction(known) : redaction({}, `the secrets file is unusable (${r.error})`);
-}
-
-/**
- * The redaction of `file`, kept current for a long-lived reader (a turn's transcript): rebuilt when the file
- * or its known file changes (by mtime, looked at most once per `checkMs`), so a secret added while a turn runs
- * is redacted from then on.
- */
-export class LiveRedaction {
-  private red: Redaction;
-  private stamp: string;
-  private checkedAt = 0;
-
-  constructor(
-    readonly file: string,
-    private readonly checkMs = 1000,
-    private readonly now: () => number = Date.now,
-  ) {
-    this.stamp = this.stampNow();
-    this.red = redactionFor(file);
-    this.checkedAt = this.now();
-  }
-
-  private stampNow(): string {
-    const m = (p: string) => {
-      try {
-        return String(statSync(p).mtimeMs);
-      } catch {
-        return "-";
-      }
-    };
-    return `${m(this.file)}|${m(knownFile(this.file))}`;
-  }
-
-  current(): Redaction {
-    const t = this.now();
-    if (t - this.checkedAt >= this.checkMs) {
-      this.checkedAt = t;
-      const stamp = this.stampNow();
-      if (stamp !== this.stamp) {
-        this.stamp = stamp;
-        this.red = redactionFor(this.file);
-      }
-    }
-    return this.red;
-  }
-
-  readonly redact = (s: string): string => this.current().redact(s);
-
-  /** Why the file cannot be used now (a missing file is fine: no secrets), or null. */
-  problem(): string | null {
-    const r = loadProfiles(this.file);
-    return "error" in r ? r.error : null;
-  }
+  return Object.keys(known).length ? redaction(known) : redaction({}, `the secrets file is unusable (${loaded.error})`);
 }
 
 /** Replace every value in `profiles` (tests, and callers with profiles in hand). */

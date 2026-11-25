@@ -6,7 +6,7 @@ import { chatLabel } from "../../store/turns.ts";
 import { HOME_DIR } from "./config.ts";
 import type { Computers } from "./computer.ts";
 import { describeError } from "./hangar/client.ts";
-import { secretsForChat } from "./secrets.ts";
+import { redactionFor } from "../../secrets/source.ts";
 import { acquireLease, getComputer, releaseLease, updateComputer } from "./state.ts";
 import type { Db } from "../../store/db.ts";
 
@@ -212,7 +212,7 @@ export async function ensureDeclared(computers: Computers, chat: Chat, opts: { f
   if (hash === applied.trim()) return { kind: "current", hash };
   if (!opts.force && hash === failed.trim()) return { kind: "failed-before", hash };
 
-  const red = secretsForChat(computers.db, computers.cfg.secretsFile, chat.id).red;
+  const red = redactionFor(computers.db, computers.cfg.secrets);
   const parsed = content.length > MAX_FILE ? { error: `${DECLARED_PATH} is larger than ${MAX_FILE >> 10} KiB` } : parseDeclared(content.toString("utf8"));
   if ("error" in parsed) {
     await recordFailed(computers, row.container, hash);

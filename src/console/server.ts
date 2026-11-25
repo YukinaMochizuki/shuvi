@@ -23,6 +23,10 @@ import { diskFacts } from "./chat-extras-data.ts";
 import type { SignalTurn } from "../server/spawn.ts";
 import { CAPABILITIES } from "../capabilities/index.ts";
 import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
+import { loadSecretsPage, secretsPage } from "./secrets.ts";
+import { isSecretsWrite, secretsWrite, takeSecretsFlash } from "./secrets-write.ts";
+import { fileSource, type SecretSource } from "../secrets/source.ts";
+import { DEFAULT_SECRETS_FILE } from "../env.ts";
 import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
 import { backPath, deleteWrite, isDeleteWrite, NOTICE_PARAM, takeDeleteNotice } from "./delete-write.ts";
 import { openLive, type LiveHub } from "./live.ts";
@@ -82,7 +86,8 @@ import { pwaFile } from "./pwa.ts";
  * a `Location` header can carry any model id. A Home save answers 303 to `/home?file=<path>&r=<id>` the same way
  * (home-write.ts: its result, or a conflict's two texts to resolve).
  * BODY SIZE: a request body may be up to `MAX_SMALL_BODY`, but for the routes in `LARGE_BODY_WRITES`, which may be
- * up to `MAX_BODY`: a Home save carries a whole file, and a delete a page's worth of selected messages.
+ * up to `MAX_BODY`: a Home save carries a whole file, a delete a page's worth of selected messages, and a secret
+ * profile's values or note (a note's 8000 characters, form-encoded in CJK, are about 72 KB).
  * Every page is server-rendered with escaped text (html.ts); the CSP allows only this origin's stylesheet,
  * images and its scripts, and forms and background requests to this origin only. The scripts: htmx (the npm
  * package `htmx.org`, pinned, served from node_modules at `/htmx.min.js`; html.ts `page` sets its config: no
@@ -131,6 +136,11 @@ export interface ConsoleDeps {
    * `prompt` has, when the computer capability is set up in this process.
    */
   computer?: ComputerConfig | null;
+  /**
+   * Where secret profiles come from (env.ts `secrets`), for the Secrets page and a chat's grants. Default: the
+   * computer's, else the default secrets file with no key.
+   */
+  secrets?: SecretSource;
   now?: () => number;
   /** The live streams' hub (live.ts). Default: the one of `db`. */
   liveHub?: LiveHub;
@@ -142,10 +152,11 @@ export const MAX_BODY = 2 * 1024 * 1024;
 /** Every other request's: what the console allowed before Home (the sign-in posts before anyone is let in). */
 export const MAX_SMALL_BODY = 16 * 1024;
 /**
- * The writes that may be larger than `MAX_SMALL_BODY`: a Home save, and a delete, whose script posts one
- * multipart field per selected message (about 95 bytes each: a chat page's 200 messages are about 19 KB).
+ * The writes that may be larger than `MAX_SMALL_BODY`: a Home save, a delete, whose script posts one
+ * multipart field per selected message (about 95 bytes each: a chat page's 200 messages are about 19 KB), and a
+ * secret profile's values (a certificate) or note.
  */
-export const LARGE_BODY_WRITES: ReadonlySet<string> = new Set([...HOME_WRITES, "/messages/delete"]);
+export const LARGE_BODY_WRITES: ReadonlySet<string> = new Set([...HOME_WRITES, "/messages/delete", "/settings/secrets/put", "/settings/secrets/note"]);
 export const SESSION_COOKIE = "shuvi_console";
 export const SESSION_MS = 7 * 24 * 3600_000;
 
@@ -296,6 +307,11 @@ function settingsDeps(deps: ConsoleDeps): ChatSettingsDeps {
   };
 }
 
+/** Where secret profiles come from in this process. */
+function secretsOf(deps: ConsoleDeps): SecretSource {
+  return deps.secrets ?? computerOf(deps)?.secrets ?? fileSource(DEFAULT_SECRETS_FILE);
+}
+
 /** The computer's configuration, when it is set up in this process. */
 function computerOf(deps: ConsoleDeps): ComputerConfig | null {
   if (deps.computer !== undefined) return deps.computer;
@@ -314,7 +330,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   const path = url.pathname.replace(/\/+$/, "") || "/";
   // Only a Home save and a delete may be large (`MAX_BODY`, Bun's own limit); anything else keeps the small one.
   if (!LARGE_BODY_WRITES.has(path) && Number(req.headers.get("content-length") ?? 0) > MAX_SMALL_BODY) return respond("too large", 413, "text/plain");
-  const write = isSettingsWrite(path) || HOME_WRITES.has(path) || isDeleteWrite(path) || PROFILE_WRITES.has(path) || CHAT_SETTINGS_WRITE.test(path);
+  const write = isSettingsWrite(path) || isSecretsWrite(path) || HOME_WRITES.has(path) || isDeleteWrite(path) || PROFILE_WRITES.has(path) || CHAT_SETTINGS_WRITE.test(path);
   if (write ? req.method !== "POST" : !["GET", "HEAD"].includes(req.method) && !(req.method === "POST" && path === "/login")) {
     return write ? respond("a write: POST only", 405, "text/plain", { allow: "POST" }) : respond("read only", 405, "text/plain", { allow: "GET, HEAD" });
   }
@@ -350,6 +366,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
         return "json" in r ? respond(r.json.body, r.json.status, "application/json; charset=utf-8") : respond(null, 303, "text/plain", { location: r.location });
       }
       if (isSettingsWrite(path)) return respond(null, 303, "text/plain", { location: settingsWrite(deps.db, path, form, ctx.now) });
+      if (isSecretsWrite(path)) return respond(null, 303, "text/plain", { location: secretsWrite(deps.db, secretsOf(deps), path, form, deps.ownerId !== undefined ? { id: deps.ownerId, name: auth.who ?? "Owner" } : null, auth.who, ctx.now) });
       if (PROFILE_WRITES.has(path)) return respond(null, 303, "text/plain", { location: profileWrite(deps.db, homeOf(deps), path, form, auth.who, ctx.now!) });
       const chatWrite = CHAT_SETTINGS_WRITE.exec(path);
       if (chatWrite) {
@@ -384,6 +401,10 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     // Chats and turns are one navigation now (the list groups turns by chat); the old address leads there.
     if (path === "/chats") return respond(null, 302, "text/plain", { location: "/turns" });
     if (path === "/turns") return htmlResponse(turnsPage(ctx, url.searchParams)!);
+    if (path === "/settings/secrets") {
+      const sctx = { timeZone: ctx.timeZone, now: ctx.now ?? Date.now(), csrf, ...(ctx.who ? { who: ctx.who } : {}) };
+      return htmlResponse(secretsPage(sctx, loadSecretsPage(deps.db, secretsOf(deps), url.searchParams, takeSecretsFlash(url.searchParams.get("r"), ctx.now), sctx.now)));
+    }
     if (path === "/settings" || path === "/settings/model" || path === "/settings/listing") {
       const sctx = { timeZone: ctx.timeZone, now: ctx.now ?? Date.now(), csrf, ...(ctx.who ? { who: ctx.who } : {}) };
       // A part of the page, fetched by itself while something in it is pending (settings.ts `polls`).

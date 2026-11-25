@@ -9,6 +9,7 @@ import { TriggerScan, type BotIdentity } from "../src/agent/triggers.ts";
 import { CAPABILITIES, enabledCapabilities } from "../src/capabilities/index.ts";
 import { defineCapability, enableCapabilities } from "../src/capabilities/types.ts";
 import { INBOX_FROM_KEY, inboxPass } from "../src/capabilities/computer/files.ts";
+import { consoleGrant } from "../src/capabilities/computer/secrets.ts";
 import { answerApproval, requestApproval } from "../src/control/approvals.ts";
 import { attachmentOfEvent } from "../src/store/media.ts";
 import { checkDelegate, explainPolicy } from "../src/policy/explain.ts";
@@ -445,6 +446,25 @@ delegate: [computer]
     say(db, POLICY, OWNER, "@shuvi_test_bot stop it");
     const b = await groupTurn(db, POLICY, [{ tool: "cancel_job", args: { id } }], env);
     expect(b.toolResults[0]!.result.isError).toBeFalsy();
+  });
+
+  test("a grant to every chat goes into the owner's commands, sync and background, never an operator's", async () => {
+    const { fake, env } = computerEnv();
+    const db = memDb();
+    consoleGrant(db, "modal", "forever");
+    const command = 'echo "token=[$MODAL_TOKEN]"';
+    say(db, POLICY, BOB, "@shuvi_test_bot use modal");
+    let before = fake.execs.length;
+    const a = await groupTurn(db, POLICY, [{ tool: "exec", args: { command } }, { tool: "exec", args: { command, background: true, expect_seconds: 5 } }], env);
+    expect(text(a, 0)).toContain("token=[]");
+    expect(text(a, 1)).toContain("Started job");
+    expect(fake.execs.slice(before).some((e) => e.env.MODAL_TOKEN)).toBe(false);
+    closeTurn(db);
+    say(db, POLICY, OWNER, "@shuvi_test_bot use modal");
+    before = fake.execs.length;
+    const b = await groupTurn(db, POLICY, [{ tool: "exec", args: { command } }, { tool: "exec", args: { command, background: true, expect_seconds: 5 } }], env);
+    expect(text(b, 0)).toContain("token=[[REDACTED:modal]]");
+    expect(fake.execs.slice(before).filter((e) => e.env.MODAL_TOKEN === SECRET)).toHaveLength(2);
   });
 
   test("an operator's exec runs on the group's computer; their background job records them", async () => {

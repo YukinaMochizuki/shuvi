@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
 import { parseLoopbackListen } from "./listen.ts";
+import { secretSource, type SecretSource } from "./secrets/source.ts";
 
 /**
  * Configuration, all from the environment, read in one place. The server and the runner child read the
@@ -29,6 +30,9 @@ import { parseLoopbackListen } from "./listen.ts";
  *                             last write (default 30 days)
  *   SHUVI_SECRETS_FILE        the secret profiles (default /etc/shuvi.secrets.yaml): every value in it is
  *                             redacted from turn transcripts, and from a chat computer's output
+ *   SHUVI_SECRETS_KEY         the key (32 bytes, base64: `openssl rand -base64 32`) the secret profiles the
+ *                             owner keeps in the console are sealed under (src/secrets/vault.ts). Unset: none
+ *                             can be kept there; those already kept are not given out
  *   SHUVI_CONSOLE_LISTEN      where the console listens, LOOPBACK ONLY (default 127.0.0.1:8787); anything
  *                             else is refused at startup. Publish it with `tailscale serve` (docs/console.md)
  *   SHUVI_CONSOLE_USERS       the tailnet logins let into the console (comma-separated), by the
@@ -64,7 +68,8 @@ export interface Config {
   turnMaxMs: number;
   outboundAlertMs: number;
   transcriptDays: number;
-  secretsFile: string;
+  /** Where secret profiles come from (src/secrets/source.ts): SHUVI_SECRETS_FILE and SHUVI_SECRETS_KEY. */
+  secrets: SecretSource;
   console: { listen: string; users?: string[]; token?: string; url?: string };
   drainMs: number;
   drainGraceMs: number;
@@ -132,7 +137,7 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     turnMaxMs: minutes("SHUVI_TURN_MAX_MINUTES", 15),
     outboundAlertMs: minutes("SHUVI_ALERT_OUTBOUND_MINUTES", 10),
     transcriptDays: days("SHUVI_TRANSCRIPT_DAYS", 30),
-    secretsFile: process.env.SHUVI_SECRETS_FILE || DEFAULT_SECRETS_FILE,
+    secrets: secretSource(process.env, DEFAULT_SECRETS_FILE),
     console: consoleFromEnv(process.env),
     drainMs: seconds("SHUVI_DRAIN_SEC", DEFAULT_DRAIN_SEC),
     drainGraceMs: seconds("SHUVI_DRAIN_GRACE_SEC", DEFAULT_DRAIN_GRACE_SEC),

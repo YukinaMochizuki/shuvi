@@ -6,7 +6,7 @@ import { enabledCapabilities } from "../capabilities/index.ts";
 import { withCapabilitySecrets } from "../capabilities/types.ts";
 import { loadConfig } from "../env.ts";
 import { loadPolicy } from "../policy/load.ts";
-import { LiveRedaction } from "../secrets/redaction.ts";
+import { LiveRedaction } from "../secrets/source.ts";
 import { raiseAlert } from "../store/control.ts";
 import { openDb } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
@@ -33,7 +33,7 @@ export async function runChild(turnId: number, signal: AbortSignal): Promise<str
   // held), whether or not the computer capability is on, and rebuilt if the file changes during the turn. An
   // unusable file still redacts every value known before; with none known, the transcript's texts are
   // withheld. Either way the owner is told once (per version of the file) and the transcript says so.
-  const redaction = new LiveRedaction(cfg.secretsFile);
+  const redaction = new LiveRedaction(db, cfg.secrets);
   const secretsProblem = redaction.problem();
   const notes: string[] = [];
   if (secretsProblem) {
@@ -41,7 +41,7 @@ export async function runChild(turnId: number, signal: AbortSignal): Promise<str
     notes.push(`The secrets file could not be read (${secretsProblem}); this transcript is redacted with the values known before, or withheld.`);
     try {
       raiseAlert(db, {
-        key: `secrets-unusable:${cfg.secretsFile}:${secretsProblem}`,
+        key: `secrets-unusable:${cfg.secrets.file}:${secretsProblem}`,
         topic: "secrets-unusable",
         text: `The secrets file cannot be used: ${secretsProblem}. Turn transcripts and computer output are redacted with the values known before, or withheld.`,
       });
@@ -81,7 +81,7 @@ export async function runChild(turnId: number, signal: AbortSignal): Promise<str
     ...(bot ? { bot } : {}),
     // Claude: its system prompt is live on every turn, so an edit to home/ is heard from the next turn
     // (Claude Code otherwise replays the prompt it recorded). agent/backend.ts.
-    makeAdapter: (boundary, note) => makeDriver({ db, chatId: chat!.id, model: model!, boundary, note, secretsFile: cfg.secretsFile }),
+    makeAdapter: (boundary, note) => makeDriver({ db, chatId: chat!.id, model: model!, boundary, note, secrets: cfg.secrets }),
     signal,
     record: { dataDir: cfg.dataDir, redact, notes },
   });
