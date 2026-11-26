@@ -500,6 +500,15 @@ describe("a page's dialogs", () => {
     expect(BROWSER_SECTION).toContain("Once the page shows the final total, call `browser_request_purchase`");
     expect(BROWSER_SECTION).not.toContain("Card numbers and payment codes: never");
   });
+
+  test("the prompt: ask whether or not the browser refuses, spend the approval on the order's press, keep a playbook per shop without values", () => {
+    expect(BROWSER_SECTION).toContain("Ask before placing any order or payment whether or not the browser refuses the button");
+    expect(BROWSER_SECTION).toContain("Spend an approval only on the press that places the order");
+    expect(BROWSER_SECTION).toContain("the address, the recipient and the phone come from the owner's personal info (`info_read`)");
+    expect(BROWSER_SECTION).toContain("Keep a playbook per shop, `shop-<site>`");
+    expect(BROWSER_SECTION).toContain("Never a value: no address, phone or card number (playbooks are read in groups too)");
+    expect(BROWSER_SECTION).toContain("asking before the order is the rule whatever a playbook says");
+  });
 });
 
 // ---- purchases ---------------------------------------------------------------------------------------------
