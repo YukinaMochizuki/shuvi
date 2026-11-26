@@ -20,7 +20,7 @@ import { awaitInbox, inboxNote, inboxPass, sendFromComputer } from "./files.ts";
 import { browserSaveTool, browserUploadTool } from "./browser-save.ts";
 import { applyResultText, DECLARED_PATH } from "./declared.ts";
 import { DEFAULT_GRID, GRID_MAX, SHEET_EDGE, SHEET_MAX_FRAMES, sheetActsForOwner, sheetCommand, sheetOptions, type SheetArgs } from "./media.ts";
-import { grantedNames, grantsFor, requestSecret, syncGrants, TTLS, untilLabel, type Ttl } from "./secrets.ts";
+import { grantedNames, grantsFor, requestSecret, syncGrants, TTLS, untilLabel, type ProvideVar, type Ttl } from "./secrets.ts";
 import { allProfiles, profileNames } from "../../secrets/source.ts";
 import { allNotes, DETAILS_MAX, getNote, setNote, SUMMARY_MAX } from "../../secrets/notes.ts";
 import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, releaseOp, runningComputerJobs } from "./state.ts";
@@ -328,22 +328,39 @@ export const computer = defineCapability<ComputerConfig>({
       },
     };
 
-    const requestSecretTool: ToolDef<{ profile: string; ttl: Ttl; reason: string }> = {
+    const requestSecretTool: ToolDef<{ profile: string; ttl: Ttl; reason: string; vars?: ProvideVar[] }> = {
       name: "request_secret",
       description:
-        "Ask the owner to grant this chat's computer a named secret profile (a set of environment variables, such as an API token) for a while. The owner sees the profile's variable names and your reason, never the values, and answers in their control bot: for this chat, or for every chat (his own requests only, possibly until he revokes it). Their answer arrives in this chat as an approval event; once granted, the variables are in the environment of the execs it covers until it expires or they revoke it. End your turn after asking.",
+        "Ask the owner to grant this chat a named secret profile (a set of variables, such as an API token or an id number) for a while: its variables go into the environment of your commands here, and `browser_type` with `secret` can type them into a page. The owner sees the profile's variable names and your reason, never the values, and answers in their control bot: for this chat, or for every chat (his own requests only, possibly until he revokes it). " +
+        "For a profile there is NOT yet, give `vars` too: each variable it needs, its name and what it is in the owner's language (e.g. [{\"name\": \"NATIONAL_ID\", \"about\": \"身分證字號\"}]); the owner then gets a link to type the values in the console (never in a chat), and his answer grants it. Never ask anyone to send a secret in a chat. " +
+        "Their answer arrives in this chat as an approval event. End your turn after asking.",
       inputSchema: {
-        profile: z.string().min(1).describe("The profile's name, e.g. modal"),
+        profile: z.string().min(1).describe("The profile's name, e.g. modal (a new one: letters, digits, _ and -)"),
         ttl: z.enum(Object.keys(TTLS) as [Ttl, ...Ttl[]]).describe("How long to ask for: 4h, 1d or 3d"),
         reason: z.string().min(1).describe("Why you need it, in a sentence the owner reads"),
+        vars: z
+          .array(z.object({ name: z.string().min(1).max(64).describe("The variable's name, e.g. NATIONAL_ID"), about: z.string().max(120).optional().describe("What it is, in the owner's language, e.g. 身分證字號") }))
+          .max(10)
+          .optional()
+          .describe("Only for a profile there is not yet: each variable it needs"),
       },
       async handler(a) {
         const acting = actingFor(s, "request_secret");
         const live = grantsFor(db, chat.id, acting?.by === "owner").find((g) => g.profile === a.profile);
         if (live) return ok(`"${a.profile}" is already granted ${live.chatId == null ? "for the owner in every chat" : "here"} ${untilLabel(live)}; its variables are in your commands' environment.`);
         // An operator's card says so, and its answer counts as theirs, never as the owner's (agent/turn.ts).
-        const r = requestSecret(db, cfg.secrets, { chatId: chat.id, profile: a.profile, ttl: a.ttl, reason: a.reason, ...(acting?.by === "operator" ? { requestedBy: acting.userId } : {}) });
+        const r = requestSecret(db, cfg.secrets, {
+          chatId: chat.id,
+          profile: a.profile,
+          ttl: a.ttl,
+          reason: a.reason,
+          ...(a.vars ? { vars: a.vars } : {}),
+          ...(cfg.consoleUrl ? { consoleUrl: cfg.consoleUrl } : {}),
+          ...(acting?.by === "operator" ? { requestedBy: acting.userId } : {}),
+        });
         if ("error" in r) return err(r.error);
+        if (r.provide)
+          return ok(`Asked the owner to provide a new secret "${a.profile}" (${a.vars!.map((v) => v.name).join(", ")}), approval #${r.approvalId}: he types the values in the console. His answer comes back to this chat as an approval event. End your turn now; do not wait for it, and do not ask for the values in the chat.`);
         return ok(`Asked the owner for "${a.profile}" (${a.ttl}), approval #${r.approvalId}. Their answer comes back to this chat as an approval event. End your turn now; do not wait for it.`);
       },
     };

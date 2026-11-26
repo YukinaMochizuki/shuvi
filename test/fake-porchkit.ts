@@ -169,6 +169,10 @@ export interface FakeBrowse {
   targetChangedNext?: boolean;
   /** The next `type` answers porchkit's `not_typed` (the field did not take the text). */
   notTypedNext?: boolean;
+  /** A page that shows what was typed back (a note naming the field's text): what shuvi's redaction must catch. */
+  echoTyped?: boolean;
+  /** A porchkit that takes `mask` but never answers `masked: true` (what shuvi must not trust). */
+  ignoresMask?: boolean;
   /** What a watch's `urls` says (default: the page's URL at every frame). */
   watchUrls?: string[];
   /** A size a screenshot's or a PDF's answer claims instead of its own. */
@@ -491,7 +495,9 @@ export class FakePorchkit {
       situation.hints = PAGE_HINTS[now] ?? [];
       if (now === SLOW) situation.still_loading = true;
       else delete situation.still_loading;
-      return Response.json({ session: id, url: now, title: SHOP_PAGES[now]?.title ?? "", checkout: now === SHOP_CHECKOUT, notes, ...(withSituation ? { situation } : {}), ...fields });
+      // A masked type says so, as porchkit does (unless the test makes it an old porchkit that ignores `mask`).
+      const masked = body.action === "type" && body.mask === true && !b.ignoresMask ? { masked: true } : {};
+      return Response.json({ session: id, url: now, title: SHOP_PAGES[now]?.title ?? "", checkout: now === SHOP_CHECKOUT, notes, ...(withSituation ? { situation } : {}), ...masked, ...fields });
     };
     /** A snapshot answer's own fields: the page text (cut at `browse.cutAt` refs, with `next_offset`), tabs. */
     const snapshot = () => {
@@ -654,6 +660,7 @@ export class FakePorchkit {
             { status: 409 },
           );
         }
+        if (b.echoTyped) notes.push(`the field now says "${String(body.text)}"${body.mask === true ? " (masked)" : ""}`);
         break;
       }
       case "press": {

@@ -3,7 +3,9 @@ import { err, ok, type ToolContent, type ToolDef, type ToolResult } from "agent-
 import { actingFor } from "../../agent/acting.ts";
 import { describe, Porchkit, PorchkitError, porchkitConfig, type BrowseAction, type BrowseAnswer, type BrowseStatus, type BrowseTarget, type PorchkitConfig } from "../../porchkit/client.ts";
 import type { Chat } from "../../store/events.ts";
-import { dataDirFrom } from "../../env.ts";
+import { DEFAULT_SECRETS_FILE, dataDirFrom } from "../../env.ts";
+import { allProfiles, redactionFor, secretSource, type SecretSource } from "../../secrets/source.ts";
+import { grantsFor } from "../computer/secrets.ts";
 import type { ChatPolicy } from "../../policy/policy.ts";
 import { computerConfig } from "../computer/config.ts";
 import { defineCapability, policyEnables, type TurnContext } from "../types.ts";
@@ -58,6 +60,15 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *             carries the approval to accepting that one dialog (purchase.ts CARRY, 2 minutes, same session).
  *   privacy   typed text and page text are never logged; they live only in the turn's transcript. The
  *             porchkit token is the media capability's and is redacted from transcripts here too.
+ *   secrets   `browser_type` with `secret: "<profile>.<VAR>"` instead of `text` types a granted secret's value (a
+ *             national id, a password) that she never sees: it is read here from the grants that cover the call
+ *             (computer/secrets.ts `grantsFor`: this chat's, and the owner's for every chat when the call acts for
+ *             him), and sent with `mask: true`, so porchkit shows that field as dots in every picture and page text
+ *             after (its live view too). Such a call is the owner's (`ownerOnlyWhen`; never delegable: the browser
+ *             is anyone's in a chat that enables it, a secret is not). Every browser tool's text, an error's too,
+ *             is passed through the secrets' redaction before she sees it (`redactingAll`): a page that shows a
+ *             value back shows [REDACTED:<profile>]. Pictures cannot be redacted; porchkit's mask is what keeps
+ *             a typed value out of them.
  *
  *   beyond the page text  browser_pointer, browser_zoom, browser_watch, browser_find, browser_wait_for, browser_hover,
  *             browser_select (pointer.ts); every answer's `situation` and images (look.ts), read first.
@@ -77,12 +88,14 @@ export interface BrowserConfig {
   computer: boolean;
   /** How long browser_upload waits for the server to fetch a file someone sent (SHUVI_BROWSER_ATTACH_WAIT_SEC). */
   attachWaitMs: number;
+  /** Where secret profiles come from: what `browser_type` with `secret` types, and what every answer is redacted by. */
+  secrets: SecretSource;
 }
 
 export function browserConfig(env: Record<string, string | undefined>): BrowserConfig | null {
   const porchkit = porchkitConfig(env);
   const wait = Number(env.SHUVI_BROWSER_ATTACH_WAIT_SEC);
-  return porchkit ? { porchkit, dataDir: dataDirFrom(env), computer: computerConfig(env) !== null, attachWaitMs: (wait > 0 ? wait : 30) * 1000 } : null;
+  return porchkit ? { porchkit, dataDir: dataDirFrom(env), computer: computerConfig(env) !== null, attachWaitMs: (wait > 0 ? wait : 30) * 1000, secrets: secretSource(env, DEFAULT_SECRETS_FILE) } : null;
 }
 
 /** This chat has the computer too (on in the process, enabled by its policy): where browser_save works. */
@@ -105,7 +118,7 @@ This chat has a browser of your own: a real Chrome on the owner's home machine, 
 
 Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). Identical elements side by side are one line with all their refs, \`[e5 e9 e13] button "Like" ×3\`: each ref is its own element, in that order. Identical lines you cannot act on are one line with ×N and no ref. On the same page, an action answers only what changed, and the refs of the page text you already have still hold, also for a part the page drew again with the same content; a ref of an element that is gone, or of an earlier page, is refused. An element whose name changed (a list a filter refilled with other entries) is shown with a new ref, and its old ref is refused: never act on a ref you have not seen with what it names now. When many in one list are renamed at once, one line says so ("in list … [e300]: 70 checkboxes renamed (new refs)"): read them with \`browser_snapshot\` with that ref, or \`browser_find\`. After opening a page, going back, a click, Enter or a choice, the browser waits a moment for the page to load; if it says the page may still be loading, \`browser_wait\` and read what changed. \`browser_snapshot\` reads the whole page again. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
 
-The owner sees every action you take, live, and can take the browser over. Never type a password or payment details (card numbers, codes); if a site asks for them, stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
+The owner sees every action you take, live, and can take the browser over. Never type a password, an id number or payment details yourself as \`text\`: a field that needs a credential or personal data the owner keeps as a secret profile is filled with \`browser_type\` and \`secret: "<profile>.<VAR>"\` (only when he is the one asking; the profile must be granted, see \`request_secret\`), which types its value without you seeing it and shows the field as dots afterwards. Card numbers and payment codes: never; stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
 
 \`browser_send\` sends this chat a screenshot, a download (\`browser_downloads\` lists them) or the page as a PDF. \`browser_upload\` gives the page a file someone sent here or a download: with the file input's ref, or without one and then click the page's own upload button.
 
@@ -141,6 +154,17 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
     case "ref_required":
       return "On this page, typing needs the field it goes into. Nothing was done. Give the field's ref from the page text (browser_type with ref).";
     case "not_typed":
+      // A masked type (a secret) that failed. porchkit's `left` says whether some of the value may still be on the page
+      // UNMASKED (it could neither mask nor clear it); without `left` (an older porchkit), a failure after a key reached
+      // the page is taken as that, to be safe. `masked: true`: what reached the page is masked.
+      if (e.body.masked !== undefined) {
+        const left = e.body.left === true || (e.body.left === undefined && e.body.masked === false && e.body.acted !== false);
+        if (left)
+          return `The secret did not go into the field, and part of it may still be on the page UNMASKED: ${detail} Do not take a screenshot, zoom, watch or send anything of this page. Tell the owner at once, with the live view link from browser_status, so he can clear it himself; do nothing else on the page.`;
+        return e.body.masked === true
+          ? `The secret did not fully go into the field: ${detail} What reached the page is masked. Take a new snapshot (browser_snapshot) before anything else; then click the field and type the secret again with its ref.`
+          : `The secret did not go into the field: ${detail} Nothing of it was left on the page. Click the field first (browser_click with its ref), then type the secret again with its ref; if the field takes keys only by its own script, the owner fills it himself in the live view.`;
+      }
       // `acted: false` (porchkit's): no click and no key reached the page. Otherwise something may have happened there.
       return e.body.acted === false
         ? `The text did not go into the field: ${detail} Nothing was done. Click the field first (browser_click with its ref), then browser_type again with its ref.`
@@ -274,6 +298,9 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
   const porch = browserClient(cfg);
   const session = sessionOf(chat);
 
+  /** Whether porchkit's last answer said it masked what was typed (`browser_type` with `secret` checks it). */
+  let maskedLast = false;
+
   /** The live view's link, best effort (for an owner-only page, or signed out). */
   const liveUrl = async (): Promise<string | null> => {
     try {
@@ -317,6 +344,7 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
       return err(`${describeBrowse(e, e instanceof PorchkitError && e.code === "owner_only" ? await liveUrl() : undefined)}${kept}`);
     }
     if (givesWholePage(body, a)) seenWhole(db, chat.id);
+    maskedLast = a.masked === true;
     // An approved action that opened a confirm / prompt carries its approval on to that one dialog (not a carried one).
     const carries = approvalId !== undefined && !!a.dialog;
     if (carries) grantCarry(db, approvalId!, session);
@@ -361,18 +389,55 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     handler: (a) => act({ action: "click", ref: a.ref, ...(a.double !== undefined ? { double: a.double } : {}), ...(a.button ? { button: a.button } : {}) }, a.approval),
   };
 
-  const type: ToolDef<{ ref?: string; text: string; submit?: boolean } & Approved> = {
+  const type: ToolDef<{ ref?: string; text?: string; secret?: string; submit?: boolean } & Approved> = {
     name: "browser_type",
     description:
-      "Type text, into the element `ref` (clicked first) or the field that has the focus. `submit` presses Enter after. If the text does not land in the field, it is an error and nothing is submitted: click the field, then type with its ref. Never a password or payment details.",
+      "Type text, into the element `ref` (clicked first) or the field that has the focus. `submit` presses Enter after. If the text does not land in the field, it is an error and nothing is submitted: click the field, then type with its ref. " +
+      'Give either `text`, or `secret`: a granted secret\'s variable as "<profile>.<VAR>" (e.g. "vhc.NATIONAL_ID"), whose value is typed without you seeing it; the field then shows as dots in screenshots and page text. Use `secret` for a password, an id number or anything the owner keeps as a secret, only when he is the one asking; never type such a value as `text`. Never payment details.',
     inputSchema: {
       ref: ref.optional(),
-      text: z.string().max(5000).describe("What to type"),
+      text: z.string().max(5000).optional().describe("What to type (not with secret)"),
+      secret: z
+        .string()
+        .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*\.[A-Za-z_][A-Za-z0-9_]*$/, '"<profile>.<VAR>"')
+        .optional()
+        .describe('A granted secret to type instead of text: "<profile>.<VAR>"'),
       submit: z.boolean().optional().describe("Press Enter after typing"),
       approval,
     },
-    handler: (a) => act({ action: "type", text: a.text, ...(a.ref ? { ref: a.ref } : {}), ...(a.submit !== undefined ? { submit: a.submit } : {}) }, a.approval),
+    handler: async (a) => {
+      const where = { ...(a.ref ? { ref: a.ref } : {}), ...(a.submit !== undefined ? { submit: a.submit } : {}) };
+      if ((a.text === undefined) === (a.secret === undefined)) return err("Give either text or secret (one of them). Nothing was typed.");
+      if (a.text !== undefined) return act({ action: "type", text: a.text, ...where }, a.approval);
+      const value = secretValue(a.secret!);
+      if ("error" in value) return err(`${value.error} Nothing was typed.`);
+      const r = await act({ action: "type", text: value.value, mask: true, ...where }, a.approval);
+      // A porchkit that took the act but did not say it masked the field may have typed it in the clear.
+      if (!r.isError && !maskedLast) return err("The secret was typed, but the browser did not confirm the field is masked, so it may be readable on the page. Do not take a screenshot or send anything of this page; tell the owner (porchkit may need updating), with the live view link from browser_status.");
+      return r;
+    },
   };
+
+  /**
+   * The value `<profile>.<VAR>` names, from the grants that cover this call (this chat's; every chat's only when it
+   * acts for the owner, which the boundary has already made sure of: `ownerOnlyWhen`). Errors name the reference,
+   * never a value.
+   */
+  function secretValue(ref: string): { value: string } | { error: string } {
+    const dot = ref.indexOf(".");
+    const profile = ref.slice(0, dot);
+    const name = ref.slice(dot + 1);
+    const forOwner = actingFor(s, "browser_type")?.by === "owner";
+    if (!grantsFor(db, chat.id, forOwner).some((g) => g.profile === profile))
+      return { error: `The secret profile "${profile}" is not granted here. Ask the owner with request_secret (it can also ask him for a profile that does not exist yet), end your turn, and type it once he has granted it.` };
+    const all = allProfiles(db, cfg.secrets);
+    if ("error" in all) return { error: `The secrets cannot be read now: ${all.error}.` };
+    const vars = all.profiles[profile];
+    if (!vars) return { error: `The secret profile "${profile}" cannot be used now${all.unreadable.some((u) => u.name === profile) ? " (its values cannot be opened; tell the owner)" : " (it is gone)"}.` };
+    const value = vars[name];
+    if (value === undefined) return { error: `The secret profile "${profile}" has no variable ${name}; it has ${Object.keys(vars).join(", ") || "none"}.` };
+    return { value };
+  }
 
   const press: ToolDef<{ key: string; hold_ms?: number } & Approved> = {
     name: "browser_press",
@@ -574,13 +639,42 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
   return [open, snapshot, click, type, press, scroll, back, tab, wait, dialog, screenshot, ...look, close, status, purchase, ...files] as ToolDef[];
 }
 
+/**
+ * Every tool's text, its error's too, passed through the secrets' redaction before the model sees it: a page that
+ * shows a secret's value back (an input's value in the page text, a confirmation page) shows [REDACTED:<profile>].
+ * The redaction is read once per call (the console may have changed the profiles meanwhile). Images are passed as
+ * they are: porchkit's mask keeps a typed secret out of them.
+ */
+function redactingAll(ctx: TurnContext, cfg: BrowserConfig, all: ToolDef[]): ToolDef[] {
+  return all.map((t) => ({
+    ...t,
+    handler: async (args: Parameters<typeof t.handler>[0]) => {
+      let r: ToolResult;
+      try {
+        r = await t.handler(args);
+      } catch (e) {
+        // A handler that throws: its message is redacted too, as the turn shows it to the model.
+        throw new Error(redactionFor(ctx.db, cfg.secrets).redact(e instanceof Error ? e.message : String(e)));
+      }
+      const red = redactionFor(ctx.db, cfg.secrets);
+      return { ...r, content: r.content.map((c) => (c.type === "text" ? { ...c, text: red.redact(c.text) } : c)) };
+    },
+  })) as ToolDef[];
+}
+
+/** For tests: `redactingAll` on tools of their own. */
+export const redactingAllForTest = redactingAll;
+
 export const browser = defineCapability<BrowserConfig>({
   id: "browser",
   label: "her own browser",
   gives: "a browser of her own (a real Chrome signed in to her own accounts) she drives step by step: open, read, click, type; the owner watches live, and placing an order needs his approval on a card.",
   enable: browserConfig,
-  tools: (ctx, cfg) => [{ serverName: "shuvi", tools: tools(ctx, cfg) }],
+  tools: (ctx, cfg) => [{ serverName: "shuvi", tools: redactingAll(ctx, cfg, tools(ctx, cfg)) }],
   section: () => BROWSER_SECTION,
+  // Typing a secret acts with the owner's credentials: his call only, never an operator's or anyone else's.
+  ownerOnlyWhen: { browser_type: (args) => typeof args.secret === "string" },
+  ownerOnlyNote: { browser_type: "Typing a secret (secret: ...) fills in the owner's own data, so only he can ask for it. Ask him to do it, or to fill the field himself in the live view." },
   loops: ({ db, files }, cfg) => [{ name: "browser-attachments", everyMs: 500, run: async () => void (await attachmentPass(db, files, cfg.dataDir)) }],
   secrets: (cfg) => ({ porchkit: cfg.porchkit.token }),
 });

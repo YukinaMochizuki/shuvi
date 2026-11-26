@@ -5,7 +5,15 @@ import { getChat, type Speaker } from "../../store/events.ts";
 import { approvals, secretGrants } from "../../store/schema.ts";
 import { chatLabel, IMMEDIATE } from "../../store/turns.ts";
 import type { Redaction } from "../../secrets/redaction.ts";
-import { allProfiles, redactionFor, type SecretSource } from "../../secrets/source.ts";
+import { allProfiles, PROFILE_NAME, putProfile, redactionFor, storedProfiles, VAR_NAME, type SecretSource } from "../../secrets/source.ts";
+import { loadProfiles } from "../../secrets/redaction.ts";
+import { getNote, setNote, SUMMARY_MAX } from "../../secrets/notes.ts";
+
+/** A card's reason, from its body (`Reason: ...`). */
+export function reasonOf(body: string): string {
+  const line = body.split("\n").find((l) => l.startsWith("Reason: "));
+  return line ? line.slice("Reason: ".length) : "";
+}
 
 /**
  * Secrets for the chats' computers, profile A of docs/design.md §15.
@@ -27,6 +35,12 @@ import { allProfiles, redactionFor, type SecretSource } from "../../secrets/sour
  *              buttons: THIS CHAT for 4h / 1d / 3d, EVERY CHAT for 4h / 1d / 3d / until revoked (only on a card the
  *              owner's own turn asked for: an operator's turn never gets an owner grant), or deny. The answer wakes
  *              the chat with an `approval` event.
+ *   PROVIDE    a profile there is not yet, asked for with the variables it needs (`request_secret(profile, vars,
+ *              reason)`), is a PROVIDE card instead (`secret-provide`): the reason, the variable names, and a link to
+ *              the console's Secrets page where the owner types the values (never in Telegram). Its only button is
+ *              Deny; its grant choices are hidden options (control/approvals.ts) the console answers with once it
+ *              has the values (`provideSecret`): the profile is kept (sealed, src/secrets/source.ts) and granted in
+ *              one transaction, and the answer wakes the chat as any card's does.
  *   GRANT      one per approved card (`secret_grants`, keyed on the approval), until its ttl from the answer (or
  *              until revoked). A CHAT grant is that chat's; an OWNER grant (`chat_id` null) is every chat's, for
  *              calls that act for the owner only (agent/acting.ts: never an operator's, in a group that delegates
@@ -49,6 +63,17 @@ export type Ttl = keyof typeof TTLS;
 /** How long an owner grant may last: a ttl, or until it is revoked. */
 export type OwnerTtl = Ttl | "forever";
 export const SECRET_KIND = "secret";
+export const PROVIDE_KIND = "secret-provide";
+/** The most variables a provide card asks for. */
+export const PROVIDE_VARS_MAX = 10;
+/** The most characters of what a provide card says a variable is. */
+export const VAR_ABOUT_MAX = 120;
+
+/** A variable a provide card asks for: its name, and what it is in words the owner reads (e.g. "身分證字號"). */
+export interface ProvideVar {
+  name: string;
+  about?: string;
+}
 export const REVOKE_KIND = "secret-revoke";
 /** How long the owner has to answer a request card. */
 const CARD_TTL_MS = 24 * 3600_000;
@@ -59,11 +84,20 @@ const TTL_WORDS: Record<OwnerTtl, string> = { "4h": "4 hours", "1d": "1 day", "3
 
 /** A card's buttons: this chat for each ttl, then (for the owner's own request) every chat, then deny. */
 function requestOptions(ownerAsks: boolean): ApprovalOption[] {
+  return [...grantOptions(ownerAsks), { id: "deny", label: "Deny" }];
+}
+
+/** The grant choices: this chat for each ttl, then (for the owner's own request) every chat. */
+export function grantOptions(ownerAsks: boolean): ApprovalOption[] {
   return [
     ...(Object.keys(TTLS) as Ttl[]).map((t) => ({ id: t, label: `This chat, ${TTL_WORDS[t]}` })),
     ...(ownerAsks ? (["4h", "1d", "3d", "forever"] as OwnerTtl[]).map((t) => ({ id: `${ALL_PREFIX}${t}`, label: t === "forever" ? "Every chat, until revoked" : `Every chat, ${TTL_WORDS[t]}` })) : []),
-    { id: "deny", label: "Deny" },
   ];
+}
+
+/** Where the console takes the values of provide card `cardId` (with the console's own URL, when it is known). */
+export function provideLink(consoleUrl: string | undefined, cardId: number): string {
+  return `${consoleUrl ? consoleUrl.replace(/\/+$/, "") : ""}/settings/secrets/provide?card=${cardId}`;
 }
 
 /** What a card's answer grants: its scope and ttl, or null (deny, or not a grant). */
@@ -84,15 +118,24 @@ export function untilLabel(g: { expiresAt: string | null }): string {
   return g.expiresAt ? `until ${g.expiresAt.slice(0, 16).replace("T", " ")} UTC` : "until revoked";
 }
 
-/** Ask the owner for `profile` in this chat. Returns the approval id, or why it cannot be asked. */
-export function requestSecret(db: Db, src: SecretSource, a: { chatId: number; profile: string; ttl: Ttl; reason: string; requestedBy?: number }): { approvalId: number } | { error: string } {
+/**
+ * Ask the owner for `profile` in this chat. Returns the approval id (and whether it is a provide card), or why it
+ * cannot be asked. A profile there is not yet, with `vars`, is a provide card (the module header).
+ */
+export function requestSecret(
+  db: Db,
+  src: SecretSource,
+  a: { chatId: number; profile: string; ttl: Ttl; reason: string; requestedBy?: number; vars?: ProvideVar[]; consoleUrl?: string },
+): { approvalId: number; provide?: true } | { error: string } {
   const r = allProfiles(db, src);
   if ("error" in r) return { error: `the secrets file cannot be used: ${r.error}` };
   const vars = r.profiles[a.profile];
   if (!vars) {
     const unreadable = r.unreadable.find((u) => u.name === a.profile);
     if (unreadable) return { error: `the secret profile "${a.profile}" cannot be used now: ${unreadable.why}. Tell the owner.` };
-    return { error: `there is no secret profile "${a.profile}". Known profiles: ${Object.keys(r.profiles).join(", ") || "none"}` };
+    if (!a.vars?.length)
+      return { error: `there is no secret profile "${a.profile}". Known profiles: ${Object.keys(r.profiles).join(", ") || "none"}. To ask the owner for a new one, call request_secret again with \`vars\`: the variable names it needs (e.g. ["NATIONAL_ID"]); he types their values in the console.` };
+    return requestProvide(db, src, { ...a, vars: a.vars });
   }
   const chat = getChat(db, a.chatId);
   const where = chat ? chatLabel(chat) : `chat ${a.chatId}`;
@@ -116,6 +159,103 @@ export function requestSecret(db: Db, src: SecretSource, a: { chatId: number; pr
   return { approvalId };
 }
 
+/** The provide card: refused for a bad name, bad or too many variables, or a name the store keeps without a key. */
+function requestProvide(
+  db: Db,
+  src: SecretSource,
+  a: { chatId: number; profile: string; reason: string; requestedBy?: number; vars: ProvideVar[]; consoleUrl?: string },
+): { approvalId: number; provide: true } | { error: string } {
+  if (!PROFILE_NAME.test(a.profile)) return { error: `"${a.profile.slice(0, 64)}" cannot be a profile's name: letters, digits, _ and -, up to 64.` };
+  const seen = new Set<string>();
+  const asked: ProvideVar[] = [];
+  for (const v of a.vars) {
+    const name = v.name.trim();
+    if (!VAR_NAME.test(name)) return { error: `"${name.slice(0, 40)}" is not a variable name (letters, digits and _, not starting with a digit).` };
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const about = v.about?.replace(/\s+/g, " ").trim().slice(0, VAR_ABOUT_MAX);
+    asked.push({ name, ...(about ? { about } : {}) });
+  }
+  if (asked.length > PROVIDE_VARS_MAX) return { error: `ask for at most ${PROVIDE_VARS_MAX} variables at once.` };
+  const vars = asked.map((v) => v.name);
+  if (!src.key) return { error: `the owner cannot keep a new secret yet (SHUVI_SECRETS_KEY is not set where shuvi runs). Tell him.` };
+  // The card's link is what he taps on his phone: without the console's address it would not lead anywhere.
+  if (!a.consoleUrl) return { error: `the owner cannot be sent a link to type it in (SHUVI_CONSOLE_URL is not set where shuvi runs). Tell him: he can add the profile himself on the console's Secrets page, then grant it.` };
+  const chat = getChat(db, a.chatId);
+  const where = chat ? chatLabel(chat) : `chat ${a.chatId}`;
+  const approvalId = requestApproval(db, {
+    kind: PROVIDE_KIND,
+    title: `She needs a new secret "${a.profile}" for ${where}`,
+    // The link is added once the card has its id (below): the card's text is written when it is queued, so it is
+    // built from a reserved row instead.
+    body: "",
+    options: [...grantOptions(a.requestedBy === undefined).map((o) => ({ ...o, hidden: true })), { id: "deny", label: "Deny" }],
+    ttlMs: CARD_TTL_MS,
+    originChatId: a.chatId,
+    data: { chatId: a.chatId, profile: a.profile, vars, about: Object.fromEntries(asked.filter((v) => v.about).map((v) => [v.name, v.about])) },
+    ...(a.requestedBy !== undefined ? { requestedBy: a.requestedBy } : {}),
+    bodyFor: (id) =>
+      [
+        `Reason: ${a.reason}`,
+        `Variables: ${asked.map((v) => (v.about ? `${v.name} (${v.about})` : v.name)).join(", ")}`,
+        ...(a.requestedBy !== undefined ? [`Asked by: an operator of this group (user id ${a.requestedBy}), not you`] : []),
+        "",
+        `Type the values in the console (never here): ${provideLink(a.consoleUrl, id)}`,
+      ].join("\n"),
+  });
+  return { approvalId, provide: true };
+}
+
+/** A provide card still waiting for its values, or why it is not (gone, answered, expired, not a provide card). */
+export function pendingProvide(
+  db: Db,
+  cardId: number,
+  now = Date.now(),
+): { card: NonNullable<ReturnType<typeof getApproval>>; profile: string; vars: string[]; about: Record<string, string>; chatId: number; requestedBy: number | null } | { error: string } {
+  const card = getApproval(db, cardId);
+  if (!card || card.kind !== PROVIDE_KIND || !card.data) return { error: "There is no such request for a secret." };
+  if (card.status !== "pending" || (card.expiresAt && Date.parse(card.expiresAt) <= now))
+    return { error: card.status === "answered" ? `This request was answered already (${card.answer === "deny" ? "denied" : "provided"}).` : "This request has expired; she can ask again." };
+  return { card, profile: String(card.data.profile), vars: (card.data.vars as string[]) ?? [], about: (card.data.about as Record<string, string>) ?? {}, chatId: Number(card.data.chatId), requestedBy: card.requestedBy ?? null };
+}
+
+/**
+ * Answer provide card `cardId` from the console: keep the profile with `values` (every variable the card asks for,
+ * each non-empty) and grant it as `grant` (one of the card's hidden grant options), in one transaction with the
+ * answer, which wakes the chat. Refused, changing nothing, when the card is not pending, a value is missing, the
+ * name is taken meanwhile, or the profile cannot be kept.
+ */
+export function provideSecret(db: Db, src: SecretSource, cardId: number, values: Record<string, string>, grant: string, from: Speaker, now = Date.now()): { profile: string; label: string } | { error: string } {
+  const p = pendingProvide(db, cardId, now);
+  if ("error" in p) return p;
+  const option = p.card.options.findIndex((o) => o.id === grant && o.hidden);
+  if (option < 0) return { error: "Choose where and how long to grant it." };
+  const vars: Record<string, string> = {};
+  for (const v of p.vars) {
+    // Kept as typed (a password may begin or end with a space); only a field of nothing but spaces is empty.
+    const value = values[v] ?? "";
+    if (!value.trim()) return { error: `Give ${v} a value. Nothing was saved; type the values again.` };
+    vars[v] = value;
+  }
+  const file = loadProfiles(src.file);
+  if (("profiles" in file && p.profile in file.profiles) || storedProfiles(db).some((s) => s.name === p.profile))
+    return { error: `A profile "${p.profile}" exists now (made since she asked). Deny this request, and grant that one on the console's Secrets page instead. Nothing was saved.` };
+  return db.transaction((tx) => {
+    const tdb = tx as unknown as Db;
+    const put = putProfile(tdb, src, p.profile, vars, now);
+    if ("error" in put) return { error: `${put.error} Nothing was saved; type the values again.` };
+    const r = answerApproval(tdb, cardId, option, from, now, { hidden: true });
+    if (r.result !== "answered") throw new Error("the request was answered meanwhile");
+    // What she said each variable is, kept as the profile's note, so she knows them when she uses it later.
+    if (!getNote(tdb, p.profile)) {
+      const lines = p.vars.map((v) => `- ${v}${p.about[v] ? `: ${p.about[v]}` : ""}`);
+      setNote(tdb, src, p.profile, { summary: reasonOf(p.card.body).slice(0, SUMMARY_MAX), details: `Variables:\n${lines.join("\n")}` }, "console (from her request)", now);
+    }
+    syncGrants(tdb, now);
+    return { profile: p.profile, label: r.label ?? grant };
+  }, IMMEDIATE);
+}
+
 /**
  * An owner grant of `profile` made by the owner in the console, for `ttl` from now (or until revoked). Its revoke
  * card follows (`syncGrants`). Whether the profile exists is the caller's to check.
@@ -134,7 +274,7 @@ export function syncGrants(db: Db, now = Date.now()): void {
   const answered = db
     .select()
     .from(approvals)
-    .where(and(eq(approvals.kind, SECRET_KIND), eq(approvals.status, "answered")))
+    .where(and(or(eq(approvals.kind, SECRET_KIND), eq(approvals.kind, PROVIDE_KIND)), eq(approvals.status, "answered")))
     .all();
   for (const a of answered) {
     const what = answerGrant(a.answer);

@@ -662,7 +662,17 @@ their values.
   lending them, as it lends every owner-only tool. The owner can
   revoke any grant on its card in the control bot or from the console, which presses the same card (only
   names are shown there, never a value). Groups have none by default.
-- A granted profile is injected as env into the one `exec` process that runs, never written to `$HOME`.
+- A profile there is not yet is asked for the same way, with the variables it needs and what each one is
+  (`request_secret` with `vars`): the owner's card then has only Deny and a link to the console, where he types
+  the values and picks the grant; values are never typed into a chat, his or hers. The console page is opened
+  from the card on a phone, so it is built for one.
+- A granted profile is injected as env into the one `exec` process that runs, never written to `$HOME`; or
+  typed into her browser's page by `browser_type` with `secret` (the owner's call only), which she never sees:
+  porchkit masks that field in every picture and page text after, and every browser answer's text is redacted.
+  What the mask does not cover: a page that shows the value somewhere else (a confirmation page) shows it in its
+  pictures, and anyone who may use the browser in that chat can take a screenshot of it; pictures are never
+  redacted. A typing that fails having left part of the value unmasked (porchkit's `left`) is told to her as that,
+  and she stops and tells the owner.
 - Known secret values are replaced with `[REDACTED:<profile>]` in any output before the model or the
   chat sees it.
 - Only a turn the owner triggered can use one, or, in a group that delegates its computer, a turn one of

@@ -692,8 +692,8 @@ export const approvals = sqliteTable("approvals", {
   kind: text("kind").notNull(),
   title: text("title").notNull(),
   body: text("body").notNull(),
-  /** The buttons, in order: `[{ id, label }]`. */
-  options: text("options", { mode: "json" }).notNull().$type<{ id: string; label: string }[]>(),
+  /** The buttons, in order; a `hidden` one is an answer only another surface gives (control/approvals.ts). */
+  options: text("options", { mode: "json" }).notNull().$type<{ id: string; label: string; hidden?: boolean }[]>(),
   /** The chat to wake with an `approval` event when it is answered (null: the caller polls). */
   originChatId: integer("origin_chat_id").references(() => chats.id),
   /** Kind-specific data the caller wants back with the answer. */

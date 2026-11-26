@@ -162,6 +162,11 @@ Without script, reload the page to see one finish.
 - **Notes**: a profile's summary (one line, in her prompt beside the name) and details (what she reads with
   `secret_info`: scope, account or org ids, how to use it), with who wrote them last, you or her
   (`update_secret_note`). A note holding a secret value is refused, and not shown back.
+- **A request for a new secret** (`/settings/secrets/provide?card=<id>`, `src/console/provide.ts`): where the link
+  on her provide card leads, built for a phone. What she needs and why, one field per variable under what she
+  says it is, the grant (this chat, or every chat when you asked), Save or Deny. Saved, the profile is kept,
+  granted and the card answered in one go, and she is woken; refused, the form comes back empty, never with what
+  was typed. An answered or expired link only says so.
 
 ## Home: her files
 

@@ -1736,6 +1736,146 @@ details.addp[open] > summary::before {
 .foot {
   margin-top: var(--s6);
 }
+/*
+ * A provide card's page (provide.ts): opened from the control bot, almost always on a phone. One narrow column,
+ * inputs at 16px (iOS zooms into a focused input under 16px), rows and buttons at least 44px tall to tap.
+ */
+.provide {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: var(--s5) var(--s4) var(--s7);
+}
+.provide h1 {
+  font-size: 20px;
+  line-height: 1.3;
+  word-break: break-word;
+}
+.provide .notice {
+  margin: var(--s4) 0 0;
+}
+.pv-where {
+  margin-top: var(--s1);
+  color: var(--ink-dim);
+  font-size: var(--t-ui);
+}
+.pv-reason {
+  margin-top: var(--s3);
+  padding: var(--s3);
+  border-left: 3px solid var(--accent);
+  background: var(--surface-2);
+  border-radius: 0 6px 6px 0;
+  font-size: 15px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.pv-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  margin-top: var(--s5);
+}
+.pv-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  font-size: var(--t-ui);
+  color: var(--ink-dim);
+}
+.pv-about {
+  font-size: 15px;
+  color: var(--ink);
+  font-weight: 500;
+}
+.pv-var {
+  margin-top: -6px;
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+}
+.pv-field input {
+  height: 48px;
+  padding: 0 var(--s3);
+  font-size: 16px;
+  font-family: var(--mono);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.pv-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.pv-grant {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.pv-grant legend {
+  margin-bottom: var(--s2);
+  font-size: var(--t-ui);
+  color: var(--ink-dim);
+}
+.pv-opt {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 48px;
+  padding: var(--s2) var(--s3);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  font-size: 15px;
+}
+.pv-opt:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--surface-3);
+}
+.pv-opt input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+  flex: none;
+}
+.pv-opt span {
+  display: flex;
+  flex-direction: column;
+}
+.pv-opt small {
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+}
+.pv-go,
+.pv-no {
+  width: 100%;
+  height: 48px;
+  justify-content: center;
+  font-size: 16px;
+  border-radius: 8px;
+}
+.pv-hint {
+  font-size: var(--t-small);
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+.pv-deny {
+  margin-top: var(--s3);
+}
+.pv-no {
+  background: transparent;
+  color: var(--refused);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.pv-closed {
+  margin-top: var(--s4);
+  font-size: 15px;
+  line-height: 1.5;
+}
+.pv-foot {
+  margin-top: var(--s5);
+}
 
 /* ---- deleting messages (pages.ts `pickable`, `deleteBar`; console.js) ---------------------------------- */
 /* A deletable bubble. Idle nothing shows; on hover (or focus) a faint "⋯" at its top right; while selecting, a

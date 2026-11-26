@@ -24,7 +24,8 @@ import type { SignalTurn } from "../server/spawn.ts";
 import { CAPABILITIES } from "../capabilities/index.ts";
 import { listingPart, loadSettings, modelPart, settingsPage } from "./settings.ts";
 import { loadSecretsPage, secretsPage } from "./secrets.ts";
-import { isSecretsWrite, secretsWrite, takeSecretsFlash } from "./secrets-write.ts";
+import { isSecretsWrite, provideWrite, secretsWrite, takeSecretsFlash } from "./secrets-write.ts";
+import { loadProvide, providePage } from "./provide.ts";
 import { fileSource, type SecretSource } from "../secrets/source.ts";
 import { DEFAULT_SECRETS_FILE } from "../env.ts";
 import { isSettingsWrite, settingsWrite, takeFlash } from "./settings-write.ts";
@@ -145,6 +146,9 @@ export interface ConsoleDeps {
   /** The live streams' hub (live.ts). Default: the one of `db`. */
   liveHub?: LiveHub;
 }
+
+/** A provide card's page and its write (provide.ts, secrets-write.ts `provideWrite`). */
+const PROVIDE_PATH = "/settings/secrets/provide";
 
 export const LOGIN_HEADER = "tailscale-user-login";
 /** The largest request body, for `LARGE_BODY_WRITES` only: a Home save carries a whole file (a sticker pack's yaml is the largest). */
@@ -330,7 +334,8 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
   const path = url.pathname.replace(/\/+$/, "") || "/";
   // Only a Home save and a delete may be large (`MAX_BODY`, Bun's own limit); anything else keeps the small one.
   if (!LARGE_BODY_WRITES.has(path) && Number(req.headers.get("content-length") ?? 0) > MAX_SMALL_BODY) return respond("too large", 413, "text/plain");
-  const write = isSettingsWrite(path) || isSecretsWrite(path) || HOME_WRITES.has(path) || isDeleteWrite(path) || PROFILE_WRITES.has(path) || CHAT_SETTINGS_WRITE.test(path);
+  // The provide page is read with GET and written with POST at the same address (its link is the card's).
+  const write = isSettingsWrite(path) || isSecretsWrite(path) || (path === PROVIDE_PATH && req.method === "POST") || HOME_WRITES.has(path) || isDeleteWrite(path) || PROFILE_WRITES.has(path) || CHAT_SETTINGS_WRITE.test(path);
   if (write ? req.method !== "POST" : !["GET", "HEAD"].includes(req.method) && !(req.method === "POST" && path === "/login")) {
     return write ? respond("a write: POST only", 405, "text/plain", { allow: "POST" }) : respond("read only", 405, "text/plain", { allow: "GET, HEAD" });
   }
@@ -366,6 +371,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
         return "json" in r ? respond(r.json.body, r.json.status, "application/json; charset=utf-8") : respond(null, 303, "text/plain", { location: r.location });
       }
       if (isSettingsWrite(path)) return respond(null, 303, "text/plain", { location: settingsWrite(deps.db, path, form, ctx.now) });
+      if (path === PROVIDE_PATH) return respond(null, 303, "text/plain", { location: provideWrite(deps.db, secretsOf(deps), form, deps.ownerId !== undefined ? { id: deps.ownerId, name: auth.who ?? "Owner" } : null, ctx.now) });
       if (isSecretsWrite(path)) return respond(null, 303, "text/plain", { location: secretsWrite(deps.db, secretsOf(deps), path, form, deps.ownerId !== undefined ? { id: deps.ownerId, name: auth.who ?? "Owner" } : null, auth.who, ctx.now) });
       if (PROFILE_WRITES.has(path)) return respond(null, 303, "text/plain", { location: profileWrite(deps.db, homeOf(deps), path, form, auth.who, ctx.now!) });
       const chatWrite = CHAT_SETTINGS_WRITE.exec(path);
@@ -401,6 +407,11 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     // Chats and turns are one navigation now (the list groups turns by chat); the old address leads there.
     if (path === "/chats") return respond(null, 302, "text/plain", { location: "/turns" });
     if (path === "/turns") return htmlResponse(turnsPage(ctx, url.searchParams)!);
+    if (path === PROVIDE_PATH) {
+      // A provide card's link (provide.ts): opened from the control bot, on a phone.
+      const sctx = { timeZone: ctx.timeZone, now: ctx.now ?? Date.now(), csrf, ...(ctx.who ? { who: ctx.who } : {}) };
+      return htmlResponse(providePage(sctx, loadProvide(deps.db, secretsOf(deps), Number(url.searchParams.get("card")), takeSecretsFlash(url.searchParams.get("r"), ctx.now), sctx.now)));
+    }
     if (path === "/settings/secrets") {
       const sctx = { timeZone: ctx.timeZone, now: ctx.now ?? Date.now(), csrf, ...(ctx.who ? { who: ctx.who } : {}) };
       return htmlResponse(secretsPage(sctx, loadSecretsPage(deps.db, secretsOf(deps), url.searchParams, takeSecretsFlash(url.searchParams.get("r"), ctx.now), sctx.now)));

@@ -41,6 +41,8 @@ export interface ComputerConfig {
   pollEveryMs: number;
   /** Where secret profiles come from: the host-side file (outside home/ and git, mode 600) and the store's, sealed under its key. */
   secrets: SecretSource;
+  /** The console as the owner opens it (SHUVI_CONSOLE_URL): a provide card's link to type a secret's values. */
+  consoleUrl?: string;
   /** The most each step of applying ~/.computer.yaml (apt, setup) may run (declared.ts). */
   applyStepSec: number;
   /** How long a turn waits for a file someone sent to land in ~/inbox before showing it anyway. */
@@ -90,6 +92,7 @@ export function computerConfig(env: Env): ComputerConfig | null {
     readyMs: positive(env.SHUVI_COMPUTER_READY_SEC, 180) * 1000,
     pollEveryMs: positive(env.SHUVI_COMPUTER_POLL_SEC, 5) * 1000,
     secrets: secretSource(env, DEFAULT_SECRETS_FILE),
+    ...(env.SHUVI_CONSOLE_URL?.trim() ? { consoleUrl: env.SHUVI_CONSOLE_URL.trim() } : {}),
     applyStepSec: positive(env.SHUVI_COMPUTER_APPLY_STEP_SEC, 900),
     inboxWaitMs: positive(env.SHUVI_COMPUTER_INBOX_WAIT_SEC, 30) * 1000,
     mediaOn: porchkitConfig(env) !== null,
