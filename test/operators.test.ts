@@ -23,6 +23,7 @@ import { activeSchedules, createSchedule, fireDue } from "../src/store/schedules
 import { claimTurn, finishTurn } from "../src/store/turns.ts";
 import { classify } from "../src/telegram/inbound.ts";
 import { FakeHangar } from "./fake-hangar.ts";
+import { FakePorchkit } from "./fake-porchkit.ts";
 import { groupUpdate as tgGroupUpdate, lastSeq, memDb, OWNER, ScriptedAdapter, type Step } from "./helpers.ts";
 
 /**
@@ -407,6 +408,38 @@ delegate: [computer]
     chmodSync(secretsFile, 0o600);
     return { fake, env: fake.env({ ...ENV, SHUVI_DATA_DIR: dataDir, SHUVI_SECRETS_FILE: secretsFile, SHUVI_COMPUTER_READY_SEC: "5", SHUVI_COMPUTER_INBOX_WAIT_SEC: "1" }) };
   }
+
+  test("typing a secret in the browser is the owner's: an operator's call is refused at the boundary, even with a chat grant", async () => {
+    const { fake, env } = computerEnv();
+    const porch = new FakePorchkit();
+    const policy = policyOf(yaml(`
+tools:
+  computer: {}
+  browser: {}
+  chat: {}
+operators: members
+delegate: [computer]
+`));
+    try {
+      const db = memDb();
+      say(db, policy, OWNER, "@shuvi_test_bot use modal");
+      // A grant to this group's computer, which its operators' execs do get: still not the browser's secret typing.
+      await groupTurn(db, policy, [{ tool: "request_secret", args: { profile: "modal", ttl: "1d", reason: "x" } }], porch.env(env));
+      closeTurn(db);
+      const card = db.$client.query("select id from approvals where kind = 'secret'").get() as { id: number };
+      answerApproval(db, card.id, 1, { id: OWNER, name: "Owner" });
+      closeTurn(db);
+      say(db, policy, BOB, "@shuvi_test_bot log in");
+      const a = await groupTurn(db, policy, [{ tool: "browser_type", args: { ref: "e2", secret: "modal.MODAL_TOKEN" } }, { tool: "browser_type", args: { ref: "e2", text: "hello" } }], porch.env(env));
+      expect(refused(a, 0)).toBe(true);
+      expect(porch.calls.some((c) => c.body.action === "type" && c.body.mask === true)).toBe(false);
+      // Plain typing stays anyone's (it reached porchkit, whatever the fake page said).
+      expect(refused(a, 1)).toBe(false);
+      void fake;
+    } finally {
+      porch.stop();
+    }
+  });
 
   test("an operator's secret card says who asked; once granted, their command gets it; the answer lends nothing of the owner's", async () => {
     const { fake, env } = computerEnv();

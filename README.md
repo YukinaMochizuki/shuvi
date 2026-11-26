@@ -261,6 +261,17 @@ name, and details she reads with `secret_info` (scope, account or org ids, how t
 it on the Secrets page; she keeps what she learns there with `update_secret_note`. A note holding a secret
 value is refused.
 
+When a profile does not exist yet, she asks for it with the variables it needs and what each one is
+(`request_secret` with `vars`). The control bot's card then links to the console (`SHUVI_CONSOLE_URL` makes the
+link absolute), where the owner types the values on a page made for a phone and picks the grant; values are
+never typed into Telegram. A granted value can also go into her browser: `browser_type` with
+`secret: "<profile>.<VAR>"` (the owner's call only) types it without her seeing it, porchkit masks that field in
+every picture after, and every browser answer's text is redacted. A page that shows the value elsewhere (a
+confirmation) is not masked in pictures, and pictures are never redacted. This needs a porchkit that knows `mask`
+on `type` and answers `masked` (and `left` on a failed one); with an older one, secret typing is refused or reported
+as unconfirmed.
+Requests for a new secret need `SHUVI_CONSOLE_URL`, so the card's link opens on the owner's phone.
+
 ## Deploying
 
 shuvi runs as a container: the `Dockerfile` at the root builds it (Bun on Debian slim, a non-root user,

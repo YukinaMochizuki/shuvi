@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { consoleGrant, revokeGrant, revokeProfileGrants, untilLabel, type OwnerTtl } from "../capabilities/computer/secrets.ts";
+import { consoleGrant, pendingProvide, provideSecret, revokeGrant, revokeProfileGrants, untilLabel, type OwnerTtl } from "../capabilities/computer/secrets.ts";
+import { answerApproval } from "../control/approvals.ts";
 import { allProfiles, deleteProfile, parseVars, putProfile, storedProfiles, type SecretSource } from "../secrets/source.ts";
 import { deleteNote, setNote } from "../secrets/notes.ts";
 import type { Db } from "../store/db.ts";
@@ -154,6 +155,34 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
     default:
       throw new Error(`unknown secrets write "${String(path satisfies never)}"`);
   }
+}
+
+/**
+ * The provide page's write (`POST /settings/secrets/provide`, provide.ts): `card`, `do` = provide (with `v_<NAME>` per
+ * variable and `grant`) or deny. Answers where to go: the same page, which then shows the result (the card is
+ * answered) or, refused, the form again, empty, with why.
+ */
+export function provideWrite(db: Db, src: SecretSource, form: Form, owner: { id: number; name: string } | null, now = Date.now()): string {
+  const card = Number(field(form, "card"));
+  const back = (note: SettingsNote) => `/settings/secrets/provide?card=${card}&r=${putFlash({ note }, now)}`;
+  if (!Number.isInteger(card) || card <= 0) return "/settings/secrets";
+  if (!owner) return back({ tone: "refused", text: "The owner is not configured (SHUVI_OWNER_ID), so nothing can be answered as him." });
+  const p = pendingProvide(db, card, now);
+  if ("error" in p) return back({ tone: "refused", text: p.error });
+  if (field(form, "do") === "deny") {
+    const r = db.transaction((tx) => answerApproval(tx as unknown as Db, card, p.card.options.findIndex((o) => o.id === "deny"), owner, now), IMMEDIATE);
+    return back(r.result === "answered" ? { tone: "ok", text: "Denied. She has been told." } : { tone: "refused", text: "This request was answered meanwhile." });
+  }
+  // Only the variables the card asks for are read: a field of another name is no part of the profile.
+  const values = Object.fromEntries(p.vars.map((v) => [v, rawField(form, `v_${v}`)]));
+  let r: ReturnType<typeof provideSecret>;
+  try {
+    r = provideSecret(db, src, card, values, field(form, "grant"), owner, now);
+  } catch (e) {
+    // Never the form: it holds the values.
+    r = { error: `Nothing was saved: ${e instanceof Error ? e.message : String(e)}.` };
+  }
+  return back("error" in r ? { tone: "refused", text: r.error } : { tone: "ok", text: `Saved ${r.profile} and gave it to her: ${r.label}. She has been told and carries on.` });
 }
 
 /** Run write `path` with `form` (its CSRF token already checked) and answer where to go next, with its flash. */

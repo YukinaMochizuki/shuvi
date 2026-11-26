@@ -167,7 +167,10 @@ describe("schedules", () => {
     pauseSchedule(w.db, weekly.id, w.dm);
     createSchedule(w.db, { chatId: ensureChat(w.db, { id: -100555, kind: "group", title: "Elsewhere" }).id, note: "not this chat", at: new Date(now.getTime() + 30_000), timeZone: TZ }, now);
     const html = section(await page(w, `/chats/${w.dm}/settings/automation`), "schedules");
-    expect(html.indexOf(`id="schedule-${soon.id}"`)).toBeLessThan(html.indexOf(`id="schedule-${later.id}"`));
+    // Soonest first, by the next run each has. Which of the two that is depends on the clock (the cron fires every 20
+    // minutes in working hours, so at 10:59 it is before `now + 60 s`): the order is checked against their own times.
+    const [first, second] = Date.parse(soon.nextAt!) <= Date.parse(later.nextAt!) ? [soon, later] : [later, soon];
+    expect(html.indexOf(`id="schedule-${first.id}"`)).toBeLessThan(html.indexOf(`id="schedule-${second.id}"`));
     expect(html).not.toContain("not this chat");
     expect(html).toContain("Stretch &lt;now&gt;.");
     expect(html).toContain('<span class="mono">*/20 8-18 * * 1-5</span>');

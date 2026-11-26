@@ -303,6 +303,8 @@ export interface BrowseAnswer {
   dialog?: { type: "confirm" | "prompt" | string; message?: string | null; default_prompt?: string | null } | null;
   /** Not in porchkit's contract for an act yet; read when it is there. */
   signed_in?: { google?: boolean | null } | null;
+  /** A `type` with `mask: true`: the field it went into is masked in every picture and page text (porchkit's). */
+  masked?: boolean | null;
   /**
    * What the action did to the page, and hints about the page (porchkit's "situation", on every act answer). Read
    * loosely all the same: a field of another shape is skipped, never an error.

@@ -35,6 +35,11 @@ import { IMMEDIATE } from "../store/turns.ts";
 export interface ApprovalOption {
   id: string;
   label: string;
+  /**
+   * Not a button on the card: an answer only another surface gives (the console's, which has something to
+   * collect first, e.g. a secret's values). It keeps its index, so `answerApproval` takes it as any option.
+   */
+  hidden?: boolean;
 }
 
 export interface ApprovalRequest {
@@ -54,6 +59,8 @@ export interface ApprovalRequest {
   requestedBy?: number;
   /** A picture to send the card with (PNG or JPEG bytes): the card goes as a photo, its text the caption. */
   photo?: Uint8Array;
+  /** The body, when it needs the approval's own id (a link to answer it elsewhere): replaces `body`. */
+  bodyFor?: (id: number) => string;
 }
 
 export type Approval = typeof approvals.$inferSelect;
@@ -70,9 +77,9 @@ function closedText(a: Approval): string {
   return `${cardText(a)}\n\n→ ${a.status === "answered" ? `Answered: ${label}` : "Expired unanswered"}`;
 }
 
-/** The inline keyboard of a pending card: one button per row. */
+/** The inline keyboard of a pending card: one button per row, hidden options left out (their indexes kept). */
 export function cardKeyboard(a: Approval): { text: string; callback_data: string }[][] {
-  return a.options.map((o, i) => [{ text: o.label, callback_data: `${CALLBACK_PREFIX}${a.id}:${i}` }]);
+  return a.options.flatMap((o, i) => (o.hidden ? [] : [[{ text: o.label, callback_data: `${CALLBACK_PREFIX}${a.id}:${i}` }]]));
 }
 
 export function requestApproval(db: Db, req: ApprovalRequest, now = Date.now()): number {
@@ -96,7 +103,8 @@ export function requestApproval(db: Db, req: ApprovalRequest, now = Date.now()):
       })
       .returning()
       .get();
-    queueControl(tx as unknown as Db, { kind: "approval", text: cardText(a), key: `approval:${a.id}`, approvalId: a.id });
+    const card = req.bodyFor ? tx.update(approvals).set({ body: req.bodyFor(a.id) }).where(eq(approvals.id, a.id)).returning().get()! : a;
+    queueControl(tx as unknown as Db, { kind: "approval", text: cardText(card), key: `approval:${a.id}`, approvalId: a.id });
     return a.id;
   }, IMMEDIATE);
 }
@@ -127,12 +135,15 @@ function close(db: Db, a: Approval, from: Speaker): void {
 
 /**
  * Record the owner's button press. Call inside the transaction that records the update. Returns what it
- * did: `answered`, or `closed` when the card was already answered or expired (or the button is unknown).
+ * did: `answered`, or `closed` when the card was already answered or expired (or the button is unknown). A
+ * hidden option is no button: only a caller that says so (`hidden: true`, the console) may answer with it, so a
+ * forged press of one is `closed`.
  */
-export function answerApproval(db: Db, approvalId: number, option: number, from: Speaker, now = Date.now()): { result: "answered" | "closed"; label?: string } {
+export function answerApproval(db: Db, approvalId: number, option: number, from: Speaker, now = Date.now(), opts: { hidden?: boolean } = {}): { result: "answered" | "closed"; label?: string } {
   const a = getApproval(db, approvalId);
   const chosen = a?.options[option];
   if (!a || !chosen || a.status !== "pending") return { result: "closed" };
+  if (chosen.hidden && !opts.hidden) return { result: "closed" };
   if (a.expiresAt && Date.parse(a.expiresAt) <= now) return { result: "closed" }; // the expiry pass closes it
   const updated = db
     .update(approvals)

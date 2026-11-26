@@ -71,6 +71,8 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | secret redaction (transcripts and a chat computer's output) | `src/secrets/redaction.ts` (requests and grants: `src/capabilities/computer/secrets.ts`) |
 | where secret profiles come from (the file, and the console's sealed under SHUVI_SECRETS_KEY), their notes | `src/secrets/source.ts` (`SecretSource`, `allProfiles`, `redactionFor`), `vault.ts`, `notes.ts` |
 | the console's Secrets page: profiles, values typed in and never shown, grants to every chat, notes | `src/console/secrets.ts` (draws), `secrets-write.ts` (the writes) |
+| asking the owner for a secret there is not yet (a provide card, hidden grant options) and the phone page he answers it on | `src/capabilities/computer/secrets.ts` (PROVIDE), `src/control/approvals.ts` (`hidden`), `src/console/provide.ts`, `secrets-write.ts` (`provideWrite`) |
+| typing a secret into her browser (`browser_type` with `secret`, porchkit's `mask`), and the redaction of every browser answer | `src/capabilities/browser/index.ts` (the header's "secrets", `redactingAll`) |
 | the console: who may look (loopback, Host, tailnet login, token), its pages and design | `src/console/server.ts`, `pages.ts`, `DESIGN.md`; docs/console.md |
 | the console as an installable app (PWA): its manifest, icons, and the service worker that answers only a failed page load with an offline page | `src/console/pwa.ts` (the icons: `src/console/pwa/`, `scripts/pwa-icons.ts`); docs/console.md "Installing it" |
 | the console's live pages: the `/live` stream, its one shared poll of the store, the parts it sends and the page's cursor | `src/console/live.ts`; the parts: `pages.ts` (`liveView`); the page's side: `console.js` |
