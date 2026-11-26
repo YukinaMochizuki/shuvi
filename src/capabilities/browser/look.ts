@@ -57,6 +57,15 @@ function hintAdvice(hint: string): string {
   if (h.startsWith("blocked-by: captcha")) return "stop here: send the owner the live view link (browser_status) and ask him to get past it";
   if (h.startsWith("blocked-by")) return "something stands in the way: look (browser_screenshot) before acting";
   if (h.startsWith("native-popup")) return 'a browser popup is open: browser_press("Escape")';
+  if (h.startsWith("password-manager: password menu hidden"))
+    return 'only if the owner himself asked for this: browser_press("ArrowDown") until a hint says the focus is in 1Password, then browser_press("Enter") takes its first entry (the suggested password on a new-password field); you cannot and need not see it';
+  if (h.startsWith("password-manager: locked")) return "1Password is locked: send the owner the live view link (browser_status) and ask him to unlock it";
+  if (h.startsWith("password-manager: sign-in offer"))
+    return "only if the owner himself asked for this, take it (Enter while the focus is in 1Password, or browser_pointer on its sign-in button); otherwise leave it and use the page: it closes once the page is used";
+  if (h.startsWith("password-manager: focus is in 1Password"))
+    return 'keys go to 1Password now: only on the owner\'s own request use them there; otherwise click the page\'s field by its ref to take the focus back, or browser_press("Escape")';
+  if (h.startsWith("password-manager:"))
+    return 'only if the owner himself asked for this, use it (browser_screenshot to see it); otherwise ignore it: type into the page\'s field as text and click the page\'s own buttons by ref (arrow keys, Enter and Tab would go to its menu)';
   if (h.startsWith("page: may still be loading"))
     return "the page was still loading when this was read, so what you see may be the old content: browser_wait (1–2 s) and read what changed before acting on it";
   return "";

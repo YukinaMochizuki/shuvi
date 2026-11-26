@@ -69,6 +69,17 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *             is passed through the secrets' redaction before she sees it (`redactingAll`): a page that shows a
  *             value back shows [REDACTED:<profile>]. Pictures cannot be redacted; porchkit's mask is what keeps
  *             a typed value out of them.
+ *   1Password the desktop's Chrome has 1Password, signed in to an account of her own (never the owner's, and
+ *             never her Google credentials: those stay his). Its prompts on a page (the menu in a field, the
+ *             "sign in as" offer, "save this login / passkey") are not in the page text, only in screenshots, and
+ *             porchkit lets a call use them only with `owner: true`, which `act` sends when the call acts for the
+ *             owner himself (`actingFor`, as a secret is his; decided by the owner, 2026-11-26). Without it they
+ *             are 403 `owner_only` with `what: "password_manager"`, and only Escape gets past them. porchkit's
+ *             `password-manager:` hints say when one is open, when the keyboard is in it, and when 1Password is
+ *             locked (after every Chrome restart; the owner unlocks it in the live view). Its menu on a password
+ *             field prints the password it suggests, so porchkit paints it over in every picture she gets (the
+ *             owner's decision, 2026-11-26): she takes its first entry blind, ArrowDown until the focus is in
+ *             1Password (measured: once if the menu is open, twice if not), then Enter.
  *
  *   beyond the page text  browser_pointer, browser_zoom, browser_watch, browser_find, browser_wait_for, browser_hover,
  *             browser_select (pointer.ts); every answer's `situation` and images (look.ts), read first.
@@ -120,6 +131,8 @@ Each action answers with the page as text: one line per element, \`[e12] role "n
 
 The owner sees every action you take, live, and can take the browser over. Never type a password, an id number or payment details yourself as \`text\`: a field that needs a credential or personal data the owner keeps as a secret profile is filled with \`browser_type\` and \`secret: "<profile>.<VAR>"\` (only when he is the one asking; the profile must be granted, see \`request_secret\`), which types its value without you seeing it and shows the field as dots afterwards. Card numbers and payment codes: never; stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
 
+Your browser has 1Password, with your own logins for other sites (never Google's). Use it only when the owner himself asked for what you are doing; for anyone else, sign-ins are not yours to do, and if 1Password pops up, leave it: type into the page's fields as text and click the page's own buttons by ref (arrow keys, Enter and Tab would go to its menu, and are refused), or \`browser_press("Escape")\`. Its prompts are not in the page text: a \`password-manager:\` hint says one is open, and a screenshot shows it. Its menu takes keys only once the hint says the focus is in 1Password: \`browser_press("ArrowDown")\` until it does (once if the menu is already open, twice if not), then \`browser_press("Enter")\` takes the highlighted entry. To sign in: click the username field, open its menu that way, look (\`browser_screenshot\`), move to your login with ArrowDown and take it with Enter (or \`browser_pointer\` on it); when it offers "sign in" by itself, Enter takes it. A one-time code is filled the same way on the next page. To sign up or change a password: click the password field and take its menu's first entry the same way, without looking: on a password field its menu is hidden from your pictures (it shows the password itself); on a new-password field the first entry is the password it suggests, on a current-password field your saved one. When it asks to save the login (or a passkey), save it with \`browser_pointer\` on its Save button. Never type a password yourself. When the hint says 1Password is locked, send the owner the live view link and ask him to unlock it.
+
 \`browser_send\` sends this chat a screenshot, a download (\`browser_downloads\` lists them) or the page as a PDF. \`browser_upload\` gives the page a file someone sent here or a download: with the file input's ref, or without one and then click the page's own upload button.
 
 Reading the situation: each answer starts with what your action did (the URL changed, a dialog opened, what changed, or that nothing visible changed) and hints about the page. Use refs and the page text first, on a canvas-heavy page too (a map's side panel is still text). Screenshots and \`browser_pointer\` are the exception, for what the text cannot show: an icon-only or unnamed control (\`browser_screenshot\` with marks, then use its ref); something drawn, such as a place on a map or a game (\`browser_screenshot\` with grid, then \`browser_pointer\` at the point, and check the screenshot it returns). When unsure what is at a point, \`browser_pointer\` with dry_run says without pressing. If the page had not settled or nothing changed, \`browser_watch\` or try another way; do not repeat the same action blindly. On a big page, \`browser_find\` before scrolling. Dropdowns: \`browser_select\`. A captcha: stop and send the owner the live view link. A native popup hint: \`browser_press("Escape")\`.`;
@@ -148,7 +161,13 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
     case "dialog_open":
       return "The page is asking something (a confirm or prompt dialog is open), so nothing else can be done on it. Nothing was done. Answer it first with browser_dialog (accept true or false).";
     case "owner_only":
+      if (e.body.what === "password_manager")
+        return e.body.acted === true
+          ? `That reached 1Password (filling, saving or signing in with a login or passkey), which you use only when the owner himself asked for this, so it was stopped there: ${detail} Part of the action did happen (the click on the field, or the text before it). Take a new snapshot before anything else; to type into the field, type the text without submitting, then click the page's own button by its ref.`
+          : `That is 1Password's (filling, saving or signing in with a login or passkey): you use it only when the owner himself asked for this. Nothing was done. Type into the page's field as text and click the page's own buttons by ref; do not pick from 1Password's menu or offer. browser_press("Escape") closes its menu when it can, or ask the owner.`;
       return `That page is the owner's (Google sign-in or account security: password, 2-Step Verification, recovery, deleting the account): you do not act on it. Nothing was done. Send the owner the live view link and ask him to do it himself there.${live}`;
+    case "picture_withheld":
+      return `${e.body.acted === true ? "The action was done, but its picture" : "No picture was taken: it"} would have shown 1Password's menu over a password field (which prints the password itself), and that menu could not be hidden, so the picture was held back.${e.body.acted === true ? " Take a new snapshot to see where the page is." : " Nothing was done."} Close the menu (browser_press("Escape")) or, if the owner himself asked for this, take its first entry blind (ArrowDown until the focus is in 1Password, then Enter); then look again.`;
     case "unavailable":
       return `The browser is not available right now (the desktop is down or not set up): ${detail} Say so, or try again later.`;
     case "ref_required":
@@ -327,13 +346,18 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
       if (why) return err(`Refused: ${why}. Nothing was done. Without a usable approval, call browser_request_purchase and wait for the owner's answer.`);
     }
     if (approvalId !== undefined || carriedId !== undefined) body = { ...body, approved: true };
+    // 1Password's prompts are usable only on the owner's own calls (the module header, "1Password"). Whether a
+    // call acts for the owner does not depend on the tool (agent/turn.ts `callAuthority` asks that first), so one
+    // name asks it for all of them; an operator's call is never the owner's.
+    if (actingFor(s, "browser_click")?.by === "owner") body = { ...body, owner: true };
     // The first page text of a conversation is whole: the model has not read porchkit's last one (fresh.ts).
     const asked = MAY_DELTA.has(String(body.action)) ? { ...body, ...wholeFlag(db, chat.id) } : body;
     let a: BrowseAnswer;
     try {
       a = await porch.browseAct(session, asked);
     } catch (e) {
-      const nothing = e instanceof PorchkitError && DID_NOTHING.has(e.code);
+      // A refusal that came after part of the act reached the page (1Password's, porchkit's `acted`) did something.
+      const nothing = e instanceof PorchkitError && DID_NOTHING.has(e.code) && e.body.acted !== true;
       // porchkit may have given a page text the model never got (not when it refused before the desktop).
       if (!nothing && !(e instanceof PorchkitError && e.code === "approval_required")) unseen(db, chat.id);
       if (nothing && approvalId !== undefined) releasePurchase(db, approvalId);

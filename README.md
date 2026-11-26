@@ -131,7 +131,11 @@ cart never needs it). A page's alert is accepted by porchkit; a confirm or promp
 answers it with `browser_dialog`; an approved action that opens one carries its approval to accepting that
 one dialog (same window, within 2 minutes), so a "Confirm and pay?" after the approved click needs no second card. Google sign-in and account-security pages
 (password, 2-Step Verification, recovery, deleting the account) are his: she sends him the live view link
-instead; the rest of her own Google account (profile, photo, settings) she manages herself. porchkit without a desktop answers every call as unavailable.
+instead; the rest of her own Google account (profile, photo, settings) she manages herself. The desktop's Chrome
+has 1Password, signed in to an account made for her (never the owner's, and never with her Google credentials):
+she signs in and signs up on other sites with it, a password never reaching the model, but only when the owner
+himself asked (each act carries `owner: true` then; porchkit refuses 1Password's prompts otherwise). It locks
+whenever the desktop's Chrome restarts; she asks him to unlock it in the live view. porchkit without a desktop answers every call as unavailable.
 `browser_send` sends the chat a screenshot (as a photo), a download (`browser_downloads` lists them) or the
 page as a PDF, within Telegram's limits for a bot (10 MB a photo, 50 MB a file; `src/capabilities/browser/files.ts`).
 Saving one onto the computer is the computer's own tool, `browser_save` (into `~/inbox/browser/`;

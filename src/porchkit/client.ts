@@ -275,8 +275,12 @@ export interface BrowseUpload {
   bytes: number;
 }
 
-/** One action's body, as the wrapper takes it, plus porchkit's `approved`. */
-export type BrowseAction = { action: string; approved?: boolean } & Record<string, unknown>;
+/**
+ * One action's body, as the wrapper takes it, plus porchkit's `approved` and `owner`. `owner: true` when the call
+ * acts for the owner himself (agent/acting.ts): porchkit then lets it use 1Password's prompts on the page (fill,
+ * save, sign in); without it, they are 403 `owner_only` with `what: "password_manager"`. Sent only when true.
+ */
+export type BrowseAction = { action: string; approved?: boolean; owner?: boolean } & Record<string, unknown>;
 
 export interface BrowseAnswer {
   session?: string;
@@ -401,7 +405,9 @@ export interface BrowseSituation {
   still_loading?: boolean | null;
   /**
    * Verbatim: "page: canvas-heavy", "blocked-by: captcha", "native-popup: press Escape", "page: may still be loading
-   * (wait, then read it again)" (with `still_loading`).
+   * (wait, then read it again)" (with `still_loading`), and 1Password's, each starting "password-manager: " followed
+   * by "menu open", "sign-in offer open", "notice open", "focus is in 1Password", "password menu hidden from
+   * pictures" or "locked" (then a parenthesis).
    */
   hints?: string[] | null;
 }

@@ -32,7 +32,10 @@ import { createHash } from "node:crypto";
  *                       (`browse.dialogs`, settable by a test) every act but `dialog` is 409 dialog_open; the act
  *                       that opened it answers with `dialog` and no snapshot. A ref not on the page is 422 bad_ref;
  *                       `browse.takeover` is 409; Google sign-in and account-security pages (`ownerOnlyUrl`) 403
- *                       owner_only, the rest of the account (`PROFILE`, its "Change photo" button and file input) not;
+ *                       owner_only (`what: "google"`), the rest of the account (`PROFILE`, its "Change photo" button
+ *                       and file input) not; on `SIGN_IN` 1Password's menu is open (its hint, `PM_MENU_HINT`), and
+ *                       without the act's `owner: true` a press but Escape, a type or a pointer act is 403 owner_only
+ *                       (`what: "password_manager"`); an act's `owner` is recorded apart from its body (`owner`);
  *                       `POST /browse/sessions/<s>/uploads` holds a file (`browse.uploads`; > 20 MB 413 too_large,
  *                       an 11th 409 too_many) and the act `upload` sets it on a file input (`ref`, recorded in
  *                       `browse.inputs`) or arms the next file chooser, which a click on "Change photo" opens
@@ -79,12 +82,16 @@ export const POPUP_PAGE = "https://cookies.example.com/";
 export const FORM = "https://forms.example.com/apply";
 /** A page whose acts porchkit answers before it finished loading (its wait gave up at the limit), its open included. */
 export const SLOW = "https://slow.example.com/results";
+/** A sign-in page with 1Password's menu open in its username field: only an act with `owner: true` may use it. */
+export const SIGN_IN = "https://club.example.com/sign-in";
+export const PM_MENU_HINT = "password-manager: menu open (only in a screenshot; Escape closes it)";
 export const LOADING_HINT = "page: may still be loading (wait, then read it again)";
 /** porchkit's hints per page (the fake's own). */
 const PAGE_HINTS: Record<string, string[]> = {
   [CANVAS]: ["page: canvas-heavy"],
   [CAPTCHA]: ["blocked-by: captcha"],
   [POPUP_PAGE]: ["native-popup: press Escape"],
+  [SIGN_IN]: [PM_MENU_HINT],
   [SLOW]: [LOADING_HINT],
 };
 /** A dropdown's options, by `<page> <ref>`. */
@@ -119,6 +126,7 @@ const SHOP_PAGES: Record<string, { title: string; refs: Record<string, [string, 
   [CAPTCHA]: { title: "Just a moment...", refs: { e1: ["checkbox", "I am human", null] } },
   [POPUP_PAGE]: { title: "Cookies", refs: { e1: ["link", "Home", SHOP] } },
   [SLOW]: { title: "Results", refs: { e1: ["button", "Apply filter", null] } },
+  [SIGN_IN]: { title: "Sign in - Example Club", refs: { e1: ["textbox", "Email", null], e2: ["textbox", "Password", null], e3: ["button", "Sign in", null] } },
   [FORM]: { title: "A long form", refs: { e1: ["textbox", "Name", null], e2: ["combobox", "Country", null], e3: ["button", "Next", null], e4: ["link", "Terms", null] } },
 };
 /** Google sign-in and account security (password, 2-Step, passkeys, recovery, deleting the account): the owner's. */
@@ -209,6 +217,8 @@ export interface PorchCall {
   body: Record<string, unknown>;
   authed: boolean;
   range?: string | null;
+  /** An act's `owner` (porchkit's: the call acts for the owner himself), kept apart from `body`; absent when not sent. */
+  owner?: boolean;
 }
 
 const hex = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
@@ -307,12 +317,20 @@ export class FakePorchkit {
         body = {};
       }
     }
-    this.calls.push({ method: req.method, path: u.pathname, body, authed, range: req.headers.get("range") });
+    // An act's `owner` is recorded apart (`PorchCall.owner`), so a body reads as the wrapper's action alone.
+    const hasOwner = "owner" in body;
+    const owner = body.owner;
+    if (hasOwner) {
+      body = { ...body };
+      delete body.owner;
+    }
+    this.calls.push({ method: req.method, path: u.pathname, body, authed, range: req.headers.get("range"), ...(hasOwner ? { owner: owner as boolean } : {}) });
     if (!authed) return Response.json({ error: "unauthorized", detail: "no valid bearer token" }, { status: 401 });
+    if (hasOwner && typeof owner !== "boolean") return Response.json({ error: "bad_request", detail: "owner must be true or false" }, { status: 400 });
     const q = this.queued.get(u.pathname)?.shift();
     if (q) return Response.json(q.body, { status: q.status, ...(q.headers ? { headers: q.headers } : {}) });
     if (u.pathname.startsWith("/browse/")) {
-      const answer = this.browseRoute(req.method, u.pathname, body);
+      const answer = this.browseRoute(req.method, u.pathname, body, owner === true);
       if (!this.dropNext.delete(u.pathname)) return answer;
       const half = (await answer.text()).slice(0, 10);
       return new Response(
@@ -437,7 +455,7 @@ export class FakePorchkit {
 
   // ---- /browse --------------------------------------------------------------------------------------------
 
-  private browseRoute(method: string, path: string, body: Record<string, unknown>): Response {
+  private browseRoute(method: string, path: string, body: Record<string, unknown>, owner = false): Response {
     const fail = (status: number, error: string, detail: string) => Response.json({ error, detail }, { status });
     const b = this.browse;
     if (!b.available) return fail(503, "unavailable", "no desktop is configured");
@@ -481,6 +499,9 @@ export class FakePorchkit {
     const action = String(body.action ?? "");
     const open = b.dialogs.get(id);
     if (open && action !== "dialog") return fail(409, "dialog_open", `a ${open.type} is open; answer it with the dialog action`);
+    // 1Password's menu is open on the sign-in page: a key (but Escape), typing or a press there is the owner's call's only.
+    const pmBlocked = here === SIGN_IN && !owner && ((action === "press" && body.key !== "Escape") || action === "type" || action === "pointer");
+    if (pmBlocked) return Response.json({ error: "owner_only", what: "password_manager", detail: "1Password's menu is open and has the keyboard; nothing was done" }, { status: 403 });
     const notes: string[] = [];
     /** porchkit's situation, on every act answer. */
     const situation: Record<string, unknown> = { url_changed: false, dialog_opened: false, popup_opened: false, hints: [] };
@@ -512,7 +533,7 @@ export class FakePorchkit {
     switch (action) {
       case "open": {
         const url = String(body.url ?? "");
-        if (ownerOnlyUrl(url)) return fail(403, "owner_only", "the owner does this through the live view");
+        if (ownerOnlyUrl(url)) return Response.json({ error: "owner_only", what: "google", detail: "the owner does this through the live view" }, { status: 403 });
         if (url.includes("internal.example")) return fail(403, "egress_refused", "the address is not public");
         h.push(url);
         break;
