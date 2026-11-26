@@ -348,7 +348,12 @@ describe("errors, as the model reads them", () => {
     [
       403,
       "approval_required",
-      "That could place an order or pay (a button that places the order, or on a checkout page any button, Enter, a submit or accepting a dialog), so it needs the owner's approval first. Nothing was done. If it is meant to place the order, call browser_request_purchase with the shop, the items and the total, end your turn, and once he approves, repeat this action with its approval id.",
+      "That places the order or pays (the button that places the order, or accepting a dialog that confirms it), so it needs the owner's approval first. Nothing was done. Fill in everything else first (address, coupon, payment method) so the page shows the final total; then call browser_request_purchase with the shop, the items and that total, end your turn, and once he approves, repeat this action with its approval id.",
+    ],
+    [
+      422,
+      "button_required",
+      "On a checkout, Enter, Space or a submit could send the whole order form by itself, so it is not used here. Nothing was done. Press the page's own button for what you meant (Apply, 套用, Save, Search) with browser_click and its ref; no approval is needed for that.",
     ],
     [409, "dialog_open", "The page is asking something (a confirm or prompt dialog is open), so nothing else can be done on it. Nothing was done. Answer it first with browser_dialog (accept true or false)."],
     [503, "unavailable", "The browser is not available right now (the desktop is down or not set up): no desktop is configured. Say so, or try again later."],
@@ -469,7 +474,31 @@ describe("a page's dialogs", () => {
     await t.browser_open!({ url: SHOP });
     await t.browser_click!({ ref: "e1" });
     expect(text(await t.browser_click!({ ref: "e3" }))).toContain(`URL: ${SHOP_CHECKOUT}`);
-    expect(text(await t.browser_click!({ ref: "e2" }))).toStartWith("That could place an order or pay");
+    expect(text(await t.browser_click!({ ref: "e2" }))).toStartWith("That places the order or pays");
+  });
+
+  test("on a checkout she fills it in herself: other buttons and typing need no approval, Enter is the page's button's, the order's button is the owner's", async () => {
+    const p = porch();
+    const db = memDb();
+    const chat = dm(db);
+    const t = toolsFor(db, p, chat);
+    await toCheckout(t);
+    expect((await t.browser_type!({ ref: "e1", text: "Leave it at the door" })).isError).toBeFalsy();
+    const enter = await t.browser_press!({ key: "Enter" });
+    expect(enter.isError).toBe(true);
+    expect(text(enter)).toStartWith("On a checkout, Enter, Space or a submit could send the whole order form by itself");
+    // "Pay" is not the order's own name: it opens the confirm, and that confirm is the owner's to accept.
+    expect(text(await t.browser_click!({ ref: "e3" }))).toContain('The page asks: "Confirm and pay NT$1,280?"');
+    expect(text(await t.browser_dialog!({ accept: true }))).toStartWith("That places the order or pays");
+    expect((await t.browser_dialog!({ accept: false })).isError).toBeFalsy();
+    expect(text(await t.browser_click!({ ref: "e2" }))).toStartWith("That places the order or pays");
+    expect(controlCards(db)).toHaveLength(0);
+  });
+
+  test("the prompt: payment details only as a secret, and the checkout filled in before the card", () => {
+    expect(BROWSER_SECTION).toContain("Payment details (a card number, its expiry and security code) are typed only that way");
+    expect(BROWSER_SECTION).toContain("Once the page shows the final total, call `browser_request_purchase`");
+    expect(BROWSER_SECTION).not.toContain("Card numbers and payment codes: never");
   });
 });
 
@@ -497,7 +526,7 @@ describe("a purchase", () => {
 
     // Without approval porchkit refuses the order.
     const refused = await t.browser_click!({ ref: "e2" });
-    expect(text(refused)).toStartWith("That could place an order or pay");
+    expect(text(refused)).toStartWith("That places the order or pays");
     expect(acts(p).at(-1)).toEqual({ path: `/browse/sessions/chat-${chat.id}/act`, action: "click", ref: "e2" });
 
     const asked = await t.browser_request_purchase!({ shop: "Example Shop", items: "1 teapot", total: "NT$1,280", note: "for the kitchen" });
@@ -627,7 +656,7 @@ chats:
     expect(acts(p).at(-1)).toMatchObject({ action: "click", ref: "e2", approved: true });
   });
 
-  test("a dialog on a checkout page: cancelling is free, accepting needs an approval, sent with browser_dialog's approval", async () => {
+  test("a dialog on a checkout page: another is shuvi's either way; one that places the order needs an approval to accept, sent with browser_dialog's approval", async () => {
     const p = porch();
     const db = memDb();
     const chat = dm(db);
@@ -636,10 +665,12 @@ chats:
     await toCheckout(t);
     p.browse.dialogs.set(session, { type: "confirm", message: "Remove this item?" });
     expect((await t.browser_dialog!({ accept: false })).isError).toBeFalsy();
+    p.browse.dialogs.set(session, { type: "confirm", message: "Use this address for delivery?" });
+    expect((await t.browser_dialog!({ accept: true })).isError).toBeFalsy();
 
-    p.browse.dialogs.set(session, { type: "confirm", message: "Submit this order?" });
+    p.browse.dialogs.set(session, { type: "confirm", message: "Place this order now?" });
     const refused = await t.browser_dialog!({ accept: true });
-    expect(text(refused)).toStartWith("That could place an order or pay");
+    expect(text(refused)).toStartWith("That places the order or pays");
     expect(p.browse.dialogs.has(session)).toBe(true);
 
     // The screenshot is refused while the dialog is open: the card is asked for without one.
@@ -664,7 +695,7 @@ chats:
     const t = toolsFor(db, p, chat);
     await t.browser_open!({ url: SHOP });
     p.browse.dialogs.set(`chat-${chat.id}`, { type: "confirm", message: "Place this order now? 確認付款" });
-    expect(text(await t.browser_dialog!({ accept: true }))).toStartWith("That could place an order or pay");
+    expect(text(await t.browser_dialog!({ accept: true }))).toStartWith("That places the order or pays");
     expect((await t.browser_dialog!({ accept: false })).isError).toBeFalsy();
   });
 
@@ -701,7 +732,7 @@ chats:
     const { chat, t, id } = await payOpensConfirm(db, p);
     await t.browser_dialog!({ accept: true });
     p.browse.dialogs.set(`chat-${chat.id}`, { type: "confirm", message: "Place this order now?" });
-    expect(text(await t.browser_dialog!({ accept: true }))).toStartWith("That could place an order or pay");
+    expect(text(await t.browser_dialog!({ accept: true }))).toStartWith("That places the order or pays");
     expect(acts(p).at(-1)).toEqual({ path: `/browse/sessions/chat-${chat.id}/act`, action: "dialog", accept: true });
     expect(text(await t.browser_dialog!({ accept: true, approval: id }))).toStartWith(`Refused: approval #${id} was already used`);
   });
@@ -714,7 +745,7 @@ chats:
     expect(until - Date.now()).toBeGreaterThan(110_000);
     expect(until - Date.now()).toBeLessThanOrEqual(120_000);
     db.$client.query("update approvals set data = json_set(data, '$.carry.until', ?) where id = ?").run(Date.now() - 1, id);
-    expect(text(await t.browser_dialog!({ accept: true }))).toStartWith("That could place an order or pay");
+    expect(text(await t.browser_dialog!({ accept: true }))).toStartWith("That places the order or pays");
     expect(acts(p).at(-1)).toEqual({ path: `/browse/sessions/chat-${chat.id}/act`, action: "dialog", accept: true });
   });
 
@@ -726,7 +757,7 @@ chats:
     const theirs = toolsFor(db, p, other);
     await toCheckout(theirs);
     p.browse.dialogs.set(`chat-${other.id}`, { type: "confirm", message: "Confirm and pay NT$1,280?" });
-    expect(text(await theirs.browser_dialog!({ accept: true }))).toStartWith("That could place an order or pay");
+    expect(text(await theirs.browser_dialog!({ accept: true }))).toStartWith("That places the order or pays");
     expect(text(await theirs.browser_dialog!({ accept: true, approval: id }))).toStartWith(`Refused: approval #${id} was asked for in another chat.`);
     expect(p.browse.dialogs.has(`chat-${other.id}`)).toBe(true);
     const mine = await t.browser_dialog!({ accept: true });
@@ -784,7 +815,7 @@ chats:
   });
 
   test("refusals porchkit makes before the desktop give the approval back: each code", async () => {
-    expect([...DID_NOTHING].sort()).toEqual(["bad_ref", "bad_request", "busy", "covered", "dialog_open", "egress_refused", "forbidden", "owner_only", "ref_required", "stale_page", "takeover", "target_changed", "unauthorized"]);
+    expect([...DID_NOTHING].sort()).toEqual(["bad_ref", "bad_request", "busy", "button_required", "covered", "dialog_open", "egress_refused", "forbidden", "owner_only", "ref_required", "stale_page", "takeover", "target_changed", "unauthorized"]);
     const p = porch();
     const db = memDb();
     const { chat, t, id } = await approvedAtCheckout(db, p);

@@ -52,12 +52,19 @@ import { CARRY_MS, claimCarry, claimPurchase, grantCarry, hostOf, PURCHASE_TTL_M
  *   dialogs   an alert is accepted by porchkit (a note says so); a confirm / prompt stays open and comes back as
  *             the answer's `dialog` (rendered as "The page asks: …"), and every other action is refused (409
  *             `dialog_open`) until browser_dialog answers it.
- *   money     porchkit refuses, without `approved: true` (403 `approval_required`): a click on a final-step button
- *             ("place order", 確認付款, 下單 …) anywhere; on a checkout page (`checkout`) any button click, Enter, a
- *             submit and accepting a dialog; accepting a dialog that reads like placing an order. Adding to the cart
- *             never needs it. shuvi sends `approved` only with a usable purchase approval (purchase.ts): one
+ *   money     only the act that places the order waits for the owner (decided by him, 2026-11-26): porchkit refuses,
+ *             without `approved: true` (403 `approval_required`), a click on a final-step button ("place order",
+ *             確認付款, 下單, 購入する …) anywhere and accepting a dialog that reads like placing an order. Everything
+ *             before it is hers: on a checkout she fills in the address, a coupon and the payment method herself,
+ *             reads the final total, and only then asks (browser_request_purchase, with a screenshot). On a
+ *             checkout Enter or a submit is 422 `button_required` (it could send the order's form by itself: she
+ *             presses the page's own button instead), never the owner's. Adding to the cart never needs anything.
+ *             shuvi sends `approved` only with a usable purchase approval (purchase.ts): one
  *             approval, one action, this chat only; except that an approved action which opens a confirm / prompt
  *             carries the approval to accepting that one dialog (purchase.ts CARRY, 2 minutes, same session).
+ *             Payment details (the card the owner keeps for her, as a secret profile) are typed only as `secret`,
+ *             masked, on his own requests, never as `text`: the card's balance is what bounds a final step
+ *             porchkit's names miss.
  *   privacy   typed text and page text are never logged; they live only in the turn's transcript. The
  *             porchkit token is the media capability's and is redacted from transcripts here too.
  *   secrets   `browser_type` with `secret: "<profile>.<VAR>"` instead of `text` types a granted secret's value (a
@@ -129,7 +136,7 @@ This chat has a browser of your own: a real Chrome on the owner's home machine, 
 
 Each action answers with the page as text: one line per element, \`[e12] role "name"\`. Act on an element by its ref (\`browser_click\` with ref "e12"). Identical elements side by side are one line with all their refs, \`[e5 e9 e13] button "Like" ×3\`: each ref is its own element, in that order. Identical lines you cannot act on are one line with ×N and no ref. On the same page, an action answers only what changed, and the refs of the page text you already have still hold, also for a part the page drew again with the same content; a ref of an element that is gone, or of an earlier page, is refused. An element whose name changed (a list a filter refilled with other entries) is shown with a new ref, and its old ref is refused: never act on a ref you have not seen with what it names now. When many in one list are renamed at once, one line says so ("in list … [e300]: 70 checkboxes renamed (new refs)"): read them with \`browser_snapshot\` with that ref, or \`browser_find\`. After opening a page, going back, a click, Enter or a choice, the browser waits a moment for the page to load; if it says the page may still be loading, \`browser_wait\` and read what changed. \`browser_snapshot\` reads the whole page again. \`browser_screenshot\` shows you the page as an image when the text is not enough. When the page asks something ("The page asks: …"), answer it with \`browser_dialog\` before anything else.
 
-The owner sees every action you take, live, and can take the browser over. Never type a password, an id number or payment details yourself as \`text\`: a field that needs a credential or personal data the owner keeps as a secret profile is filled with \`browser_type\` and \`secret: "<profile>.<VAR>"\` (only when he is the one asking; the profile must be granted, see \`request_secret\`), which types its value without you seeing it and shows the field as dots afterwards. Card numbers and payment codes: never; stop and ask the owner. Placing an order or paying needs the owner's approval first: call \`browser_request_purchase\`, end your turn, and act with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
+The owner sees every action you take, live, and can take the browser over. Never type a password, an id number or payment details yourself as \`text\`: a field that needs a credential or personal data the owner keeps as a secret profile is filled with \`browser_type\` and \`secret: "<profile>.<VAR>"\` (only when he is the one asking; the profile must be granted, see \`request_secret\`), which types its value without you seeing it and shows the field as dots afterwards. Payment details (a card number, its expiry and security code) are typed only that way, from the card profile the owner keeps for you, never as \`text\`; when there is none, ask him for one with \`request_secret\`. Buying: fill the checkout in yourself (address, coupon, payment method), pressing the page's own buttons rather than Enter (on a checkout Enter is refused, as it could send the whole order); only the button that places the order needs the owner's approval. Once the page shows the final total, call \`browser_request_purchase\` with the shop, the items and that total, end your turn, and press that button with the \`approval\` id once he approves. Google sign-in and account-security pages (password, 2-Step Verification, recovery, deleting the account) are the owner's: send him the live view link from \`browser_status\` and let him do it there. The rest of your own Google account (profile, photo, settings) you manage yourself.
 
 Your browser has 1Password, with your own logins for other sites (never Google's). Use it only when the owner himself asked for what you are doing; for anyone else, sign-ins are not yours to do, and if 1Password pops up, leave it: type into the page's fields as text and click the page's own buttons by ref (arrow keys, Enter and Tab would go to its menu, and are refused), or \`browser_press("Escape")\`. Its prompts are not in the page text: a \`password-manager:\` hint says one is open, and a screenshot shows it. Its menu takes keys only once the hint says the focus is in 1Password: \`browser_press("ArrowDown")\` until it does (once if the menu is already open, twice if not), then \`browser_press("Enter")\` takes the highlighted entry. To sign in: click the username field, open its menu that way, look (\`browser_screenshot\`), move to your login with ArrowDown and take it with Enter (or \`browser_pointer\` on it); when it offers "sign in" by itself, Enter takes it. A one-time code is filled the same way on the next page. To sign up or change a password: click the password field and take its menu's first entry the same way, without looking: on a password field its menu is hidden from your pictures (it shows the password itself); on a new-password field the first entry is the password it suggests, on a current-password field your saved one. When it asks to save the login (or a passkey), save it with \`browser_pointer\` on its Save button. Never type a password yourself. When the hint says 1Password is locked, send the owner the live view link and ask him to unlock it.
 
@@ -152,8 +159,10 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
       return "The browser is busy: 3 chats are browsing at the moment, and there is no room for another window. Nothing was done; try again in a few minutes, or say so.";
     case "approval_required": {
       const under = targetText(e.body.target as BrowseTarget | undefined);
-      return `That could place an order or pay (a button that places the order, or on a checkout page any button, Enter, a submit or accepting a dialog${under ? `; under the point: ${under}` : ""}), so it needs the owner's approval first. Nothing was done. If it is meant to place the order, call browser_request_purchase with the shop, the items and the total, end your turn, and once he approves, repeat this action with its approval id.`;
+      return `That places the order or pays (the button that places the order, or accepting a dialog that confirms it${under ? `; under the point: ${under}` : ""}), so it needs the owner's approval first. Nothing was done. Fill in everything else first (address, coupon, payment method) so the page shows the final total; then call browser_request_purchase with the shop, the items and that total, end your turn, and once he approves, repeat this action with its approval id.`;
     }
+    case "button_required":
+      return "On a checkout, Enter, Space or a submit could send the whole order form by itself, so it is not used here. Nothing was done. Press the page's own button for what you meant (Apply, 套用, Save, Search) with browser_click and its ref; no approval is needed for that.";
     case "target_changed": {
       const now = targetText(e.body.target as BrowseTarget | undefined);
       return `Something else is at that point now${now ? ` (${now})` : ""}: the page moved since you looked. Nothing was done. Look again (browser_screenshot) and aim from the new screenshot.`;
@@ -225,7 +234,7 @@ export function describeBrowse(e: unknown, liveUrl?: string | null): string {
  * given back. Nothing else is: `unavailable`, `unreachable`, a timeout or a crash can come after the wrapper acted
  * (a dropped connection while the answer was read), and giving the approval back then could place two orders.
  */
-export const DID_NOTHING: ReadonlySet<string> = new Set(["takeover", "busy", "bad_ref", "ref_required", "stale_page", "target_changed", "covered", "dialog_open", "owner_only", "egress_refused", "forbidden", "bad_request", "unauthorized"]);
+export const DID_NOTHING: ReadonlySet<string> = new Set(["takeover", "busy", "bad_ref", "ref_required", "button_required", "stale_page", "target_changed", "covered", "dialog_open", "owner_only", "egress_refused", "forbidden", "bad_request", "unauthorized"]);
 
 /** What follows the error when an approved action failed in a way that may have come after the click. */
 export const spentNote = (id: number) =>
@@ -235,7 +244,7 @@ export const SIGNED_OUT =
   "You are signed out of Google in the browser. Send the owner the live view link and ask him to sign you in there (you never type passwords).";
 
 export const CHECKOUT_NOTE =
-  "This page is a checkout: any button here, Enter, a submit or accepting a dialog is refused until the owner approves. Before placing the order, call browser_request_purchase with the shop, the items and the total.";
+  "This page is a checkout. Fill it in yourself (address, coupon, payment method), pressing the page's own buttons rather than Enter; only the button that places the order needs the owner's approval. Once the page shows the final total, call browser_request_purchase with the shop, the items and that total.";
 
 /** The line for a confirm / prompt the page has open. */
 export function dialogLine(d: NonNullable<BrowseAnswer["dialog"]>): string {
@@ -417,7 +426,7 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
     name: "browser_type",
     description:
       "Type text, into the element `ref` (clicked first) or the field that has the focus. `submit` presses Enter after. If the text does not land in the field, it is an error and nothing is submitted: click the field, then type with its ref. " +
-      'Give either `text`, or `secret`: a granted secret\'s variable as "<profile>.<VAR>" (e.g. "vhc.NATIONAL_ID"), whose value is typed without you seeing it; the field then shows as dots in screenshots and page text. Use `secret` for a password, an id number or anything the owner keeps as a secret, only when he is the one asking; never type such a value as `text`. Never payment details.',
+      'Give either `text`, or `secret`: a granted secret\'s variable as "<profile>.<VAR>" (e.g. "vhc.NATIONAL_ID"), whose value is typed without you seeing it; the field then shows as dots in screenshots and page text. Use `secret` for a password, an id number, payment details (a card number, its expiry and code) or anything the owner keeps as a secret, only when he is the one asking; never type such a value as `text`.',
     inputSchema: {
       ref: ref.optional(),
       text: z.string().max(5000).optional().describe("What to type (not with secret)"),
@@ -595,11 +604,11 @@ function tools(ctx: TurnContext, cfg: BrowserConfig): ToolDef[] {
   const purchase: ToolDef<{ shop: string; items: string; total: string; note?: string }> = {
     name: "browser_request_purchase",
     description:
-      "Ask the owner to approve placing an order (or any payment) on the page open now. He gets a card with what you give here and answers it himself; end your turn after this. His answer wakes this chat; if he approves, do the one action that places the order with `approval` set to the id.",
+      "Ask the owner to approve placing an order (or any payment) on the page open now. Fill the checkout in first (address, coupon, payment method), so the page and its screenshot show the final total; only the button that places the order is left. He gets a card with what you give here and a screenshot, and answers it himself; end your turn after this. His answer wakes this chat; if he approves, do the one action that places the order with `approval` set to the id.",
     inputSchema: {
       shop: z.string().min(1).max(200).describe("The shop or site"),
       items: z.string().min(1).max(1000).describe("What is bought, with quantities"),
-      total: z.string().min(1).max(100).describe('The total as the page shows it, with currency, e.g. "NT$1,280"'),
+      total: z.string().min(1).max(100).describe('The final total as the page shows it (coupons and shipping included), with currency, e.g. "NT$1,280"'),
       note: z.string().max(500).optional().describe("Anything he should know: delivery, who asked, why"),
     },
     async handler(a) {

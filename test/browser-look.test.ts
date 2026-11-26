@@ -128,7 +128,7 @@ describe("browser_pointer", () => {
     expect(w.p.browse.sessions.values().next().value!.at(-1)).toBe(SHOP_CHECKOUT);
     await w.t.browser_screenshot!();
     const refused = await w.t.browser_pointer!({ action: "click", x: 640, y: 600 });
-    expect(text(refused)).toStartWith('That could place an order or pay (a button that places the order, or on a checkout page any button, Enter, a submit or accepting a dialog; under the point: button "Pay" [e3])');
+    expect(text(refused)).toStartWith('That places the order or pays (the button that places the order, or accepting a dialog that confirms it; under the point: button "Place order" [e2])');
     const asked = await w.t.browser_request_purchase!({ shop: "Example Shop", items: "1 teapot", total: "NT$1,280" });
     const id = Number(text(asked).match(/approval #(\d+)/)![1]);
     answerApproval(w.db, id, 0, { id: OWNER, name: "Owner" });
