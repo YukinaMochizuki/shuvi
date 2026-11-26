@@ -430,7 +430,10 @@ Where a forward came from and the text being replied to are recorded as event fi
   Enter, a submit or accepting a dialog; accepting a dialog that reads like ordering) unless shuvi says it is approved, and shuvi
   says so only for one action carrying an approval card the owner answered (one card, one action, that
   chat only). Google sign-in and account-security pages are the owner's own; the rest of her Google account is
-  hers. She can give a page a file sent in the chat or downloaded by the browser; a file from her computer only as
+  hers. The browser has 1Password, signed in to an account of hers (never his, and never holding her Google
+  credentials): its prompts (fill, sign in, save a login or a passkey) are usable only on a call that acts for
+  the owner himself, as a secret is (decided by the owner, 2026-11-26); porchkit refuses them otherwise, and they
+  lock whenever the desktop's Chrome restarts, until he unlocks them in the live view. She can give a page a file sent in the chat or downloaded by the browser; a file from her computer only as
   the computer's tool, under the computer's authority.
 - **Images**: photos and static stickers go to the model as images. Animated (tgs) and video (webm)
   stickers become a thumbnail or one frame, with their emoji and pack. The server downloads them

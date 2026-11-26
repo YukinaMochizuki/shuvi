@@ -18,7 +18,7 @@ import { recordBatch } from "../src/server/poller.ts";
 import type { Db } from "../src/store/db.ts";
 import { allChats, ensureChat, type Chat } from "../src/store/events.ts";
 import { claimTurn } from "../src/store/turns.ts";
-import { DELTA_NOTHING, FakePorchkit, PROFILE, SHOP, SHOP_CHECKOUT, SHOP_DONE, TINY_PNG } from "./fake-porchkit.ts";
+import { DELTA_NOTHING, FakePorchkit, PM_MENU_HINT, PROFILE, SHOP, SHOP_CHECKOUT, SHOP_DONE, SIGN_IN, TINY_PNG } from "./fake-porchkit.ts";
 import { groupUpdate, memDb, OWNER, ScriptedAdapter } from "./helpers.ts";
 
 const BOT: BotIdentity = { id: 1, username: "shuvi_test_bot" };
@@ -50,10 +50,14 @@ const policyOf = (text: string): Policy => {
 
 const text = (r: ToolResult) => textOf(r);
 
-/** The browser's tools for `chat`, called directly (outside a turn: the owner's). */
-function toolsFor(db: Db, p: FakePorchkit, chat: Chat): Record<string, (args?: Record<string, unknown>) => Promise<ToolResult>> {
+/**
+ * The browser's tools for `chat`, called directly: outside a turn (the owner's), or as a turn whose calls act for
+ * an operator, or for nobody (anyone else in a chat that enables the browser: `null`).
+ */
+function toolsFor(db: Db, p: FakePorchkit, chat: Chat, acting?: "operator" | null): Record<string, (args?: Record<string, unknown>) => Promise<ToolResult>> {
   const cfg = browser.enable(p.env()) as BrowserConfig;
   const state = { chat, turnId: 1, passed: false, stopping: false, n: 0, fromSeq: 0, toSeq: 0 } as TurnState;
+  if (acting !== undefined) state.acting = () => (acting === "operator" ? { by: "operator", userId: 4242 } : null);
   const ctx: TurnContext = { db, home: home(), chat, turnId: 1, timeZone: "UTC", owner: {}, state, ownerId: OWNER };
   const defs = browser.tools!(ctx, cfg).flatMap((b) => b.tools as ToolDef[]);
   return Object.fromEntries(defs.map((d) => [d.name, (args: Record<string, unknown> = {}) => d.handler(args)]));
@@ -262,6 +266,78 @@ describe("each tool's request", () => {
     const t = toolsFor(db, p, dm(db));
     p.failNext(`/browse/sessions/chat-${dm(db).id}/act`, 200, { url: SHOP, title: "Example Shop", snapshot: "URL: x", checkout: false, notes: [], signed_in: { google: false } });
     expect(text(await t.browser_open!({ url: SHOP }))).toBe(`URL: x\n${SIGNED_OUT} The live view: https://porchkit.example.ts.net:8444/`);
+  });
+});
+
+describe("1Password", () => {
+  test("the owner's own call sends owner: true, and may use 1Password's menu; its hint says to look", async () => {
+    const p = porch();
+    const db = memDb();
+    const chat = dm(db);
+    const t = toolsFor(db, p, chat);
+    await t.browser_open!({ url: SIGN_IN });
+    await t.browser_click!({ ref: "e1" });
+    const r = await t.browser_press!({ key: "ArrowDown" });
+    expect(r.isError ?? false).toBe(false);
+    expect(text(r)).toContain(PM_MENU_HINT);
+    expect(text(r)).toContain("only if the owner himself asked for this, use it (browser_screenshot to see it)");
+    expect(p.of(`/browse/sessions/chat-${chat.id}/act`).map((c) => c.owner)).toEqual([true, true, true]);
+  });
+
+  for (const acting of ["operator", null] as const) {
+    test(`a call for ${acting ?? "anyone else"} sends no owner, and 1Password refuses it; Escape still closes it`, async () => {
+      const p = porch();
+      const db = memDb();
+      const chat = ensureChat(db, { id: GROUP, kind: "group", title: "Friends" });
+      const t = toolsFor(db, p, chat, acting);
+      await t.browser_open!({ url: SIGN_IN });
+      const r = await t.browser_press!({ key: "Enter" });
+      expect(r.isError).toBe(true);
+      expect(text(r)).toBe(
+        'That is 1Password\'s (filling, saving or signing in with a login or passkey): you use it only when the owner himself asked for this. Nothing was done. Type into the page\'s field as text and click the page\'s own buttons by ref; do not pick from 1Password\'s menu or offer. browser_press("Escape") closes its menu when it can, or ask the owner.',
+      );
+      await t.browser_screenshot!();
+      expect(text(await t.browser_pointer!({ kind: "click", x: 10, y: 10 }))).toStartWith("That is 1Password's");
+      const esc = await t.browser_press!({ key: "Escape" });
+      expect(esc.isError ?? false).toBe(false);
+      expect(p.of(`/browse/sessions/chat-${chat.id}/act`).every((c) => c.owner === undefined)).toBe(true);
+    });
+  }
+
+  test("a 1Password refusal after part of the act was done says so, and marks the page unread; a withheld picture says why", async () => {
+    const p = porch();
+    const db = memDb();
+    const chat = ensureChat(db, { id: GROUP, kind: "group", title: "Friends" });
+    const t = toolsFor(db, p, chat, null);
+    await t.browser_open!({ url: SHOP });
+    const path = `/browse/sessions/chat-${chat.id}/act`;
+    p.failNext(path, 403, { error: "owner_only", what: "password_manager", acted: true, detail: "the text was not sent: 1Password's menu is open" });
+    const r = await t.browser_type!({ ref: "e2", text: "teapot" });
+    expect(text(r)).toStartWith("That reached 1Password");
+    expect(text(r)).toContain("Part of the action did happen");
+    // The page was marked unread: the next act asks for the whole page text.
+    await t.browser_scroll!({ direction: "down" });
+    expect(p.of(path).at(-1)!.body.whole).toBe(true);
+    expect(describeBrowse(new PorchkitError(409, "picture_withheld", "x", { acted: false }))).toStartWith("No picture was taken: it would have shown 1Password's menu over a password field");
+    expect(describeBrowse(new PorchkitError(409, "picture_withheld", "x", { acted: true }))).toContain("The action was done, but its picture");
+    const offer = renderAnswer({ url: SIGN_IN, title: "Sign in", snapshot: "x", situation: { hints: ["password-manager: sign-in offer open (only in a screenshot; it closes when the page is used, or with its ×, which is the owner's)"] } });
+    expect(offer).toContain("otherwise leave it and use the page: it closes once the page is used");
+  });
+
+  test("a Google owner_only still reads as Google's; 1Password locked asks the owner to unlock it", () => {
+    expect(describeBrowse(new PorchkitError(403, "owner_only", "x", { what: "google" }))).toStartWith("That page is the owner's (Google sign-in");
+    const locked = renderAnswer({ url: SIGN_IN, title: "Sign in", snapshot: "x", situation: { hints: ["password-manager: locked (the owner unlocks it in the live view)"] } });
+    expect(locked).toContain("1Password is locked: send the owner the live view link (browser_status) and ask him to unlock it");
+    const hidden = renderAnswer({ url: SIGN_IN, title: "Sign up", snapshot: "x", situation: { hints: ["password-manager: password menu hidden from pictures (its first entry is the suggested password: ArrowDown then Enter)"] } });
+    expect(hidden).toContain('browser_press("ArrowDown") until a hint says the focus is in 1Password, then browser_press("Enter") takes its first entry');
+    expect(BROWSER_SECTION).toContain("on a password field its menu is hidden from your pictures (it shows the password itself); on a new-password field the first entry is the password it suggests");
+    expect(BROWSER_SECTION).toContain('`browser_press("ArrowDown")` until it does (once if the menu is already open, twice if not)');
+  });
+
+  test("the prompt: 1Password is for the owner's own requests, never Google's, never a typed password", () => {
+    expect(BROWSER_SECTION).toContain("Your browser has 1Password, with your own logins for other sites (never Google's). Use it only when the owner himself asked for what you are doing");
+    expect(BROWSER_SECTION).toContain("Never type a password yourself.");
+    expect(BROWSER_SECTION).toContain("When the hint says 1Password is locked, send the owner the live view link and ask him to unlock it.");
   });
 });
 
