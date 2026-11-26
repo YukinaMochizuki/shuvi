@@ -235,12 +235,12 @@ export function pendingProvide(
   db: Db,
   cardId: number,
   now = Date.now(),
-): { card: NonNullable<ReturnType<typeof getApproval>>; profile: string; vars: string[]; about: Record<string, string>; chatId: number; requestedBy: number | null; update: boolean } | { error: string } {
+): { card: NonNullable<ReturnType<typeof getApproval>>; profile: string; vars: string[]; about: Record<string, string>; chatId: number; requestedBy: number | null; update: boolean; info: boolean } | { error: string } {
   const card = getApproval(db, cardId);
-  if (!card || card.kind !== PROVIDE_KIND || !card.data) return { error: "There is no such request for a secret." };
+  if (!card || card.kind !== PROVIDE_KIND || !card.data) return { error: "There is no such request." };
   if (card.status !== "pending" || (card.expiresAt && Date.parse(card.expiresAt) <= now))
     return { error: card.status === "answered" ? `This request was answered already (${card.answer === "deny" ? "denied" : "provided"}).` : "This request has expired; she can ask again." };
-  return { card, profile: String(card.data.profile), vars: (card.data.vars as string[]) ?? [], about: (card.data.about as Record<string, string>) ?? {}, chatId: Number(card.data.chatId), requestedBy: card.requestedBy ?? null, update: card.data.mode === "update" };
+  return { card, profile: String(card.data.profile), vars: (card.data.vars as string[]) ?? [], about: (card.data.about as Record<string, string>) ?? {}, chatId: Number(card.data.chatId), requestedBy: card.requestedBy ?? null, update: card.data.mode === "update", info: card.data.kind === "info" };
 }
 
 /**
@@ -252,6 +252,7 @@ export function pendingProvide(
 export function provideSecret(db: Db, src: SecretSource, cardId: number, values: Record<string, string>, grant: string, from: Speaker, now = Date.now()): { profile: string; label: string } | { error: string } {
   const p = pendingProvide(db, cardId, now);
   if ("error" in p) return p;
+  if (p.info) return { error: "This request is for personal info, not a secret." };
   const option = p.card.options.findIndex((o) => o.id === grant && o.hidden);
   if (option < 0) return { error: "Choose where and how long to grant it." };
   const vars: Record<string, string> = {};

@@ -53,9 +53,14 @@ describe("the owner's DM system prompt is byte-identical to before the capabilit
 
 describe("the registry", () => {
   test("speech is first and always on; web, vision and schedules follow their variables", () => {
-    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks", "stickers", "computer", "groups", "media", "releases", "browser"]);
+    expect(CAPABILITIES.map((c) => c.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "workstream", "memory", "retrieval", "playbooks", "stickers", "computer", "groups", "media", "releases", "browser", "info"]);
     expect(enabledCapabilities({}).map((e) => e.capability.id)).toEqual(["speech", "web", "vision", "jobs", "schedules", "memory", "retrieval", "playbooks", "stickers", "groups", "releases"]);
     expect(enabledCapabilities({ SHUVI_WEB: "off", SHUVI_VISION: "off", SHUVI_SCHEDULES: "off", SHUVI_MEMORY: "off", SHUVI_RETRIEVAL: "off", SHUVI_PLAYBOOKS: "off", SHUVI_RELEASES: "off", SHUVI_STICKERS: "off", SHUVI_GROUPS: "off" }).map((e) => e.capability.id)).toEqual(["speech", "jobs"]);
+  });
+
+  test("personal info is on only with SHUVI_SECRETS_KEY (what it is sealed under)", () => {
+    const ids = (env: Record<string, string>) => enabledCapabilities(env).map((e) => e.capability.id);
+    expect(ids({ SHUVI_SECRETS_KEY: Buffer.alloc(32, 1).toString("base64") })).toContain("info");
   });
 
   test("workstream is on only with its URL and token", () => {

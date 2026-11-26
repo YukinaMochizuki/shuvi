@@ -686,10 +686,36 @@ their values.
 - As built: the file's profiles live in `/etc/shuvi.secrets.yaml` (mode 600); the console's in
   `secret_profiles`, AES-256-GCM under `SHUVI_SECRETS_KEY` with the profile's name as additional data
   (src/secrets/vault.ts), so the database and its backups hold no readable value; a name is one or the
-  other, the file's winning. `request_secret` puts an approval card (§13) naming the variables to the owner;
+  other, the file's winning (a personal-info profile of the same name is another thing). `request_secret` puts an approval card (§13) naming the variables to the owner;
   every grant puts a "Revoke now" card beside it. Every value either holds, and every value either ever held
   (kept beside the file, mode 600), is redacted, also where output is cut at a byte offset; a file holding
   one is not sent; with nothing to redact by, output is withheld. Notes live in `secret_notes`.
+
+**Personal info** is the owner's data she must READ to work with it: a postal address to split into a form's
+fields or translate, a phone, an email, a member number. A secret is wrong for that (she never sees one), and her
+prompt or home/ files are wrong too (they are read in every turn, by every chat's model, and nothing records who
+changed them). So there are two concepts for her, sharing one storage:
+
+- **A profile is one or the other.** A secret is only typed or injected, never seen, and redacted everywhere;
+  personal info is read, and never redacted. Mixed data is two profiles (an address, and the ID number she
+  types).
+- **Read by the owner's own turns, in any chat, with no grant**: `info_read` is owner-only and not delegable,
+  so an operator never gets it; the capability is on in every chat whatever its policy says, and its prompt
+  section lists only names and one-line summaries. She is told not to say a value in a group unless the owner
+  asks there.
+- **Kept by her when the owner tells her** (`info_write`, owner-only, not delegable) or asked for on a card he
+  answers in the console (`request_info`, the provide card of secrets with no grant). Every change records the
+  values from before it, who made it and which fields; the owner sees the history in the console and restores any
+  version. A value holding a secret's is refused, so a secret is never copied into personal info.
+- **Changing kind is the owner's, in the console, confirmed**: a secret made personal info leaves the known file
+  (but for a value another secret still holds, which stays redacted wherever she reads it) and loses every grant;
+  personal info made a secret joins the known file first and loses its history. Either is refused, nothing
+  changed, when the known file cannot be written.
+- As built (src/secrets/info.ts, src/capabilities/info/): a `secret_profiles` row of kind `info`, sealed as a
+  secret's is but with the kind in the additional data, so a row cannot move kinds without being sealed anew; its
+  history in `info_versions` (sealed, the newest 20); its note a `secret_notes` row of kind `info`, whose
+  `- NAME: what it is` lines label its fields. It needs `SHUVI_SECRETS_KEY`: without it the capability is off.
+  In the console its values are masked until the owner shows them.
 
 ## 16. Deployment
 

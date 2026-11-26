@@ -1,5 +1,5 @@
 import { statSync } from "node:fs";
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "../store/db.ts";
 import { secretProfiles } from "../store/schema.ts";
 import { knownFile, loadProfiles, redactionOf, rememberValues, type Profiles, type Redaction } from "./redaction.ts";
@@ -23,7 +23,15 @@ import { open, parseKey, seal } from "./vault.ts";
  * Every value either holds, and every value either ever held, is redacted (`redactionFor`: the known file beside
  * SHUVI_SECRETS_FILE keeps them). A value the console replaces or deletes is added to the known file first, so it
  * stays redacted after it is gone.
+ *
+ * The store's table also holds PERSONAL INFO (`kind = 'info'`, info.ts): data she reads (an address, a phone),
+ * sealed the same way and never redacted. Everything here is about secrets only (`SECRET`): an info profile is
+ * never given out, granted, redacted or remembered in the known file, and a name of one kind does not clash with
+ * the other's.
  */
+
+/** The store's rows that are secrets (not personal info). */
+export const SECRET = eq(secretProfiles.kind, "secret");
 
 export interface SecretSource {
   /** SHUVI_SECRETS_FILE. */
@@ -60,6 +68,7 @@ export function storedProfiles(db: Db): StoredProfile[] {
   return db
     .select({ name: secretProfiles.name, vars: secretProfiles.varNames, updatedAt: secretProfiles.updatedAt })
     .from(secretProfiles)
+    .where(SECRET)
     .orderBy(asc(secretProfiles.name))
     .all();
 }
@@ -82,7 +91,7 @@ export function allProfiles(db: Db, src: SecretSource): AllProfiles | { error: s
   const file = loadProfiles(src.file);
   if ("error" in file) return file;
   const out: AllProfiles = { profiles: { ...file.profiles }, from: Object.fromEntries(Object.keys(file.profiles).map((n) => [n, "file" as const])), unreadable: [], shadowed: [] };
-  const rows = db.select().from(secretProfiles).orderBy(asc(secretProfiles.name)).all();
+  const rows = db.select().from(secretProfiles).where(SECRET).orderBy(asc(secretProfiles.name)).all();
   for (const r of rows) {
     if (r.name in file.profiles) {
       out.shadowed.push(r.name);
@@ -147,7 +156,7 @@ export class LiveRedaction {
         return "-";
       }
     };
-    const s = this.db.select({ n: sql<number>`count(*)`, at: sql<string | null>`max(${secretProfiles.updatedAt})` }).from(secretProfiles).get();
+    const s = this.db.select({ n: sql<number>`count(*)`, at: sql<string | null>`max(${secretProfiles.updatedAt})` }).from(secretProfiles).where(SECRET).get();
     return `${m(this.src.file)}|${m(knownFile(this.src.file))}|${s?.n ?? 0}|${s?.at ?? "-"}`;
   }
 
@@ -173,7 +182,7 @@ export class LiveRedaction {
   }
 }
 
-const KNOWN_UNWRITABLE = "The file of values to keep redacting (beside the secrets file) cannot be written, so a value going out would no longer be redacted. Nothing was changed; make that directory writable by shuvi.";
+export const KNOWN_UNWRITABLE = "The file of values to keep redacting (beside the secrets file) cannot be written, so a value going out would no longer be redacted. Nothing was changed; make that directory writable by shuvi.";
 
 /** A profile name: letters, digits, `_` and `-` (no `.`: a provider's key is named `<profile>.<VAR>`). */
 export const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -220,7 +229,7 @@ export function putProfile(db: Db, src: SecretSource, name: string, vars: Record
   if ("error" in file) return { error: `The secrets file cannot be used (${file.error}), so a new value could not be redacted reliably.` };
   if (name in file.profiles) return { error: `"${name}" is a profile of the secrets file (${src.file}); change it there, or use another name.` };
   for (const k of Object.keys(vars)) if (!VAR_NAME.test(k)) return { error: "A variable's name is not a variable name (letters, digits and _, not starting with a digit)." };
-  const old = db.select().from(secretProfiles).where(eq(secretProfiles.name, name)).get();
+  const old = db.select().from(secretProfiles).where(and(SECRET, eq(secretProfiles.name, name))).get();
   // Before anything changes: the values going out stay redacted, and so do the new ones from now on.
   if (old) {
     let before: Record<string, string>;
@@ -247,7 +256,7 @@ export function putProfile(db: Db, src: SecretSource, name: string, vars: Record
 export function updateProfile(db: Db, src: SecretSource, name: string, change: { set: Record<string, string>; remove?: readonly string[] }, now = Date.now()): { vars: string[] } | { error: string } {
   const problem = keyProblem(src);
   if (problem) return { error: `Secrets cannot be kept here: ${problem}.` };
-  const old = db.select().from(secretProfiles).where(eq(secretProfiles.name, name)).get();
+  const old = db.select().from(secretProfiles).where(and(SECRET, eq(secretProfiles.name, name))).get();
   if (!old) return { error: `There is no profile ${name} kept here.` };
   let vars: Record<string, string>;
   try {
@@ -271,7 +280,7 @@ export function updateProfile(db: Db, src: SecretSource, name: string, change: {
  * added later under the same name starts with none.
  */
 export function deleteProfile(db: Db, src: SecretSource, name: string): { deleted: boolean } | { error: string } {
-  const old = db.select().from(secretProfiles).where(eq(secretProfiles.name, name)).get();
+  const old = db.select().from(secretProfiles).where(and(SECRET, eq(secretProfiles.name, name))).get();
   if (!old) return { deleted: false };
   if (src.key) {
     let vars: Record<string, string> | null = null;

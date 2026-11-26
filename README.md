@@ -61,7 +61,7 @@ bun scripts/e2e-openai-compat.ts  # the same on an OpenAI-compatible model, agai
 bun scripts/e2e-switch.ts    # one chat switched between Claude and an endpoint, lossless, lossy and clean, checked on the wire
 bun scripts/e2e-control.ts   # the control bot: /status, alerts, the wall-clock limit, an approval round trip
 bun scripts/e2e-jobs.ts      # schedules, callback and expired jobs, inbound POSTs, the workstream desk
-bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec, an owner grant
+bun scripts/e2e-computer.ts  # each chat's computer on a fake Hangar: exec, a background job, a secret-gated exec, an owner grant, personal info
 bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only refusal, an unknown group added
 bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed read, a probe, sheets of a link, a fetch into ~/inbox
 bun scripts/e2e-read.ts      # reading links on the same fakes (read_link, save_link, the prewarm), and her browser: open a page, click
@@ -272,6 +272,17 @@ confirmation) is not masked in pictures, and pictures are never redacted. This n
 on `type` and answers `masked` (and `left` on a failed one); with an older one, secret typing is refused or reported
 as unconfirmed.
 Requests for a new secret need `SHUVI_CONSOLE_URL`, so the card's link opens on the owner's phone.
+
+### Personal info
+
+What she needs to *read* about the owner (an address to split into a form's fields, a phone, an email, a member
+number) is personal info, not a secret: kept beside the secrets (sealed under the same `SHUVI_SECRETS_KEY`; without
+it there is none), never redacted, and read with `info_read` in any chat, only in turns the owner is in (never an
+operator's). When he tells her something of the kind she keeps it with `info_write`; what nobody told her she asks
+for with `request_info`, a card whose link opens the console. Every change is recorded with the values before it;
+the console's Secrets & personal info page shows them (masked until he shows them), their history, and restores a
+version. A profile is one kind or the other; the console turns one into the other, saying what that does to
+redaction and grants.
 
 ## Deploying
 
