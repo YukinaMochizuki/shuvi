@@ -8,8 +8,10 @@ import { IMMEDIATE } from "../../store/turns.ts";
 /**
  * A purchase's approval: the owner's card in the control bot (control/approvals.ts) that lets ONE browser action
  * place ONE order. The owner decided that money never moves without him: porchkit refuses the action that places
- * an order on a checkout page (403 `approval_required`) unless shuvi says `approved: true`, and shuvi says so only
- * for an action that carries a usable approval of this kind.
+ * an order (a final-step button, or accepting the dialog that confirms it: 403 `approval_required`) unless shuvi says
+ * `approved: true`, and shuvi says so only for an action that carries a usable approval of this kind. Everything
+ * before it on a checkout (an address, a coupon, the payment method) is shuvi's own (the owner, 2026-11-26), so the
+ * card she asks with shows the final total.
  *
  *   ASK      `browser_request_purchase` → `requestPurchase`: a card of kind `purchase`, buttons approve / decline,
  *            `originChatId` the chat (the answer, or the expiry, wakes it), a ttl (`PURCHASE_TTL_MS`), `data`

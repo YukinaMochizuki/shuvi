@@ -15,8 +15,8 @@ import { lastShotWidth } from "./look.ts";
  * `image_width` so porchkit can scale them to the window). Without one yet, browser_pointer asks for a
  * screenshot first rather than guessing.
  *
- * MONEY: porchkit refuses a pressing pointer kind (click, double, right, press_hold, drag) on a checkout or
- * final-step target (403 `approval_required`, with the `target`) unless approved, as for a click: browser_pointer
+ * MONEY: porchkit refuses a pressing pointer kind (click, double, right, press_hold, drag) on a final-step
+ * target (403 `approval_required`, with the `target`) unless approved, as for a click: browser_pointer
  * takes `approval` and goes through the same purchase flow (purchase.ts), carried right for a dialog included.
  * `dry_run` presses nothing and says what is at the point: for an unclear canvas target, before pressing.
  * A 409 `target_changed` (the point holds something else now) did nothing, and gives an approval back.

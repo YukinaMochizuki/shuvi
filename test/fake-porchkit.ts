@@ -24,11 +24,13 @@ import { createHash } from "node:crypto";
  *                       `browse.maxSessions`, then 503 busy); a made-up shop (`SHOP`): its home page links to an
  *                       item and has buttons that raise an alert (accepted, a note), a confirm and a prompt; the
  *                       item's page has "Add to cart" and "立即購買" (never guarded) leading to a checkout page
- *                       (`checkout: true`). The guard, as porchkit's: without `approved: true`, 403
- *                       approval_required for a click on a final-step button (`FINAL_STEP`) anywhere, and on the
- *                       checkout page for any button click, Enter, type with submit, or accepting a dialog; and for
- *                       accepting a dialog whose message reads like `FINAL_STEP` anywhere. The checkout's "Pay"
- *                       opens a confirm "Confirm and pay NT$1,280?". While a confirm / prompt is open
+ *                       (`checkout: true`). The guard, as porchkit's (the owner, 2026-11-26: only the act that
+ *                       places the order): without `approved: true`, 403 approval_required for a click (or a
+ *                       pointer press, or a type with its ref) on a final-step button (`FINAL_STEP`) anywhere, and
+ *                       for accepting a dialog whose message reads like `FINAL_STEP`; on the checkout page Enter,
+ *                       Space or a type with submit is 422 button_required (press the page's button instead), and
+ *                       every other button is free. The checkout's "Pay" opens a confirm "Confirm and pay
+ *                       NT$1,280?"; a pointer act there lands on its "Place order". While a confirm / prompt is open
  *                       (`browse.dialogs`, settable by a test) every act but `dialog` is 409 dialog_open; the act
  *                       that opened it answers with `dialog` and no snapshot. A ref not on the page is 422 bad_ref;
  *                       `browse.takeover` is 409; Google sign-in and account-security pages (`ownerOnlyUrl`) 403
@@ -140,7 +142,7 @@ export function ownerOnlyUrl(url: string): boolean {
   }
 }
 /** Final-step words, as porchkit's table (a sample): a click on such a button, or accepting such a dialog, places an order. */
-export const FINAL_STEP = /place (this |the )?order|pay now|confirm and pay|確認付款|送出訂單|下單/i;
+export const FINAL_STEP = /place (this |the )?order|pay now|confirm and pay|確認付款|送出訂單|下單|購入する/i;
 
 export interface FakeBrowse {
   /** Whether a desktop is configured at all (false: every /browse call 503 unavailable). */
@@ -496,6 +498,9 @@ export class FakePorchkit {
     const isCheckout = here === SHOP_CHECKOUT;
     const needs = (cond: boolean, target?: Record<string, unknown>) =>
       cond && body.approved !== true ? Response.json({ error: "approval_required", detail: "that could place an order; it needs approved: true", ...(target ? { target } : {}) }, { status: 403 }) : null;
+    /** porchkit's 422 button_required: on a checkout, Enter or a submit could send the order's form by itself. */
+    const held = (cond: boolean) =>
+      cond && body.approved !== true ? Response.json({ error: "button_required", detail: "on a checkout, press the page's own button instead of Enter" }, { status: 422 }) : null;
     const action = String(body.action ?? "");
     const open = b.dialogs.get(id);
     if (open && action !== "dialog") return fail(409, "dialog_open", `a ${open.type} is open; answer it with the dialog action`);
@@ -601,7 +606,7 @@ export class FakePorchkit {
         const hit = here === CANVAS && x >= 100 && x <= 200 && y >= 100 && y <= 150;
         // `names`: the hit node's text, then its ancestors' names (always there); a drag's end point in `to`.
         const target: Record<string, unknown> = isCheckout
-          ? { role: "button", name: "Pay", ref: "e3", in_canvas: false, names: ["Pay", "Order summary"] }
+          ? { role: "button", name: "Place order", ref: "e2", in_canvas: false, names: ["Place order", "Order summary"] }
           : { role: here === CANVAS ? "canvas" : "generic", name: "", ref: null, in_canvas: here === CANVAS, names: hit ? ["Start", "Game area"] : [] };
         if (kind === "drag") target.to = { role: "canvas", name: "", ref: null, in_canvas: here === CANVAS, names: ["Goal"] };
         // A dry run has no situation: nothing was done.
@@ -614,7 +619,7 @@ export class FakePorchkit {
         const shot = img(`pointer-${here}`, 1280, 666);
         const common = { tabs: tabsOf(here), kind, target, settled: true, settle_ms: 120, width: 1280, height: 666, scale: 1, screenshot: shot };
         if (isCheckout && pressing) {
-          // A button on a checkout page: the order, as far as porchkit can tell.
+          // The checkout's "Place order": a final step at the point.
           const g = needs(true, target);
           if (g) return g;
           h.push(SHOP_DONE);
@@ -636,7 +641,7 @@ export class FakePorchkit {
       case "click": {
         const r = page?.refs[String(body.ref)];
         if (!r) return fail(422, "bad_ref", "no such ref in the latest snapshot");
-        const g = needs(FINAL_STEP.test(r[1]) || (isCheckout && r[0] === "button"));
+        const g = needs(FINAL_STEP.test(r[1]));
         if (g) return g;
         if (r[3]?.type === "alert") notes.push(`dialog: alert "${r[3].message}" (accepted)`);
         else if (r[3]) {
@@ -671,7 +676,8 @@ export class FakePorchkit {
       }
       case "type": {
         if (body.ref !== undefined && !page?.refs[String(body.ref)]) return fail(422, "bad_ref", "no such ref in the latest snapshot");
-        const g = needs(isCheckout && body.submit === true);
+        const onto = body.ref !== undefined ? page?.refs[String(body.ref)] : undefined;
+        const g = needs(onto !== undefined && FINAL_STEP.test(onto[1])) ?? held(isCheckout && body.submit === true);
         if (g) return g;
         if (b.notTypedNext) {
           // porchkit's `not_typed` (round 6): the field did not take the text, after its click and keys (`acted`).
@@ -685,7 +691,7 @@ export class FakePorchkit {
         break;
       }
       case "press": {
-        const g = needs(isCheckout && body.key === "Enter");
+        const g = held(isCheckout && (body.key === "Enter" || body.key === " " || body.key === "Space"));
         if (g) return g;
         if (body.hold_ms !== undefined) notes.push(`held ${String(body.key)} for ${String(body.hold_ms)} ms`);
         if (body.key === "Escape" && here === POPUP_PAGE) b.popupClosed = true;
@@ -693,7 +699,7 @@ export class FakePorchkit {
       }
       case "dialog": {
         if (!open) return fail(409, "no_dialog", "no dialog is open");
-        const g = needs(body.accept === true && (isCheckout || FINAL_STEP.test(open.message)));
+        const g = needs(body.accept === true && FINAL_STEP.test(open.message));
         if (g) return g;
         b.dialogs.delete(id);
         notes.push(`dialog: ${open.type} "${open.message}" (${body.accept === true ? "accepted" : "dismissed"})`);
