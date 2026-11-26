@@ -70,6 +70,62 @@ export function setNote(db: Db, src: SecretSource, name: string, a: { summary?: 
   return { note: getNote(db, name)! };
 }
 
+/**
+ * What each variable is, as the note's details say it: lines `- NAME: what it is` (how a provide card writes them,
+ * and the console's fields). Other lines are the note's own and are left alone.
+ */
+export function varAbouts(note: Pick<SecretNote, "details"> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of (note?.details ?? "").split("\n")) {
+    const m = /^- ([A-Za-z_][A-Za-z0-9_]*): (.+)$/.exec(line.trim());
+    if (m) out[m[1]!] = m[2]!.trim();
+  }
+  return out;
+}
+
+/**
+ * The note's details with each variable's line set (`abouts`: what it is) or taken out (`removed`), in a
+ * `Variables:` list at the top (made when there is none); every other line kept as it was.
+ */
+export function withVarAbouts(details: string, abouts: Record<string, string>, removed: readonly string[] = []): string {
+  const lines = details ? details.split("\n") : [];
+  const isVar = (l: string) => /^- [A-Za-z_][A-Za-z0-9_]*(: .*)?$/.test(l.trim());
+  const nameOf = (l: string) => /^- ([A-Za-z_][A-Za-z0-9_]*)/.exec(l.trim())?.[1];
+  const kept = lines.filter((l) => !(isVar(l) && removed.includes(nameOf(l)!)));
+  const done = new Set<string>();
+  const out = kept.map((l) => {
+    const n = isVar(l) ? nameOf(l) : undefined;
+    if (n && n in abouts) {
+      done.add(n);
+      return `- ${n}: ${abouts[n]}`;
+    }
+    return l;
+  });
+  const missing = Object.entries(abouts).filter(([n]) => !done.has(n)).map(([n, a]) => `- ${n}: ${a}`);
+  if (!missing.length) return out.join("\n");
+  const header = out.findIndex((l) => l.trim() === "Variables:");
+  if (header < 0) return ["Variables:", ...missing, ...(out.length ? ["", ...out] : [])].join("\n");
+  let at = header + 1;
+  while (at < out.length && isVar(out[at]!)) at++;
+  out.splice(at, 0, ...missing);
+  return out.join("\n");
+}
+
+/**
+ * Keep what each variable is in the profile's note (the console's fields, a provide card's `about`): its lines set
+ * or taken out, nothing else of the note changed. Not when there is nothing to change. A refusal (a value in it) is
+ * the caller's to show.
+ */
+export function noteVarAbouts(db: Db, src: SecretSource, name: string, abouts: Record<string, string>, removed: readonly string[], by: string, now = Date.now()): { error: string } | null {
+  const clean = Object.fromEntries(Object.entries(abouts).map(([k, v]) => [k, v.replace(/\s+/g, " ").trim()]).filter(([, v]) => v));
+  if (!Object.keys(clean).length && !removed.length) return null;
+  const note = getNote(db, name);
+  const details = withVarAbouts(note?.details ?? "", clean, removed);
+  if (details === (note?.details ?? "")) return null;
+  const r = setNote(db, src, name, { details }, by, now);
+  return "error" in r ? r : null;
+}
+
 export function deleteNote(db: Db, name: string): void {
   db.delete(secretNotes).where(eq(secretNotes.name, name)).run();
 }

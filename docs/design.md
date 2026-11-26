@@ -664,7 +664,8 @@ their values.
   names are shown there, never a value). Groups have none by default.
 - A profile there is not yet is asked for the same way, with the variables it needs and what each one is
   (`request_secret` with `vars`): the owner's card then has only Deny and a link to the console, where he types
-  the values and picks the grant; values are never typed into a chat, his or hers. The console page is opened
+  the values and picks the grant; values are never typed into a chat, his or hers. New values for some
+  variables of a profile he keeps are asked for the same way (`request_secret_update`): only those change. The console page is opened
   from the card on a phone, so it is built for one.
 - A granted profile is injected as env into the one `exec` process that runs, never written to `$HOME`; or
   typed into her browser's page by `browser_type` with `secret` (the owner's call only), which she never sees:

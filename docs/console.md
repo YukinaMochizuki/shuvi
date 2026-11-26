@@ -152,9 +152,11 @@ Without script, reload the page to see one finish.
 - **Profiles**: every secret profile, the secrets file's (read only: its values change where shuvi is deployed)
   and those kept here, with their variables' names, never a value. A profile kept here is sealed in the store
   under `SHUVI_SECRETS_KEY`; without the key, or under another one, it is marked and given to nothing.
-- **Add a profile**: a name, `NAME=value` lines, and optionally a grant to every chat. **Replace values** gives
-  every variable again (what is left out is gone). Values are only ever typed in: a refused form comes back
-  with its name and grant choice, never its values; a replaced or deleted value stays redacted. **Delete** asks
+- **Add a profile**: a name, then one row per variable (its name, what it is, its value; what it is goes into
+  the note), and optionally a grant to every chat. **Replace values**: one field per variable under what it is;
+  an empty field keeps its value, Remove takes it out, new ones go in the rows below. Values are only ever typed
+  in: a refused form comes back with its name and grant choice, never its values; a replaced or deleted value
+  stays redacted. **Delete** asks
   first, and deletes the profile's note too.
 - **Grant to every chat**, for 4 hours, 1 day, 3 days or until revoked: an owner grant, which every chat's
   computer gets in calls made for you, never in a group operator's. Each grant to every chat is listed under
@@ -166,7 +168,9 @@ Without script, reload the page to see one finish.
   on her provide card leads, built for a phone. What she needs and why, one field per variable under what she
   says it is, the grant (this chat, or every chat when you asked), Save or Deny. Saved, the profile is kept,
   granted and the card answered in one go, and she is woken; refused, the form comes back empty, never with what
-  was typed. An answered or expired link only says so.
+  was typed. An answered or expired link only says so. A request for new values of a profile kept here
+  (`request_secret_update`) lists only the variables she asks for; the others keep their values, and its grants
+  stay as they are unless you grant it too.
 
 ## Home: her files
 

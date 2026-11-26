@@ -1,12 +1,12 @@
 import { ownerGrants, type OwnerTtl } from "../capabilities/computer/secrets.ts";
 import { allProfiles, keyProblem, storedProfiles, type SecretSource } from "../secrets/source.ts";
 import { loadProfiles } from "../secrets/redaction.ts";
-import { allNotes, DETAILS_MAX, SUMMARY_MAX, type SecretNote } from "../secrets/notes.ts";
+import { allNotes, DETAILS_MAX, SUMMARY_MAX, varAbouts, type SecretNote } from "../secrets/notes.ts";
 import type { Db } from "../store/db.ts";
 import { approvals } from "../store/schema.ts";
 import { eq } from "drizzle-orm";
 import { span, whenDay } from "./chat-extras.ts";
-import { ago, href, html, page, when, type Raw } from "./html.ts";
+import { ago, href, html, page, raw, when, type Raw } from "./html.ts";
 import { action, anchor, csrfField, inPage, rowNote, writes, type SettingsContext, type SettingsNote } from "./settings.ts";
 
 /**
@@ -193,14 +193,37 @@ function noteForm(ctx: SettingsContext, p: ProfileRow): Raw {
 </form>`;
 }
 
-const valuesField = (placeholder: string) =>
-  html`<label>Values<textarea name="values" rows="4" required class="mono" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="${placeholder}"></textarea><span class="hint">One <span class="mono">NAME=value</span> per line. Sealed when saved, and never shown again: not here, not to her.</span></label>`;
+/** How many new-variable rows a form has: `shown` of them open, the rest under "More variables". */
+export const NEW_ROWS = 6;
 
+/** Inputs for a value: never filled in, never remembered by the browser. */
+const valueAttrs = raw(` autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"`);
+
+/** One new variable: its name, what it is (kept in the note), its value. Fields `nn_<i>`, `na_<i>`, `nv_<i>`. */
+function newRow(i: number, example?: { name: string; about: string; value: string }): Raw {
+  return html`<div class="vrow vnew"><div class="vnew-names"><input type="text" name="nn_${String(i)}" class="mono" maxlength="64" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="${example?.name ?? "NAME"}" aria-label="variable name"${valueAttrs}><input type="text" name="na_${String(i)}" maxlength="120" placeholder="${example?.about ?? "what it is (for her and for you)"}" aria-label="what it is"></div><input type="text" name="nv_${String(i)}" class="vval" placeholder="${example?.value ?? "value"}" aria-label="value"${valueAttrs}></div>`;
+}
+
+/** `NEW_ROWS` new-variable rows, `shown` of them open. */
+function newRows(shown: number, example?: { name: string; about: string; value: string }): Raw {
+  const rows = Array.from({ length: NEW_ROWS }, (_, i) => newRow(i, i === 0 ? example : undefined));
+  return html`${rows.slice(0, shown)}${shown < NEW_ROWS ? html`<details class="vmore"><summary>More variables</summary>${rows.slice(shown)}</details>` : ""}`;
+}
+
+/**
+ * Change a profile's values: one field per variable, under what it is (the note's `- NAME: ...` lines, else its
+ * name). An empty field keeps the value it has; "Remove" takes the variable out; new ones go in the rows below.
+ * Nothing typed here is ever shown back.
+ */
 function replaceForm(ctx: SettingsContext, p: ProfileRow): Raw {
   const path = `${PAGE}/put`;
-  return html`<form class="sform edit" method="post" action="${path}"${writes(path)}>${csrfField(ctx)}<input type="hidden" name="name" value="${p.name}"><input type="hidden" name="replace" value="1">
-${valuesField(p.vars.map((n) => `${n}=…`).join("\n"))}
-<p class="hint">Give every variable again: what is left out is gone. The old values stay redacted from what she sees.</p>
+  const abouts = varAbouts(p.note);
+  return html`<form class="sform vform" method="post" action="${path}"${writes(path)}>${csrfField(ctx)}<input type="hidden" name="name" value="${p.name}"><input type="hidden" name="replace" value="1">
+${p.vars.map(
+  (n) => html`<div class="vrow"><div class="vtop"><span class="vlabel">${abouts[n] ? html`<span class="vabout">${abouts[n]}</span><span class="vname mono">${n}</span>` : html`<span class="vabout mono">${n}</span>`}</span><label class="vdel"><input type="checkbox" name="del_${n}" value="1"> Remove</label></div><input type="text" name="v_${n}" class="vval" placeholder="unchanged" aria-label="new value of ${n}"${valueAttrs}></div>`,
+)}
+<p class="hint">Fill in only what changes: an empty field keeps its value. The old values stay redacted from what she sees. What each one is comes from the note (Edit note).</p>
+<div class="vadd"><span class="vhead">Add a variable</span>${newRows(1)}</div>
 <div class="fbtns"><button type="submit" class="btn primary">Save</button><a class="btn" href="${PAGE}#${anchor("p", p.name)}"${inPage}>Cancel</a></div>
 </form>`;
 }
@@ -219,7 +242,7 @@ function addSection(ctx: SettingsContext, v: SecretsPageView): Raw {
 ${rowNote(v, "add")}
 <form class="sform" method="post" action="${path}"${writes(path)}>${csrfField(ctx)}
 <label>Name<input type="text" name="name" required pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,63}" maxlength="64" value="${f.name ?? ""}" placeholder="github" class="mono" autocomplete="off"><span class="hint">what she asks for, and what a provider's key reference starts with (<span class="mono">github.GH_TOKEN</span>)</span></label>
-${valuesField("GH_TOKEN=ghp_…")}
+<div class="vadd"><span class="vhead">Variables</span>${newRows(2, { name: "GH_TOKEN", about: "GitHub token for the example-org repos", value: "ghp_…" })}<span class="hint">A name, what it is (kept in the note, for her and for you), and its value. Values are sealed when saved and never shown again: not here, not to her.</span></div>
 <label>Give it to her<select name="grant"><option value="" ${!f.grant ? "selected" : ""}>not yet: she asks when she needs it</option>${GRANT_CHOICES.map((c) => html`<option value="${c.id}" ${f.grant === c.id ? "selected" : ""}>every chat, ${c.label}</option>`)}</select><span class="hint">Every chat's computer gets it, in turns you start only, never an operator's.</span></label>
 <div class="fbtns"><button type="submit" class="btn primary">Add profile</button></div>
 </form></details>`;

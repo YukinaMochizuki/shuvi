@@ -240,6 +240,31 @@ export function putProfile(db: Db, src: SecretSource, name: string, vars: Record
 }
 
 /**
+ * Change some of the variables of the store's profile `name`: `set` (a new value, or a new variable), `remove`
+ * (taken out); the others keep their values. Refused when there would be none left (delete the profile instead),
+ * and as `putProfile` refuses. The values going out stay redacted (`putProfile` remembers them).
+ */
+export function updateProfile(db: Db, src: SecretSource, name: string, change: { set: Record<string, string>; remove?: readonly string[] }, now = Date.now()): { vars: string[] } | { error: string } {
+  const problem = keyProblem(src);
+  if (problem) return { error: `Secrets cannot be kept here: ${problem}.` };
+  const old = db.select().from(secretProfiles).where(eq(secretProfiles.name, name)).get();
+  if (!old) return { error: `There is no profile ${name} kept here.` };
+  let vars: Record<string, string>;
+  try {
+    vars = open(src.key!, name, old.sealed);
+  } catch {
+    return { error: `"${name}" is kept under another SHUVI_SECRETS_KEY and cannot be opened to be changed safely; delete it first.` };
+  }
+  // Order kept: the old variables where they were, new ones after.
+  const next: Record<string, string> = {};
+  for (const [k, v] of Object.entries(vars)) if (!change.remove?.includes(k)) next[k] = change.set[k] ?? v;
+  for (const [k, v] of Object.entries(change.set)) if (!(k in next) && !change.remove?.includes(k)) next[k] = v;
+  if (!Object.keys(next).length) return { error: `That would leave ${name} with no variables; delete the profile instead.` };
+  const r = putProfile(db, src, name, next, now);
+  return "error" in r ? r : { vars: Object.keys(next) };
+}
+
+/**
  * Delete the store's profile `name`. Its values are added to the known file first when they can be opened (they
  * were added there whenever they were used, too); refused when they cannot be. Grants naming it are not touched
  * here: the console revokes them first (capabilities/computer/secrets.ts `revokeProfileGrants`), so a profile
