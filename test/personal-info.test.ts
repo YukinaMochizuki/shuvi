@@ -449,7 +449,9 @@ describe("the console's Personal info", () => {
     must(noteVarAbouts(db, src, "addr", { STREET: "街道" }, [], "console", Date.now(), "info") ?? {});
     const html = await get(db, src, "/settings/secrets");
     expect(text(html)).toContain("Personal info");
-    expect(text(html)).toContain("街道 STREET");
+    expect(text(html)).toContain("STREET 街道");
+    // Listed only once shown: the list is drawn hidden (`.vals`), its values masked inside it too.
+    expect(html).toContain('<dl class="kvlist vals">');
     for (const v of Object.values(ADDRESS)) expect(placesOf(html, v)).toEqual([expect.stringMatching(/<span class="iv">$/)]);
     expect(html.split(MASK).length - 1).toBeGreaterThanOrEqual(3);
     expect(/<title>[^<]*<\/title>/.exec(html)![0]).not.toContain("Example");
@@ -474,7 +476,7 @@ describe("the console's Personal info", () => {
     const src = source();
     must(writeInfo(db, src, "addr", { set: ADDRESS }, "console"));
     let html = await get(db, src, "/settings/secrets?iedit=addr");
-    expect(html).toContain(`<input type="text" name="v_CITY" class="ivalin imasked" value="Example City"`);
+    expect(html).toContain(`<input type="text" name="v_CITY" class="imasked" value="Example City"`);
     html = await post(db, src, "/settings/secrets/info-put", { name: "addr", replace: "1", v_POSTCODE: "100-0009", v_CITY: "", v_STREET: "4-5-6 Sample Avenue", del_CITY: "1", nn_0: "BUILDING", na_0: "大樓", nv_0: "Demo Tower 1205" });
     expect(text(html)).toContain("addr: set BUILDING, STREET; removed CITY.");
     expect(getInfo(db, src, "addr")!.values).toEqual({ POSTCODE: "100-0009", STREET: "4-5-6 Sample Avenue", BUILDING: "Demo Tower 1205" });
@@ -482,6 +484,67 @@ describe("the console's Personal info", () => {
     expect(getNote(db, "addr", "info")!.details).toContain("- BUILDING: 大樓");
     // The flash names fields, never a value.
     expect(placesOf(html, "Demo Tower 1205").every((b) => b.endsWith('<span class="iv">'))).toBe(true);
+  });
+
+  test("the edit table: each value's own eye, masked until pressed, apart from the profile's Show; values only in their boxes", async () => {
+    const db = memDb();
+    const src = source();
+    must(writeInfo(db, src, "addr", { set: { ...ADDRESS, STREET: "1-2-3 Sample Street\nBuilding B" } }, "console"));
+    const html = await get(db, src, "/settings/secrets?iedit=addr");
+    for (const f of Object.keys(ADDRESS)) expect(html).toContain(`<button type="button" class="kveye" aria-pressed="false" aria-label="show the value of ${f}" title="Show this value">`);
+    expect(html.split('class="kveye"').length - 1).toBe(3);
+    // Each value in its masked box only (a value of two lines: a textarea), not listed beside the form.
+    expect(placesOf(html, "Example City")).toEqual([expect.stringMatching(/name="v_CITY" class="imasked" value="$/)]);
+    expect(placesOf(html, "1-2-3 Sample Street\nBuilding B")).toEqual([expect.stringMatching(/autocorrect="off" spellcheck="false">$/)]);
+    expect(html).toMatch(/<span class="kvv kvvw"><textarea name="v_STREET" class="imasked" rows="2"/);
+    // The profile's Show values stays beside Edit.
+    expect(html).toContain('<label class="btn ishow-l" for="show-p-info-addr">');
+    // A new row has no eye: what is typed there is not masked.
+    const add = (await get(db, src, "/settings/secrets")).match(/<details class="addp" id="add-info"[^]*?<\/details>/)![0];
+    expect(add).not.toContain("kveye");
+    // The eye's script and its look ship with the console.
+    const asset = /<script src="(\/console\.js\?v=[^"]*)"/.exec(await get(db, src, "/settings/secrets"))![1]!;
+    expect(await get(db, src, asset)).toContain("button.kveye");
+  });
+
+  test("the ⋯ menu: Show values and Edit beside the row, History, the note, Make it a secret and Delete in its menu; Delete asks first; writes need the token", async () => {
+    const db = memDb();
+    const src = source();
+    must(writeInfo(db, src, "addr", { set: ADDRESS }, "console"));
+    const html = await get(db, src, "/settings/secrets");
+    const row = /id="p-info-addr">[^]*?<div class="sact">([^]*?)<\/div>\n/.exec(html)![1]!;
+    const [primary, menu] = row.split('<details class="rmenu">');
+    expect(primary).toContain("Show values");
+    expect(primary).toContain('href="/settings/secrets?iedit=addr#p-info-addr"');
+    expect(primary).not.toMatch(/History|Delete|Make it|note/);
+    expect(menu!.match(/<a class="mi[^"]*" href="[^"]*"/g)).toEqual([
+      '<a class="mi" href="/settings/secrets?history=addr#p-info-addr"',
+      '<a class="mi" href="/settings/secrets?inote=addr#p-info-addr"',
+      expect.stringMatching(/^<a class="mi" href="\/settings\/secrets\?convert=addr&(amp;)?to=secret#p-info-addr"$/),
+      '<a class="mi danger" href="/settings/secrets?idelete=addr#p-info-addr"',
+    ]);
+    expect(text(await get(db, src, "/settings/secrets?idelete=addr"))).toContain("Delete addr?");
+    for (const [verb, body] of [
+      ["info-delete", { name: "addr" }],
+      ["convert", { name: "addr", to: "secret" }],
+      ["info-put", { name: "addr", replace: "1", v_CITY: "Other City" }],
+    ] as const) {
+      const res = await handleConsole(deps(db, src), new Request(`${BASE}/settings/secrets/${verb}`, { method: "POST", headers: { [LOGIN_HEADER]: LOGIN, origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(body) }));
+      expect(res.status).toBe(403);
+    }
+    expect(getInfo(db, src, "addr")!.values).toEqual(ADDRESS);
+  });
+
+  test("descriptions and the summary: an added profile's summary and each key's description go to its note; an edited or emptied description too", async () => {
+    const db = memDb();
+    const src = source();
+    let html = await post(db, src, "/settings/secrets/info-put", { name: "example", summary: "An example profile", nn_0: "KEY_ONE", na_0: "the first", nv_0: "one", nn_4: "KEY_TWO", nv_4: "two" });
+    expect(text(html)).toContain("Added example (KEY_ONE, KEY_TWO)");
+    expect(getNote(db, "example", "info")).toMatchObject({ summary: "An example profile", details: "Variables:\n- KEY_ONE: the first" });
+    html = await post(db, src, "/settings/secrets/info-put", { name: "example", replace: "1", v_KEY_ONE: "one", a_KEY_ONE: "", v_KEY_TWO: "two", a_KEY_TWO: "the second" });
+    expect(text(html)).toContain("Nothing changed in example.");
+    expect(getNote(db, "example", "info")!.details).toBe("Variables:\n- KEY_TWO: the second");
+    expect(infoHistory(db, src, "example").length).toBe(1);
   });
 
   test("History shows each change with who, which fields, the values before (masked); Restore puts them back", async () => {

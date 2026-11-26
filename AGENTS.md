@@ -70,7 +70,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | what a turn's transcript records, image references | `src/agent/transcript.ts`, `src/store/transcripts.ts` |
 | secret redaction (transcripts and a chat computer's output) | `src/secrets/redaction.ts` (requests and grants: `src/capabilities/computer/secrets.ts`) |
 | where secret profiles come from (the file, and the console's sealed under SHUVI_SECRETS_KEY), their notes | `src/secrets/source.ts` (`SecretSource`, `allProfiles`, `redactionFor`), `vault.ts`, `notes.ts` |
-| the console's Secrets page: profiles, values typed in and never shown, grants to every chat, notes | `src/console/secrets.ts` (draws), `secrets-write.ts` (the writes) |
+| the console's Secrets page: profiles, values typed in and never shown, grants to every chat, notes; the key/value table its forms share (fields, any number of rows) and a row's ⋯ menu | `src/console/secrets.ts` (draws), `kv-table.ts` (the table), `secrets-write.ts` (the writes) |
 | personal info (data she READS: an address, a phone): its storage beside secrets (`kind = 'info'`), its history and restore, turning a secret into it and back (the known file), what never treats it as a secret | `src/secrets/info.ts` (and `source.ts` `SECRET`, `redaction.ts` `forgetValues`) |
 | her personal-info tools (`info_read`, `info_write`, `request_info`), its prompt section, its provide card | `src/capabilities/info/index.ts`, `request.ts` |
 | the console's Personal info section: masked values and Show, edit, History, convert | `src/console/info.ts` (draws), `secrets-write.ts` (the writes), `provide.ts` (her request) |

@@ -2,13 +2,14 @@ import { randomBytes } from "node:crypto";
 import { consoleGrant, pendingProvide, provideSecret, revokeGrant, revokeProfileGrants, untilLabel, type OwnerTtl } from "../capabilities/computer/secrets.ts";
 import { answerApproval } from "../control/approvals.ts";
 import { allProfiles, deleteProfile, putProfile, storedProfiles, updateProfile, VAR_NAME, type SecretSource } from "../secrets/source.ts";
-import { deleteNote, noteVarAbouts, setNote } from "../secrets/notes.ts";
+import { deleteNote, getNote, noteVarAbouts, setNote, varAbouts, type NoteKind } from "../secrets/notes.ts";
 import { deleteInfo, getInfo, makeInfo, makeSecret, restoreInfo, writeInfo } from "../secrets/info.ts";
 import { provideInfo } from "../capabilities/info/request.ts";
-import { infoAnchor, infoOn, INFO_NEW_ROWS } from "./info.ts";
+import { infoAnchor, infoOn } from "./info.ts";
+import { KV_MAX_NEW } from "./kv-table.ts";
 import type { Db } from "../store/db.ts";
 import { IMMEDIATE } from "../store/turns.ts";
-import { GRANT_CHOICES, NEW_ROWS, type AddForm } from "./secrets.ts";
+import { GRANT_CHOICES, type AddForm } from "./secrets.ts";
 import { anchor, type SettingsNote } from "./settings.ts";
 import { FLASH_MAX, FLASH_MS, type Form } from "./settings-write.ts";
 
@@ -16,9 +17,12 @@ import { FLASH_MAX, FLASH_MS, type Form } from "./settings-write.ts";
  * The Secrets page's writes, `POST /settings/secrets/<verb>` with form fields (server.ts checks the Origin and the
  * CSRF token before any of them runs):
  *
- *   put      name, values, grant?, replace?   add a profile kept here (`putProfile`: sealed under SHUVI_SECRETS_KEY),
- *                                             or with `replace`, set all of an existing one's variables anew; `grant`
- *                                             (a duration, or empty) also grants it to every chat (`consoleGrant`)
+ *   put      name, summary?, grant?, replace?, and the key/value table's fields (kv-table.ts: v_/a_/del_<KEY>,
+ *            nn_/na_/nv_<i>)
+ *                                             add a profile kept here (`putProfile`: sealed under SHUVI_SECRETS_KEY),
+ *                                             its summary into its note; or with `replace`, change an existing one's
+ *                                             variables (an empty value keeps it); `grant` (a duration, or empty)
+ *                                             also grants it to every chat (`consoleGrant`)
  *   grant    profile, ttl                     grant a profile there is to every chat, for the owner's requests
  *   revoke   grant                            revoke an owner grant, as its card's "Revoke now" (`revokeGrant`)
  *   delete   name                             delete a profile kept here (`deleteProfile`), revoke its grants (a
@@ -28,7 +32,7 @@ import { FLASH_MAX, FLASH_MS, type Form } from "./settings-write.ts";
  *                                             `kind=info`: a personal-info profile's
  *
  * PERSONAL INFO (info.ts; src/secrets/info.ts), whose values are not secret and are shown:
- *   info-put     name, replace?, v_<F>, del_<F>, nn_/na_/nv_<i>   add a profile, or change its fields (an empty or
+ *   info-put     name, summary?, replace?, the table's fields   add a profile, or change its fields (an empty or
  *                                             unchanged field keeps its value); each change recorded as a version
  *   info-delete  name                         delete it, its history and its note
  *   info-restore name, version                put back the values from before that version's change (recorded too)
@@ -39,6 +43,10 @@ import { FLASH_MAX, FLASH_MS, type Form } from "./settings-write.ts";
  * The answer is a 303 to the page with the result as a FLASH (as settings-write.ts: a random id in `?r=`, kept in
  * memory for FLASH_MS, shown once). A flash never holds a value: a refused add comes back with its name and its
  * grant choice only, and the values are typed again. A note names profiles and variables, never a value.
+ *
+ * The table's DESCRIPTIONS (`a_<KEY>`, `na_<i>`) go into the profile's note as its `- KEY: what it is` lines
+ * (`noteVarAbouts`), a secret's and personal info's alike; an emptied one takes its line out. A description holding
+ * a secret value is refused there, as a note is, and the values are saved without it, the answer saying so.
  */
 
 export const SECRETS_WRITES = [
@@ -107,19 +115,37 @@ const rawField = (form: Form, name: string): string => {
 };
 
 /**
- * The form's new-variable rows (`nn_<i>` name, `na_<i>` what it is, `nv_<i>` value): a row with nothing in it is
- * skipped; a row with a value and no name, or a name and no value, is refused by its number (never echoing what was
+ * The indices of the table's new rows the form holds (`nn_<i>`, `na_<i>`, `nv_<i>`), in order: whatever was posted,
+ * since rows are added (and removed) in the page, so the numbers may have gaps. More than KV_MAX_NEW is refused.
+ */
+function newRowIndices(form: Form): number[] | { error: string } {
+  const keys = (form as { keys?: () => Iterable<string> }).keys;
+  const names: Iterable<string> = typeof keys === "function" ? keys.call(form) : Array.from({ length: KV_MAX_NEW }, (_, i) => `nn_${i}`);
+  const at = new Set<number>();
+  for (const k of names) {
+    const m = /^n[nav]_(\d{1,6})$/.exec(k);
+    if (m) at.add(Number(m[1]));
+  }
+  if (at.size > KV_MAX_NEW) return { error: `At most ${KV_MAX_NEW} new rows at once.` };
+  return [...at].sort((a, b) => a - b);
+}
+
+/**
+ * The form's new rows (`nn_<i>` key, `na_<i>` what it is, `nv_<i>` value): a row with nothing in it is skipped; a
+ * row with a value and no key, or a key and no value, is refused by its place in the table (never echoing what was
  * typed: it may be a value).
  */
-function newRowsOf(form: Form, rows = NEW_ROWS, what = "variable"): { set: Record<string, string>; abouts: Record<string, string> } | { error: string } {
+function newRowsOf(form: Form, what = "variable"): { set: Record<string, string>; abouts: Record<string, string> } | { error: string } {
   const set: Record<string, string> = {};
   const abouts: Record<string, string> = {};
-  for (let i = 0; i < rows; i++) {
+  const at = newRowIndices(form);
+  if ("error" in at) return at;
+  for (const [n, i] of at.entries()) {
     const name = field(form, `nn_${i}`);
     const value = rawField(form, `nv_${i}`);
     if (!name && !value.trim()) continue;
-    if (!name) return { error: `New ${what} ${i + 1} has a value but no name.` };
-    if (!VAR_NAME.test(name)) return { error: `New ${what} ${i + 1}'s name is not a ${what} name (letters, digits and _, not starting with a digit).` };
+    if (!name) return { error: `New ${what} ${n + 1} has a value but no name.` };
+    if (!VAR_NAME.test(name)) return { error: `New ${what} ${n + 1}'s name is not a ${what} name (letters, digits and _, not starting with a digit).` };
     if (!value.trim()) return { error: `${name} has no value.` };
     if (name in set) return { error: `${name} is given twice.` };
     set[name] = value;
@@ -127,6 +153,32 @@ function newRowsOf(form: Form, rows = NEW_ROWS, what = "variable"): { set: Recor
     if (about) abouts[name] = about;
   }
   return { set, abouts };
+}
+
+/**
+ * The descriptions of a profile's existing keys as the table posts them (`a_<KEY>`): those changed, and those emptied
+ * (their note line taken out). A key not in the form, or being removed, is left alone.
+ */
+function keyAbouts(db: Db, name: string, kind: NoteKind, keys: readonly string[], form: Form, removing: readonly string[]): { abouts: Record<string, string>; cleared: string[] } {
+  const cur = varAbouts(getNote(db, name, kind));
+  const abouts: Record<string, string> = {};
+  const cleared: string[] = [];
+  for (const k of keys) {
+    const posted = form.get(`a_${k}`);
+    if (typeof posted !== "string" || removing.includes(k)) continue;
+    const about = posted.replace(/\s+/g, " ").trim();
+    if (about && about !== cur[k]) abouts[k] = about;
+    else if (!about && cur[k]) cleared.push(k);
+  }
+  return { abouts, cleared };
+}
+
+/** A new profile's summary (the add form's), into its note: "" when kept or none was given, else why not. */
+function addSummary(db: Db, src: SecretSource, name: string, form: Form, by: string, now: number, kind: NoteKind): string {
+  const summary = field(form, "summary");
+  if (!summary) return "";
+  const r = setNote(db, src, name, { summary }, by, now, kind);
+  return "error" in r ? ` The summary was not kept: ${r.error}` : "";
 }
 
 function ttlField(form: Form, name: string): OwnerTtl | "" | null {
@@ -155,22 +207,23 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
       const by = login ? `console: ${login}` : "console";
       if (replace) {
         const vars = storedProfiles(db).find((p) => p.name === name)!.vars;
-        // An empty field keeps its value; "Remove" takes it out; what each is goes to the note.
+        // An empty value keeps its value; ✕ takes it out; what each is goes to the note.
         const set: Record<string, string> = { ...rows.set };
         const remove: string[] = [];
-        const abouts: Record<string, string> = { ...rows.abouts };
         for (const v of vars) {
           if (field(form, `del_${v}`) === "1") remove.push(v);
           else if (rawField(form, `v_${v}`).trim()) set[v] = rawField(form, `v_${v}`);
         }
-        for (const n of Object.keys(rows.set)) if (vars.includes(n)) return refused(`${n} is already a variable of ${name}: fill in its own field. Nothing was saved; type the values again.`);
+        for (const n of Object.keys(rows.set)) if (vars.includes(n)) return refused(`${n} is already a variable of ${name}: fill in its own row. Nothing was saved; type the values again.`);
+        const ka = keyAbouts(db, name, "secret", vars, form, remove);
+        const abouts: Record<string, string> = { ...ka.abouts, ...rows.abouts };
         if (!Object.keys(set).length && !remove.length) {
-          const nr = noteVarAbouts(db, src, name, abouts, [], by, now);
-          return nr ? refused(nr.error) : { note: { tone: "ok", text: `Nothing to change in the values of ${name}; what each is is saved.`, on: name }, anchor: anchor("p", name) };
+          const nr = noteVarAbouts(db, src, name, abouts, ka.cleared, by, now);
+          return nr ? refused(nr.error) : { note: { tone: "ok", text: `Nothing to change in the values of ${name}; the descriptions are saved.`, on: name }, anchor: anchor("p", name) };
         }
         const r = updateProfile(db, src, name, { set, remove }, now);
         if ("error" in r) return refused(`${r.error} Nothing was saved; type the values again.`);
-        const nr = noteVarAbouts(db, src, name, abouts, remove, by, now);
+        const nr = noteVarAbouts(db, src, name, abouts, [...remove, ...ka.cleared], by, now);
         const what = [Object.keys(set).length ? `set ${Object.keys(set).join(", ")}` : "", remove.length ? `removed ${remove.join(", ")}` : ""].filter(Boolean).join("; ");
         return { note: { tone: nr ? "refused" : "ok", text: `${name}: ${what}. Commands started from now on get the new values.${nr ? ` The note was not changed: ${nr.error}` : ""}`, on: name }, anchor: anchor("p", name) };
       }
@@ -179,7 +232,7 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
       if ("error" in r) return refused(`${r.error} Nothing was saved; type the values again.`);
       const nr = noteVarAbouts(db, src, name, rows.abouts, [], by, now);
       const names = Object.keys(rows.set).join(", ");
-      const noteLine = nr ? ` What each is was not kept: ${nr.error}` : "";
+      const noteLine = `${nr ? ` What each is was not kept: ${nr.error}` : ""}${addSummary(db, src, name, form, by, now, "secret")}`;
       if (grant) {
         const g = consoleGrant(db, name, grant, now);
         return { note: { tone: "ok", text: `Added ${name} (${names}) and granted it to every chat ${TTL_WORDS[grant]} (grant #${g.id}): her commands get it in turns you start.${noteLine}`, on: name }, anchor: anchor("p", name) };
@@ -237,7 +290,7 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
       const cur = getInfo(db, src, name);
       if (replace && !cur) return refused(`There is no personal info ${name} to change.`);
       if (!replace && cur) return refused(`There is personal info named ${name} already: use its Edit, or another name.`);
-      const rows = newRowsOf(form, INFO_NEW_ROWS, "field");
+      const rows = newRowsOf(form, "field");
       if ("error" in rows) return refused(`${rows.error} Nothing was saved.`);
       if (replace) {
         if (!cur!.values) return refused(`${name} cannot be opened now: ${cur!.unreadable ?? "its values do not open"}.`);
@@ -251,9 +304,10 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
             if (v && v !== cur!.values[f]) set[f] = v;
           }
         }
-        for (const n of Object.keys(rows.set)) if (cur!.fields.includes(n)) return refused(`${n} is already a field of ${name}: change it in its own box. Nothing was saved.`);
+        for (const n of Object.keys(rows.set)) if (cur!.fields.includes(n)) return refused(`${n} is already a field of ${name}: change it in its own row. Nothing was saved.`);
+        const ka = keyAbouts(db, name, "info", cur!.fields, form, remove);
         const nr0 = (): string => {
-          const nr = noteVarAbouts(db, src, name, rows.abouts, remove, by, now, "info");
+          const nr = noteVarAbouts(db, src, name, { ...ka.abouts, ...rows.abouts }, [...remove, ...ka.cleared], by, now, "info");
           return nr ? ` What each field is was not kept: ${nr.error}` : "";
         };
         if (!Object.keys(set).length && !remove.length) return { note: { tone: "ok", text: `Nothing changed in ${name}.${nr0()}`, on }, anchor: infoAnchor(name) };
@@ -267,7 +321,8 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
       const r = writeInfo(db, src, name, { set: rows.set }, by, now);
       if ("error" in r) return refused(r.error);
       const nr = noteVarAbouts(db, src, name, rows.abouts, [], by, now, "info");
-      return { note: { tone: "ok", text: `Added ${name} (${r.fields.join(", ")}). She reads it with info_read, in turns you start.${nr ? ` What each field is was not kept: ${nr.error}` : ""}`, on: infoOn(name) }, anchor: infoAnchor(name) };
+      const sum = addSummary(db, src, name, form, by, now, "info");
+      return { note: { tone: nr || sum ? "refused" : "ok", text: `Added ${name} (${r.fields.join(", ")}). She reads it with info_read, in turns you start.${nr ? ` What each field is was not kept: ${nr.error}` : ""}${sum}`, on: infoOn(name) }, anchor: infoAnchor(name) };
     }
     case "/settings/secrets/info-delete": {
       const name = field(form, "name");

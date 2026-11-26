@@ -8,7 +8,7 @@ import { csrfToken, handleConsole, LOGIN_HEADER, type ConsoleDeps } from "../src
 import { answerApproval } from "../src/control/approvals.ts";
 import { getNote, setNote } from "../src/secrets/notes.ts";
 import { knownFile } from "../src/secrets/redaction.ts";
-import { allProfiles, deleteProfile, LiveRedaction, parseVars, putProfile, redactionFor, secretSource, type SecretSource } from "../src/secrets/source.ts";
+import { allProfiles, deleteProfile, LiveRedaction, parseVars, putProfile, redactionFor, secretSource, storedProfiles, type SecretSource } from "../src/secrets/source.ts";
 import { open, parseKey, seal } from "../src/secrets/vault.ts";
 import type { Db } from "../src/store/db.ts";
 import { ensureChat } from "../src/store/events.ts";
@@ -278,7 +278,7 @@ describe("the Secrets page", () => {
     expect(ownerGrants(db).map((g) => g.profile)).toEqual(["github"]);
     // What each is, kept in the note, labels its field.
     expect(getNote(db, "github")!.details).toBe("Variables:\n- GH_TOKEN: GitHub token");
-    expect(await get(db, src, "/settings/secrets?edit=github")).toContain('<span class="vabout">GitHub token</span>');
+    expect(await get(db, src, "/settings/secrets?edit=github")).toContain('name="a_GH_TOKEN" class="kvd" maxlength="120" value="GitHub token"');
 
     html = await write(db, src, "/settings/secrets/put", { name: "github", nn_0: "GH_TOKEN", nv_0: GH2 });
     expect(text(html)).toContain("A profile github is kept here already");
@@ -354,5 +354,135 @@ describe("the Secrets page", () => {
     expect(ownerGrants(db)[0]).toMatchObject({ profile: "modal", chatId: null });
     const res = await handleConsole(deps(db, src), new Request(`${BASE}/settings/secrets/delete`, { method: "POST", headers: { [LOGIN_HEADER]: LOGIN, origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ name: "modal" }) }));
     expect(res.status).toBe(403);
+  });
+});
+
+const varsOf = (db: Db, name: string) => storedProfiles(db).find((p) => p.name === name)?.vars.toSorted();
+/** The page's markup outside its `<template>`s (the row console.js clones is not a row of the form). */
+const outsideTemplates = (html: string) => html.replace(/<template[\s\S]*?<\/template>/g, "");
+
+describe("the key/value table (kv-table.ts)", () => {
+  test("Replace values: each key with its description and an empty value box, one new row and its template, nothing pre-rendered", async () => {
+    const db = memDb();
+    const src = source();
+    putProfile(db, src, "github", { GH_TOKEN: GH, GH_ORG: "example-org-0001" });
+    setNote(db, src, "github", { details: "Variables:\n- GH_TOKEN: GitHub token" }, "console");
+    const html = await get(db, src, "/settings/secrets?edit=github");
+    expect(html).not.toContain(GH);
+    expect(html).not.toContain("example-org-0001");
+    expect(html).toContain('<span class="kvk mono">GH_TOKEN</span><input type="text" name="a_GH_TOKEN" class="kvd" maxlength="120" value="GitHub token"');
+    expect(html).toContain('name="a_GH_ORG" class="kvd" maxlength="120" value=""');
+    expect(html).toContain('<input type="text" name="v_GH_TOKEN" class="kvv mono" placeholder="unchanged"');
+    expect(html).toContain('<input type="checkbox" name="del_GH_ORG" value="1"');
+    // One empty new row; more come from the template, "+ Add a row" (console.js).
+    const form = /<input type="hidden" name="replace" value="1">[^]*?<\/form>/.exec(html)![0];
+    expect(outsideTemplates(form).match(/name="n[nav]_[^"]*"/g)).toEqual(['name="nn_0"', 'name="na_0"', 'name="nv_0"']);
+    expect(html).toContain('<template class="kvt"><div class="kvr kvnew"><input type="text" name="nn___i__"');
+    expect(html).toContain('<button type="button" class="kvadd">+ Add a row</button>');
+    // A secret's value is never drawn, so it has no eye; and nothing of the old per-field cards.
+    expect(html).not.toContain("kveye");
+    expect(html).not.toMatch(/vrow|vmore|More variables/);
+    // The add form: a profile name and a summary, then the same table, empty.
+    const page = await get(db, src, "/settings/secrets");
+    expect(page).toMatch(/<form class="sform kvform" method="post" action="\/settings\/secrets\/put"[^>]*>[^]*?name="summary"[^]*?<div class="kvtab" data-next="1">/);
+    expect(page).not.toMatch(/placeholder="[^"]*(address|POSTCODE|ghp_|GH_TOKEN)/);
+  });
+
+  test("any number of new rows, whatever their numbers, in order; over 100 at once refused; a bad row named by its place, no value echoed", async () => {
+    const db = memDb();
+    const src = source();
+    let html = await write(db, src, "/settings/secrets/put", { name: "many", nn_0: "A_ONE", nv_0: "v-0001", nn_7: "B_TWO", nv_7: "v-0002", nn_42: "C_THREE", na_42: "the third", nv_42: "v-0003", nn_250: "D_FOUR", nv_250: "v-0004" });
+    expect(text(html)).toContain("Added many (A_ONE, B_TWO, C_THREE, D_FOUR)");
+    expect(varsOf(db, "many")).toEqual(["A_ONE", "B_TWO", "C_THREE", "D_FOUR"]);
+    expect(getNote(db, "many")!.details).toBe("Variables:\n- C_THREE: the third");
+    // Added to an existing profile the same way, beside its own keys.
+    html = await write(db, src, "/settings/secrets/put", { name: "many", replace: "1", nn_3: "E_FIVE", nv_3: "v-0005", nn_9: "F_SIX", nv_9: "v-0006" });
+    expect(text(html)).toContain("many: set E_FIVE, F_SIX.");
+    expect(varsOf(db, "many")).toEqual(["A_ONE", "B_TWO", "C_THREE", "D_FOUR", "E_FIVE", "F_SIX"]);
+    // The second row of the table, whatever its number, is "New variable 2".
+    html = await write(db, src, "/settings/secrets/put", { name: "bad", nn_0: "OK", nv_0: "v-0007", nv_5: GH });
+    expect(text(html)).toContain("New variable 2 has a value but no name.");
+    expect(html).not.toContain(GH);
+    const lots: Record<string, string> = { name: "lots" };
+    for (let i = 0; i <= 100; i++) Object.assign(lots, { [`nn_${i}`]: `K${i}`, [`nv_${i}`]: `${GH}-${i}` });
+    html = await write(db, src, "/settings/secrets/put", lots);
+    expect(text(html)).toContain("At most 100 new rows at once.");
+    expect(html).not.toContain(GH);
+    expect(varsOf(db, "lots")).toBeUndefined();
+    lots.nn_100 = "";
+    lots.nv_100 = "";
+    expect(text(await write(db, src, "/settings/secrets/put", lots))).toContain("At most 100 new rows at once.");
+    for (const k of ["nn_100", "nv_100"]) delete lots[k];
+    await write(db, src, "/settings/secrets/put", lots);
+    expect(varsOf(db, "lots")!.length).toBe(100);
+  });
+
+  test("descriptions: a changed one and an emptied one go to the note; one holding a value is refused, the values saved without it, nothing echoed", async () => {
+    const db = memDb();
+    const src = source();
+    await write(db, src, "/settings/secrets/put", { name: "github", nn_0: "GH_TOKEN", na_0: "GitHub token", nv_0: GH, nn_1: "GH_ORG", na_1: "the org", nv_1: "example-org-0001" });
+    expect(getNote(db, "github")!.details).toBe("Variables:\n- GH_TOKEN: GitHub token\n- GH_ORG: the org");
+    let html = await write(db, src, "/settings/secrets/put", { name: "github", replace: "1", a_GH_TOKEN: "token for example-org", v_GH_TOKEN: "", a_GH_ORG: "", v_GH_ORG: "" });
+    expect(text(html)).toContain("Nothing to change in the values of github; the descriptions are saved.");
+    expect(getNote(db, "github")!.details).toBe("Variables:\n- GH_TOKEN: token for example-org");
+    // A form without the description fields leaves them as they are.
+    await write(db, src, "/settings/secrets/put", { name: "github", replace: "1", v_GH_ORG: "example-org-0002" });
+    expect(getNote(db, "github")!.details).toBe("Variables:\n- GH_TOKEN: token for example-org");
+    html = await write(db, src, "/settings/secrets/put", { name: "github", replace: "1", v_GH_TOKEN: GH2, a_GH_TOKEN: `rotated to ${GH2}` });
+    expect(text(html)).toContain("github: set GH_TOKEN.");
+    expect(text(html)).toContain("The note was not changed");
+    expect(html).not.toContain(GH2);
+    expect(getNote(db, "github")!.details).toBe("Variables:\n- GH_TOKEN: token for example-org");
+    expect(secretsForChat(db, src, ownerChatId(db), true).env).toEqual({});
+    consoleGrant(db, "github", "forever");
+    expect(secretsForChat(db, src, ownerChatId(db), true).env).toEqual({ GH_TOKEN: GH2, GH_ORG: "example-org-0002" });
+  });
+
+  test("a new profile's summary goes into its note; one holding a value is not kept and not shown", async () => {
+    const db = memDb();
+    const src = source();
+    putProfile(db, src, "github", { GH_TOKEN: GH });
+    let html = await write(db, src, "/settings/secrets/put", { name: "example", summary: "An example API, in one line", nn_0: "KEY", nv_0: "v-0001" });
+    expect(text(html)).toContain("Added example (KEY).");
+    expect(getNote(db, "example")!.summary).toBe("An example API, in one line");
+    expect(text(html)).toContain("An example API, in one line");
+    html = await write(db, src, "/settings/secrets/put", { name: "other", summary: `leaks ${GH}`, nn_0: "KEY", nv_0: "v-0002" });
+    expect(text(html)).toContain("Added other (KEY).");
+    expect(text(html)).toContain("The summary was not kept");
+    expect(html).not.toContain(GH);
+    expect(getNote(db, "other")?.summary ?? "").toBe("");
+  });
+
+  test("the ⋯ menu: Replace values and the grant beside the row, the rest in its menu as the same links; Delete still asks first; the writes still need the page's token", async () => {
+    const db = memDb();
+    const src = source();
+    putProfile(db, src, "github", { GH_TOKEN: GH });
+    const html = await get(db, src, "/settings/secrets");
+    const row = /<div class="srow" id="p-github">[^]*?<div class="sact">([^]*?)<\/div>\n/.exec(html)![1]!;
+    const [primary, menu] = row.split('<details class="rmenu">');
+    expect(primary).toContain('href="/settings/secrets?edit=github#p-github"');
+    expect(primary).toContain('action="/settings/secrets/grant"');
+    expect(primary).not.toMatch(/Delete|Make it personal info|note/);
+    expect(menu).toContain('<summary class="btn" title="More" aria-label="More for github">⋯</summary>');
+    expect(menu).toContain('<a class="mi" href="/settings/secrets?note=github#p-github"');
+    expect(menu).toMatch(/<a class="mi" href="\/settings\/secrets\?convert=github&(amp;)?to=info#p-github"[^>]*>Make it personal info<\/a>/);
+    expect(menu).toMatch(/<a class="mi danger" href="\/settings\/secrets\?delete=github#p-github"[^>]*>Delete…<\/a>/);
+    // The file's profile: the grant and a menu with only its note.
+    const file = /<div class="srow" id="p-modal">[^]*?<div class="sact">([^]*?)<\/div>\n/.exec(html)![1]!;
+    expect(file).not.toContain("edit=modal");
+    expect(file.match(/class="mi[^"]*"/g)).toEqual(['class="mi"']);
+    // Following the menu's links: the confirmations as before.
+    expect(text(await get(db, src, "/settings/secrets?delete=github"))).toContain("Delete github?");
+    expect(text(await get(db, src, "/settings/secrets?convert=github&to=info"))).toContain("Make github personal info?");
+    for (const [verb, body] of [
+      ["delete", { name: "github" }],
+      ["convert", { name: "github", to: "info" }],
+      ["note", { name: "github", summary: "x" }],
+    ] as const) {
+      const res = await handleConsole(deps(db, src), new Request(`${BASE}/settings/secrets/${verb}`, { method: "POST", headers: { [LOGIN_HEADER]: LOGIN, origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(body) }));
+      expect(res.status).toBe(403);
+    }
+    expect(varsOf(db, "github")).toEqual(["GH_TOKEN"]);
+    expect(getNote(db, "github")).toBeUndefined();
   });
 });
