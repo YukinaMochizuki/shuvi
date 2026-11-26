@@ -6,14 +6,14 @@ import { textOf, type ToolDef, type ToolResult } from "agent-runtime";
 import type { TurnState } from "../src/agent/turn.ts";
 import { browser, describeBrowse, type BrowserConfig } from "../src/capabilities/browser/index.ts";
 import { PorchkitError } from "../src/porchkit/client.ts";
-import { consoleGrant, grantsFor, pendingProvide, provideSecret, PROVIDE_KIND, requestSecret } from "../src/capabilities/computer/secrets.ts";
+import { consoleGrant, grantsFor, pendingProvide, provideSecret, PROVIDE_KIND, requestSecret, requestSecretUpdate } from "../src/capabilities/computer/secrets.ts";
 import type { TurnContext } from "../src/capabilities/types.ts";
 import { allowedHosts, allowedOrigins } from "../src/console/index.ts";
 import { csrfToken, handleConsole, LOGIN_HEADER, type ConsoleDeps } from "../src/console/server.ts";
 import { answerApproval, cardKeyboard, getApproval } from "../src/control/approvals.ts";
-import { getNote } from "../src/secrets/notes.ts";
+import { getNote, varAbouts, withVarAbouts } from "../src/secrets/notes.ts";
 import { loadProvide } from "../src/console/provide.ts";
-import { allProfiles, putProfile, type SecretSource } from "../src/secrets/source.ts";
+import { allProfiles, putProfile, redactionFor, type SecretSource } from "../src/secrets/source.ts";
 import type { Db } from "../src/store/db.ts";
 import { ensureChat, type Chat } from "../src/store/events.ts";
 import { FakePorchkit, SHOP } from "./fake-porchkit.ts";
@@ -115,6 +115,45 @@ describe("asking the owner for a secret there is not yet", () => {
     expect(requestSecret(db, source(null), { chatId: dm, profile: "ok", ttl: "1d", reason: "x", vars: [{ name: "A" }] })).toEqual({ error: expect.stringMatching(/SHUVI_SECRETS_KEY/) });
     // No console address: the card's link would lead nowhere on his phone.
     expect(requestSecret(db, source(), { chatId: dm, profile: "ok", ttl: "1d", reason: "x", vars: [{ name: "A" }] })).toEqual({ error: expect.stringMatching(/SHUVI_CONSOLE_URL/) });
+  });
+});
+
+describe("asking the owner for new values of a profile he keeps", () => {
+  test("an update card asks for only those; saved, the others keep their values, the grants stay, the note learns what each is", async () => {
+    const db = memDb();
+    const src = source();
+    const dm = ownerChatId(db);
+    putProfile(db, src, "contact", { WORK_EMAIL: "work@example.com", HOME_ADDRESS: "Example Rd 1" });
+    consoleGrant(db, "contact", "forever");
+    expect(requestSecretUpdate(db, src, { chatId: dm, profile: "arx", reason: "x", vars: [{ name: "KEY" }], consoleUrl: "https://console.example" })).toEqual({ error: expect.stringMatching(/a profile of the secrets file/) });
+    expect(requestSecretUpdate(db, src, { chatId: dm, profile: "nope", reason: "x", vars: [{ name: "A" }], consoleUrl: "https://console.example" })).toEqual({ error: expect.stringMatching(/no secret profile "nope" to update/) });
+    const r = requestSecretUpdate(db, src, { chatId: dm, profile: "contact", reason: "門牌號碼不完整", vars: [{ name: "HOME_ADDRESS" }, { name: "PHONE", about: "手機號碼" }], consoleUrl: "https://console.example" });
+    if (!("approvalId" in r)) throw new Error(r.error);
+    const card = getApproval(db, r.approvalId)!;
+    expect(card.title).toContain('new values in the secret "contact"');
+    expect(cardKeyboard(card).map((x) => x[0]!.text)).toEqual(["Deny"]);
+    const html = await get(db, src, `/settings/secrets/provide?card=${r.approvalId}`);
+    expect(text(html)).toContain("New values for contact");
+    expect(html).toContain('name="v_HOME_ADDRESS"');
+    expect(html).not.toContain('name="v_WORK_EMAIL"');
+    expect(html).toContain('value="update" checked');
+    expect(provideSecret(db, src, r.approvalId, { HOME_ADDRESS: "Example Rd 1, No. 5, 3F", PHONE: "0900-000-000" }, "update", OWNER_SPEAKER)).toEqual({ profile: "contact", label: "Only the values: its grants stay as they are" });
+    const all = allProfiles(db, src);
+    expect("profiles" in all && all.profiles.contact).toEqual({ WORK_EMAIL: "work@example.com", HOME_ADDRESS: "Example Rd 1, No. 5, 3F", PHONE: "0900-000-000" });
+    expect(grantsFor(db, dm, true).map((g) => [g.profile, g.chatId])).toEqual([["contact", null]]);
+    expect(getNote(db, "contact")!.details).toBe("Variables:\n- PHONE: 手機號碼");
+    // The old value stays redacted.
+    expect(redactionFor(db, src).redact("Example Rd 1")).toBe("[REDACTED:contact]");
+  });
+});
+
+describe("a variable's description in the note", () => {
+  test("set, replaced or taken out; the note's other lines kept", () => {
+    expect(withVarAbouts("", { A: "first" })).toBe("Variables:\n- A: first");
+    expect(withVarAbouts("Scope: repo.", { A: "first" })).toBe("Variables:\n- A: first\n\nScope: repo.");
+    expect(withVarAbouts("Variables:\n- A: first\n\nScope: repo.", { A: "one", B: "two" })).toBe("Variables:\n- A: one\n- B: two\n\nScope: repo.");
+    expect(withVarAbouts("Variables:\n- A: one\n- B: two\nmore", {}, ["A"])).toBe("Variables:\n- B: two\nmore");
+    expect(varAbouts({ details: "Variables:\n- A: one\n- B\n not: this" })).toEqual({ A: "one" });
   });
 });
 

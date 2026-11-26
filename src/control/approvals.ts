@@ -47,7 +47,7 @@ export interface ApprovalRequest {
   kind: string;
   title: string;
   body: string;
-  /** The buttons, in order (1 to 8). */
+  /** The buttons, in order (1 to 8 shown; hidden ones besides, 16 in all). */
   options: ApprovalOption[];
   /** How long the card stays answerable (default: until answered). */
   ttlMs?: number;
@@ -83,7 +83,9 @@ export function cardKeyboard(a: Approval): { text: string; callback_data: string
 }
 
 export function requestApproval(db: Db, req: ApprovalRequest, now = Date.now()): number {
-  if (!req.options.length || req.options.length > 8) throw new Error("an approval needs 1 to 8 options");
+  // At most 8 buttons on the card; hidden options are no buttons (16 in all, a sane bound).
+  const shown = req.options.filter((o) => !o.hidden).length;
+  if (!shown || shown > 8 || req.options.length > 16) throw new Error("an approval needs 1 to 8 options shown (16 in all)");
   if (new Set(req.options.map((o) => o.id)).size !== req.options.length) throw new Error("approval option ids must be unique");
   return db.transaction((tx) => {
     const a = tx

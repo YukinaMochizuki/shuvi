@@ -5,9 +5,9 @@ import { getChat, type Speaker } from "../../store/events.ts";
 import { approvals, secretGrants } from "../../store/schema.ts";
 import { chatLabel, IMMEDIATE } from "../../store/turns.ts";
 import type { Redaction } from "../../secrets/redaction.ts";
-import { allProfiles, PROFILE_NAME, putProfile, redactionFor, storedProfiles, VAR_NAME, type SecretSource } from "../../secrets/source.ts";
+import { allProfiles, PROFILE_NAME, putProfile, redactionFor, storedProfiles, updateProfile, VAR_NAME, type SecretSource } from "../../secrets/source.ts";
 import { loadProfiles } from "../../secrets/redaction.ts";
-import { getNote, setNote, SUMMARY_MAX } from "../../secrets/notes.ts";
+import { getNote, noteVarAbouts, setNote, SUMMARY_MAX } from "../../secrets/notes.ts";
 
 /** A card's reason, from its body (`Reason: ...`). */
 export function reasonOf(body: string): string {
@@ -163,7 +163,7 @@ export function requestSecret(
 function requestProvide(
   db: Db,
   src: SecretSource,
-  a: { chatId: number; profile: string; reason: string; requestedBy?: number; vars: ProvideVar[]; consoleUrl?: string },
+  a: { chatId: number; profile: string; reason: string; requestedBy?: number; vars: ProvideVar[]; consoleUrl?: string; update?: boolean },
 ): { approvalId: number; provide: true } | { error: string } {
   if (!PROFILE_NAME.test(a.profile)) return { error: `"${a.profile.slice(0, 64)}" cannot be a profile's name: letters, digits, _ and -, up to 64.` };
   const seen = new Set<string>();
@@ -185,14 +185,18 @@ function requestProvide(
   const where = chat ? chatLabel(chat) : `chat ${a.chatId}`;
   const approvalId = requestApproval(db, {
     kind: PROVIDE_KIND,
-    title: `She needs a new secret "${a.profile}" for ${where}`,
+    title: a.update ? `She needs new values in the secret "${a.profile}" for ${where}` : `She needs a new secret "${a.profile}" for ${where}`,
     // The link is added once the card has its id (below): the card's text is written when it is queued, so it is
     // built from a reserved row instead.
     body: "",
-    options: [...grantOptions(a.requestedBy === undefined).map((o) => ({ ...o, hidden: true })), { id: "deny", label: "Deny" }],
+    // An update may leave the grants as they are (`update`), or grant it as a new request would.
+    options: [
+      ...[...(a.update ? [{ id: UPDATE_ONLY, label: "Only the values: its grants stay as they are" }] : []), ...grantOptions(a.requestedBy === undefined)].map((o): ApprovalOption => ({ ...o, hidden: true })),
+      { id: "deny", label: "Deny" },
+    ],
     ttlMs: CARD_TTL_MS,
     originChatId: a.chatId,
-    data: { chatId: a.chatId, profile: a.profile, vars, about: Object.fromEntries(asked.filter((v) => v.about).map((v) => [v.name, v.about])) },
+    data: { chatId: a.chatId, profile: a.profile, vars, ...(a.update ? { mode: "update" } : {}), about: Object.fromEntries(asked.filter((v) => v.about).map((v) => [v.name, v.about])) },
     ...(a.requestedBy !== undefined ? { requestedBy: a.requestedBy } : {}),
     bodyFor: (id) =>
       [
@@ -206,17 +210,37 @@ function requestProvide(
   return { approvalId, provide: true };
 }
 
+/**
+ * Ask the owner for new values of some variables of a profile kept in the console (a changed address, a rotated
+ * token), or for variables it does not have yet: a provide card in `update` mode. The others keep their values.
+ * A profile of the secrets file is changed where shuvi is deployed, not here.
+ */
+export function requestSecretUpdate(
+  db: Db,
+  src: SecretSource,
+  a: { chatId: number; profile: string; reason: string; requestedBy?: number; vars: ProvideVar[]; consoleUrl?: string },
+): { approvalId: number; provide: true } | { error: string } {
+  const file = loadProfiles(src.file);
+  if ("profiles" in file && a.profile in file.profiles) return { error: `"${a.profile}" is a profile of the secrets file: the owner changes it where shuvi is deployed. Tell him what needs changing (never the values).` };
+  if (!storedProfiles(db).some((p) => p.name === a.profile)) return { error: `there is no secret profile "${a.profile}" to update. To ask for a new one, use request_secret with \`vars\`.` };
+  if (!a.vars.length) return { error: "give the variables to update or add (`vars`)." };
+  return requestProvide(db, src, { ...a, update: true });
+}
+
+/** The hidden answer of an update card that changes the values only, not the grants. */
+export const UPDATE_ONLY = "update";
+
 /** A provide card still waiting for its values, or why it is not (gone, answered, expired, not a provide card). */
 export function pendingProvide(
   db: Db,
   cardId: number,
   now = Date.now(),
-): { card: NonNullable<ReturnType<typeof getApproval>>; profile: string; vars: string[]; about: Record<string, string>; chatId: number; requestedBy: number | null } | { error: string } {
+): { card: NonNullable<ReturnType<typeof getApproval>>; profile: string; vars: string[]; about: Record<string, string>; chatId: number; requestedBy: number | null; update: boolean } | { error: string } {
   const card = getApproval(db, cardId);
   if (!card || card.kind !== PROVIDE_KIND || !card.data) return { error: "There is no such request for a secret." };
   if (card.status !== "pending" || (card.expiresAt && Date.parse(card.expiresAt) <= now))
     return { error: card.status === "answered" ? `This request was answered already (${card.answer === "deny" ? "denied" : "provided"}).` : "This request has expired; she can ask again." };
-  return { card, profile: String(card.data.profile), vars: (card.data.vars as string[]) ?? [], about: (card.data.about as Record<string, string>) ?? {}, chatId: Number(card.data.chatId), requestedBy: card.requestedBy ?? null };
+  return { card, profile: String(card.data.profile), vars: (card.data.vars as string[]) ?? [], about: (card.data.about as Record<string, string>) ?? {}, chatId: Number(card.data.chatId), requestedBy: card.requestedBy ?? null, update: card.data.mode === "update" };
 }
 
 /**
@@ -238,19 +262,20 @@ export function provideSecret(db: Db, src: SecretSource, cardId: number, values:
     vars[v] = value;
   }
   const file = loadProfiles(src.file);
-  if (("profiles" in file && p.profile in file.profiles) || storedProfiles(db).some((s) => s.name === p.profile))
-    return { error: `A profile "${p.profile}" exists now (made since she asked). Deny this request, and grant that one on the console's Secrets page instead. Nothing was saved.` };
+  const exists = ("profiles" in file && p.profile in file.profiles) || storedProfiles(db).some((s) => s.name === p.profile);
+  if (!p.update && exists) return { error: `A profile "${p.profile}" exists now (made since she asked). Deny this request, and grant that one on the console's Secrets page instead. Nothing was saved.` };
+  if (p.update && !storedProfiles(db).some((s) => s.name === p.profile)) return { error: `The profile "${p.profile}" is not kept here any more. Deny this request. Nothing was saved.` };
   return db.transaction((tx) => {
     const tdb = tx as unknown as Db;
-    const put = putProfile(tdb, src, p.profile, vars, now);
+    // An update changes only the variables the card asks for; the others keep their values.
+    const put = p.update ? updateProfile(tdb, src, p.profile, { set: vars }, now) : putProfile(tdb, src, p.profile, vars, now);
     if ("error" in put) return { error: `${put.error} Nothing was saved; type the values again.` };
     const r = answerApproval(tdb, cardId, option, from, now, { hidden: true });
     if (r.result !== "answered") throw new Error("the request was answered meanwhile");
-    // What she said each variable is, kept as the profile's note, so she knows them when she uses it later.
-    if (!getNote(tdb, p.profile)) {
-      const lines = p.vars.map((v) => `- ${v}${p.about[v] ? `: ${p.about[v]}` : ""}`);
-      setNote(tdb, src, p.profile, { summary: reasonOf(p.card.body).slice(0, SUMMARY_MAX), details: `Variables:\n${lines.join("\n")}` }, "console (from her request)", now);
-    }
+    // What she said each variable is, kept in the profile's note (its `- NAME: ...` lines), so she knows them later;
+    // a new profile's note also says what it is for.
+    if (!p.update && !getNote(tdb, p.profile)) setNote(tdb, src, p.profile, { summary: reasonOf(p.card.body).slice(0, SUMMARY_MAX) }, "console (from her request)", now);
+    noteVarAbouts(tdb, src, p.profile, Object.fromEntries(p.vars.map((v) => [v, p.about[v] ?? ""])), [], "console (from her request)", now);
     syncGrants(tdb, now);
     return { profile: p.profile, label: r.label ?? grant };
   }, IMMEDIATE);

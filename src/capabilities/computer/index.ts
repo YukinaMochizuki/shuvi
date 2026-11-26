@@ -20,7 +20,7 @@ import { awaitInbox, inboxNote, inboxPass, sendFromComputer } from "./files.ts";
 import { browserSaveTool, browserUploadTool } from "./browser-save.ts";
 import { applyResultText, DECLARED_PATH } from "./declared.ts";
 import { DEFAULT_GRID, GRID_MAX, SHEET_EDGE, SHEET_MAX_FRAMES, sheetActsForOwner, sheetCommand, sheetOptions, type SheetArgs } from "./media.ts";
-import { grantedNames, grantsFor, requestSecret, syncGrants, TTLS, untilLabel, type ProvideVar, type Ttl } from "./secrets.ts";
+import { grantedNames, grantsFor, requestSecret, requestSecretUpdate, syncGrants, TTLS, untilLabel, type ProvideVar, type Ttl } from "./secrets.ts";
 import { allProfiles, profileNames } from "../../secrets/source.ts";
 import { allNotes, DETAILS_MAX, getNote, setNote, SUMMARY_MAX } from "../../secrets/notes.ts";
 import { allComputers, COMPUTER_JOB_KIND, hasLiveLease, opHeld, acquireOp, releaseOp, runningComputerJobs } from "./state.ts";
@@ -230,11 +230,11 @@ export const computer = defineCapability<ComputerConfig>({
   label: "computer (owner only)",
   gives: "this chat's own computer: exec, files, secrets, photos, video contact sheets.",
   enable: computerConfig,
-  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "secret_info", "update_secret_note", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config"],
+  ownerOnly: ["exec", "read_job", "cancel_job", "request_secret", "request_secret_update", "secret_info", "update_secret_note", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config"],
   // A sheet of a file on the computer is the owner's; one of a link (media's video_sheet) is anyone's.
   ownerOnlyWhen: { video_sheet: sheetActsForOwner },
   ownerOnlyNote: { video_sheet: SHEET_FILE_NOTE },
-  delegable: ["exec", "read_job", "cancel_job", "request_secret", "secret_info", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config", "video_sheet"],
+  delegable: ["exec", "read_job", "cancel_job", "request_secret", "request_secret_update", "secret_info", "send_file", "send_photo", "save_photo", "browser_save", "browser_upload_from_computer", "apply_computer_config", "video_sheet"],
   tools({ db, chat, state: s, chatPolicy }, cfg) {
     const computers = computersFor(db, cfg);
     const x: ExecContext = { db, chat, computers, cfg };
@@ -365,6 +365,35 @@ export const computer = defineCapability<ComputerConfig>({
       },
     };
 
+    const varsSchema = z
+      .array(z.object({ name: z.string().min(1).max(64).describe("The variable's name, e.g. HOME_ADDRESS"), about: z.string().max(120).optional().describe("What it is, in the owner's language, e.g. 住家地址") }))
+      .min(1)
+      .max(10);
+
+    const requestSecretUpdateTool: ToolDef<{ profile: string; reason: string; vars: ProvideVar[] }> = {
+      name: "request_secret_update",
+      description:
+        "Ask the owner for NEW values of some variables of a secret profile he keeps in the console (an address that changed, a token that was rotated or expired), or for variables it does not have yet. Only those are asked for; the others keep their values, and its grants stay as they are unless he grants it anew. He gets a card with a link and types them in the console, never in a chat. Never ask anyone to send a secret in a chat. His answer arrives here as an approval event. End your turn after asking.",
+      inputSchema: {
+        profile: z.string().min(1).describe("The profile's name"),
+        reason: z.string().min(1).describe("Why, in a sentence the owner reads (what changed, or what is missing)"),
+        vars: varsSchema.describe("Each variable to set: its name and what it is"),
+      },
+      async handler(a) {
+        const acting = actingFor(s, "request_secret_update");
+        const r = requestSecretUpdate(db, cfg.secrets, {
+          chatId: chat.id,
+          profile: a.profile,
+          reason: a.reason,
+          vars: a.vars,
+          ...(cfg.consoleUrl ? { consoleUrl: cfg.consoleUrl } : {}),
+          ...(acting?.by === "operator" ? { requestedBy: acting.userId } : {}),
+        });
+        if ("error" in r) return err(r.error);
+        return ok(`Asked the owner for new values of "${a.profile}" (${a.vars.map((v) => v.name).join(", ")}), approval #${r.approvalId}: he types them in the console. His answer comes back to this chat as an approval event. End your turn now; do not wait for it, and do not ask for the values in the chat.`);
+      },
+    };
+
     const secretInfoTool: ToolDef<{ profile?: string }> = {
       name: "secret_info",
       description:
@@ -488,7 +517,7 @@ export const computer = defineCapability<ComputerConfig>({
       },
     };
 
-    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, secretInfoTool, updateSecretNoteTool, sendFile, sendPhoto, savePhoto, browserSaveTool(x, chatPolicy), browserUploadTool(x, chatPolicy), ...(sheetHere ? [videoSheet] : []), applyConfig] as ToolDef[] }];
+    return [{ serverName: "shuvi", tools: [exec, readJobTool, cancelJobTool, requestSecretTool, requestSecretUpdateTool, secretInfoTool, updateSecretNoteTool, sendFile, sendPhoto, savePhoto, browserSaveTool(x, chatPolicy), browserUploadTool(x, chatPolicy), ...(sheetHere ? [videoSheet] : []), applyConfig] as ToolDef[] }];
   },
   section: (ctx, cfg) => {
     const secrets = ctx.db ? secretsLine(ctx.db, cfg, ctx.chat.id) : "";

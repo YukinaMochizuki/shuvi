@@ -1,11 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { consoleGrant, pendingProvide, provideSecret, revokeGrant, revokeProfileGrants, untilLabel, type OwnerTtl } from "../capabilities/computer/secrets.ts";
 import { answerApproval } from "../control/approvals.ts";
-import { allProfiles, deleteProfile, parseVars, putProfile, storedProfiles, type SecretSource } from "../secrets/source.ts";
-import { deleteNote, setNote } from "../secrets/notes.ts";
+import { allProfiles, deleteProfile, putProfile, storedProfiles, updateProfile, VAR_NAME, type SecretSource } from "../secrets/source.ts";
+import { deleteNote, noteVarAbouts, setNote } from "../secrets/notes.ts";
 import type { Db } from "../store/db.ts";
 import { IMMEDIATE } from "../store/turns.ts";
-import { GRANT_CHOICES, type AddForm } from "./secrets.ts";
+import { GRANT_CHOICES, NEW_ROWS, type AddForm } from "./secrets.ts";
 import { anchor, type SettingsNote } from "./settings.ts";
 import { FLASH_MAX, FLASH_MS, type Form } from "./settings-write.ts";
 
@@ -81,6 +81,29 @@ const rawField = (form: Form, name: string): string => {
   return typeof v === "string" ? v : "";
 };
 
+/**
+ * The form's new-variable rows (`nn_<i>` name, `na_<i>` what it is, `nv_<i>` value): a row with nothing in it is
+ * skipped; a row with a value and no name, or a name and no value, is refused by its number (never echoing what was
+ * typed: it may be a value).
+ */
+function newRowsOf(form: Form): { set: Record<string, string>; abouts: Record<string, string> } | { error: string } {
+  const set: Record<string, string> = {};
+  const abouts: Record<string, string> = {};
+  for (let i = 0; i < NEW_ROWS; i++) {
+    const name = field(form, `nn_${i}`);
+    const value = rawField(form, `nv_${i}`);
+    if (!name && !value.trim()) continue;
+    if (!name) return { error: `New variable ${i + 1} has a value but no name.` };
+    if (!VAR_NAME.test(name)) return { error: `New variable ${i + 1}'s name is not a variable name (letters, digits and _, not starting with a digit).` };
+    if (!value.trim()) return { error: `${name} has no value.` };
+    if (name in set) return { error: `${name} is given twice.` };
+    set[name] = value;
+    const about = field(form, `na_${i}`);
+    if (about) abouts[name] = about;
+  }
+  return { set, abouts };
+}
+
 function ttlField(form: Form, name: string): OwnerTtl | "" | null {
   const v = field(form, name);
   if (!v) return "";
@@ -102,16 +125,41 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
       const exists = storedProfiles(db).some((p) => p.name === name);
       if (replace && !exists) return refused(`There is no profile ${name} kept here to replace.`);
       if (!replace && exists) return refused(`A profile ${name} is kept here already: use its Replace values, or another name.`);
-      const vars = parseVars(rawField(form, "values"));
-      if ("error" in vars) return refused(`${vars.error} Nothing was saved; type the values again.`);
-      const r = putProfile(db, src, name, vars.vars, now);
+      const rows = newRowsOf(form);
+      if ("error" in rows) return refused(`${rows.error} Nothing was saved; type the values again.`);
+      const by = login ? `console: ${login}` : "console";
+      if (replace) {
+        const vars = storedProfiles(db).find((p) => p.name === name)!.vars;
+        // An empty field keeps its value; "Remove" takes it out; what each is goes to the note.
+        const set: Record<string, string> = { ...rows.set };
+        const remove: string[] = [];
+        const abouts: Record<string, string> = { ...rows.abouts };
+        for (const v of vars) {
+          if (field(form, `del_${v}`) === "1") remove.push(v);
+          else if (rawField(form, `v_${v}`).trim()) set[v] = rawField(form, `v_${v}`);
+        }
+        for (const n of Object.keys(rows.set)) if (vars.includes(n)) return refused(`${n} is already a variable of ${name}: fill in its own field. Nothing was saved; type the values again.`);
+        if (!Object.keys(set).length && !remove.length) {
+          const nr = noteVarAbouts(db, src, name, abouts, [], by, now);
+          return nr ? refused(nr.error) : { note: { tone: "ok", text: `Nothing to change in the values of ${name}; what each is is saved.`, on: name }, anchor: anchor("p", name) };
+        }
+        const r = updateProfile(db, src, name, { set, remove }, now);
+        if ("error" in r) return refused(`${r.error} Nothing was saved; type the values again.`);
+        const nr = noteVarAbouts(db, src, name, abouts, remove, by, now);
+        const what = [Object.keys(set).length ? `set ${Object.keys(set).join(", ")}` : "", remove.length ? `removed ${remove.join(", ")}` : ""].filter(Boolean).join("; ");
+        return { note: { tone: nr ? "refused" : "ok", text: `${name}: ${what}. Commands started from now on get the new values.${nr ? ` The note was not changed: ${nr.error}` : ""}`, on: name }, anchor: anchor("p", name) };
+      }
+      if (!Object.keys(rows.set).length) return refused("Give at least one variable: its name and its value.");
+      const r = putProfile(db, src, name, rows.set, now);
       if ("error" in r) return refused(`${r.error} Nothing was saved; type the values again.`);
-      const names = Object.keys(vars.vars).join(", ");
+      const nr = noteVarAbouts(db, src, name, rows.abouts, [], by, now);
+      const names = Object.keys(rows.set).join(", ");
+      const noteLine = nr ? ` What each is was not kept: ${nr.error}` : "";
       if (grant) {
         const g = consoleGrant(db, name, grant, now);
-        return { note: { tone: "ok", text: `${r.created ? "Added" : "Replaced the values of"} ${name} (${names}) and granted it to every chat ${TTL_WORDS[grant]} (grant #${g.id}): her commands get it in turns you start.`, on: name }, anchor: anchor("p", name) };
+        return { note: { tone: "ok", text: `Added ${name} (${names}) and granted it to every chat ${TTL_WORDS[grant]} (grant #${g.id}): her commands get it in turns you start.${noteLine}`, on: name }, anchor: anchor("p", name) };
       }
-      return { note: { tone: "ok", text: r.created ? `Added ${name} (${names}). She can ask for it with request_secret, or grant it to every chat here.` : `Replaced the values of ${name} (${names}). Commands started from now on get the new ones.`, on: name }, anchor: anchor("p", name) };
+      return { note: { tone: "ok", text: `Added ${name} (${names}). She can ask for it with request_secret, or grant it to every chat here.${noteLine}`, on: name }, anchor: anchor("p", name) };
     }
     case "/settings/secrets/grant": {
       const name = field(form, "profile");

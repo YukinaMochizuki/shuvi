@@ -262,7 +262,8 @@ it on the Secrets page; she keeps what she learns there with `update_secret_note
 value is refused.
 
 When a profile does not exist yet, she asks for it with the variables it needs and what each one is
-(`request_secret` with `vars`). The control bot's card then links to the console (`SHUVI_CONSOLE_URL` makes the
+(`request_secret` with `vars`); when some of a kept profile's values changed or are missing, she asks for just
+those (`request_secret_update`). The control bot's card then links to the console (`SHUVI_CONSOLE_URL` makes the
 link absolute), where the owner types the values on a page made for a phone and picks the grant; values are
 never typed into Telegram. A granted value can also go into her browser: `browser_type` with
 `secret: "<profile>.<VAR>"` (the owner's call only) types it without her seeing it, porchkit masks that field in

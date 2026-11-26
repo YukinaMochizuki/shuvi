@@ -272,17 +272,34 @@ describe("the Secrets page", () => {
     const db = memDb();
     ownerChatId(db);
     const src = source();
-    let html = await write(db, src, "/settings/secrets/put", { name: "github", values: `GH_TOKEN=${GH}`, grant: "forever" });
+    let html = await write(db, src, "/settings/secrets/put", { name: "github", nn_0: "GH_TOKEN", na_0: "GitHub token", nv_0: GH, grant: "forever" });
     expect(text(html)).toContain("Added github (GH_TOKEN) and granted it to every chat until you revoke it");
     expect(html).not.toContain(GH);
     expect(ownerGrants(db).map((g) => g.profile)).toEqual(["github"]);
+    // What each is, kept in the note, labels its field.
+    expect(getNote(db, "github")!.details).toBe("Variables:\n- GH_TOKEN: GitHub token");
+    expect(await get(db, src, "/settings/secrets?edit=github")).toContain('<span class="vabout">GitHub token</span>');
 
-    html = await write(db, src, "/settings/secrets/put", { name: "github", values: `GH_TOKEN=${GH2}` });
+    html = await write(db, src, "/settings/secrets/put", { name: "github", nn_0: "GH_TOKEN", nv_0: GH2 });
     expect(text(html)).toContain("A profile github is kept here already");
-    html = await write(db, src, "/settings/secrets/put", { name: "github", values: `GH_TOKEN=${GH2}`, replace: "1" });
-    expect(text(html)).toContain("Replaced the values of github (GH_TOKEN)");
+    html = await write(db, src, "/settings/secrets/put", { name: "github", v_GH_TOKEN: GH2, replace: "1" });
+    expect(text(html)).toContain("github: set GH_TOKEN.");
     expect(secretsForChat(db, src, ownerChatId(db), true).env).toEqual({ GH_TOKEN: GH2 });
     expect(html).not.toContain(GH2);
+    // A new variable beside it; an empty field keeps its value.
+    html = await write(db, src, "/settings/secrets/put", { name: "github", v_GH_TOKEN: "", nn_0: "GH_ORG", na_0: "the org", nv_0: "example-org-0001", replace: "1" });
+    expect(secretsForChat(db, src, ownerChatId(db), true).env).toEqual({ GH_TOKEN: GH2, GH_ORG: "example-org-0001" });
+    expect(getNote(db, "github")!.details).toBe("Variables:\n- GH_TOKEN: GitHub token\n- GH_ORG: the org");
+    // Remove takes it out of the values and the note; nothing filled in is nothing changed.
+    html = await write(db, src, "/settings/secrets/put", { name: "github", del_GH_ORG: "1", replace: "1" });
+    expect(text(html)).toContain("github: removed GH_ORG.");
+    expect(secretsForChat(db, src, ownerChatId(db), true).env).toEqual({ GH_TOKEN: GH2 });
+    expect(getNote(db, "github")!.details).toBe("Variables:\n- GH_TOKEN: GitHub token");
+    html = await write(db, src, "/settings/secrets/put", { name: "github", del_GH_TOKEN: "1", replace: "1" });
+    expect(text(html)).toContain("would leave github with no variables");
+    html = await write(db, src, "/settings/secrets/put", { name: "github", nn_0: "GH_TOKEN", nv_0: "x-0000", replace: "1" });
+    expect(text(html)).toContain("GH_TOKEN is already a variable of github");
+    expect(secretsForChat(db, src, ownerChatId(db), true).env).toEqual({ GH_TOKEN: GH2 });
 
     html = await write(db, src, "/settings/secrets/note", { name: "github", summary: "GitHub for example-org", details: "Org id 1234." });
     expect(text(html)).toContain("Saved the note of github");
@@ -302,7 +319,7 @@ describe("the Secrets page", () => {
     expect(getNote(db, "github")).toBeUndefined();
     expect(redactionFor(db, src).redact(`${GH} ${GH2}`)).toBe("[REDACTED:github] [REDACTED:github]");
     // A profile added later under the name inherits no grant.
-    await write(db, src, "/settings/secrets/put", { name: "github", values: `GH_TOKEN=${GH}` });
+    await write(db, src, "/settings/secrets/put", { name: "github", nn_0: "GH_TOKEN", nv_0: GH });
     expect(secretsForChat(db, src, ownerChatId(db), true).env).toEqual({});
   });
 
@@ -317,14 +334,14 @@ describe("the Secrets page", () => {
   test("a refused add keeps its name and grant choice, never its values; without a key nothing can be added", async () => {
     const db = memDb();
     const src = source();
-    let html = await write(db, src, "/settings/secrets/put", { name: "github", values: `oops ${GH}`, grant: "3d" });
-    expect(text(html)).toContain("Line 1 is not NAME=value. Nothing was saved; type the values again.");
+    let html = await write(db, src, "/settings/secrets/put", { name: "github", nv_0: GH, grant: "3d" });
+    expect(text(html)).toContain("New variable 1 has a value but no name. Nothing was saved; type the values again.");
     expect(html).toContain('value="github"');
     expect(html).not.toContain(GH);
     const nokey = { ...src, key: null };
     html = await get(db, nokey, "/settings/secrets");
     expect(text(html)).toContain("Profiles cannot be kept here: SHUVI_SECRETS_KEY is not set.");
-    html = await write(db, nokey, "/settings/secrets/put", { name: "github", values: `GH_TOKEN=${GH}` });
+    html = await write(db, nokey, "/settings/secrets/put", { name: "github", nn_0: "GH_TOKEN", nv_0: GH });
     expect(text(html)).toContain("Secrets cannot be kept here: SHUVI_SECRETS_KEY is not set.");
     expect(readFileSync(src.file, "utf8")).not.toContain(GH);
   });

@@ -1876,6 +1876,123 @@ details.addp[open] > summary::before {
 .pv-foot {
   margin-top: var(--s5);
 }
+.pv-more summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  color: var(--accent);
+  font-size: 15px;
+  cursor: pointer;
+}
+.pv-more[open] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+/*
+ * A profile's values, one field per variable (secrets.ts `replaceForm`, the add form's rows). One column on a phone;
+ * on a wide screen the value takes the room and what it is, and Remove, sit beside it.
+ */
+.sform.vform {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.vrow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.vlabel {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vabout {
+  font-size: var(--t-ui);
+  color: var(--ink);
+  font-weight: 500;
+}
+.vname {
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+}
+.vrow input[type="text"] {
+  width: 100%;
+  height: 40px;
+  padding: 0 var(--s3);
+  font-size: 16px;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.vrow input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.vrow input.vval {
+  font-family: var(--mono);
+  margin-top: var(--s1);
+}
+.vtop {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s3);
+}
+.vdel {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  white-space: nowrap;
+  color: var(--refused);
+  font-size: var(--t-small);
+  min-height: 32px;
+}
+.vdel input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--refused);
+}
+.vadd {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.vhead {
+  font-size: var(--t-meta);
+  color: var(--ink-dim);
+}
+.vnew-names {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+.vmore summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: var(--t-small);
+  padding: var(--s1) 0;
+}
+.vmore[open] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+@media (min-width: 720px) {
+  .vnew-names {
+    flex-direction: row;
+  }
+  .vnew-names input:first-child {
+    max-width: 220px;
+  }
+}
 
 /* ---- deleting messages (pages.ts `pickable`, `deleteBar`; console.js) ---------------------------------- */
 /* A deletable bubble. Idle nothing shows; on hover (or focus) a faint "⋯" at its top right; while selecting, a
