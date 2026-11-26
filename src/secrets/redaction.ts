@@ -71,43 +71,111 @@ export interface Redaction {
 
 export const knownFile = (file: string) => `${file}.known`;
 
-function readKnown(file: string): Record<string, string> {
+/**
+ * The known file's contents: each value, and EVERY profile that ever held it, in the order they were first seen
+ * holding it (a value reused across profiles is one entry; forgetting it for one profile leaves the others'). On
+ * disk a value of one holder is written `"value": "profile"`, as the file always had it, and one of several
+ * `"value": ["a", "b"]`; either is read.
+ */
+type Known = Record<string, string[]>;
+
+function parseKnown(doc: unknown): Known | null {
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return null;
+  const out: Known = {};
+  for (const [v, p] of Object.entries(doc as Record<string, unknown>)) {
+    const list = (Array.isArray(p) ? p : [p]).filter((x): x is string => typeof x === "string" && x !== "");
+    if (list.length) out[v] = [...new Set(list)];
+  }
+  return out;
+}
+
+/** The known file, or null when it is there but cannot be used (others may read it, it does not parse). */
+function loadKnown(file: string): Known | null {
+  const path = knownFile(file);
   try {
-    const path = knownFile(file);
-    if (statSync(path).mode & 0o077) return {};
-    const doc = JSON.parse(readFileSync(path, "utf8")) as Record<string, string>;
-    return doc && typeof doc === "object" ? doc : {};
+    statSync(path);
   } catch {
-    return {};
+    return {}; // none yet
+  }
+  try {
+    if (statSync(path).mode & 0o077) return null;
+    return parseKnown(JSON.parse(readFileSync(path, "utf8")));
+  } catch {
+    return null;
   }
 }
 
+function readKnown(file: string): Known {
+  return loadKnown(file) ?? {};
+}
+
+function writeKnown(file: string, known: Known): void {
+  const tmp = `${knownFile(file)}.${process.pid}.tmp`;
+  const doc = Object.fromEntries(Object.entries(known).map(([v, ps]) => [v, ps.length === 1 ? ps[0]! : ps]));
+  writeFileSync(tmp, JSON.stringify(doc), { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, knownFile(file));
+}
+
+/** value → the profile it is redacted as: the newest of its holders. */
+const labels = (known: Known): Record<string, string> => Object.fromEntries(Object.entries(known).map(([v, ps]) => [v, ps[ps.length - 1]!]));
+
 /**
- * Add the values of `profiles` to the known file of `file` (value → profile), when any is new. False: a new one could
- * not be written there (a caller about to let a value go refuses rather than stop redacting it).
+ * Add the values of `profiles` to the known file of `file` (value → every profile that held it), when any is new.
+ * False: a new one could not be written there (a caller about to let a value go refuses rather than stop redacting it).
  */
 export function rememberValues(file: string, profiles: Profiles): boolean {
   return remember(file, profiles, readKnown(file));
 }
 
+/**
+ * Take `profile` off `values` in the known file of `file` (a secret becoming personal info, info.ts `makeInfo`): a
+ * value stays while any other profile ever held it, or `holders` (the secrets holding values now: value → profile)
+ * names one; only a value no profile but this one ever held leaves the file. Returns how many of `values` are still
+ * redacted, or null when the known file is there but cannot be read or written, and nothing was changed.
+ */
+export function forgetValues(file: string, profile: string, values: readonly string[], holders: ReadonlyMap<string, string>): { kept: number } | null {
+  const known = loadKnown(file);
+  if (!known) return null;
+  let changed = false;
+  let kept = 0;
+  for (const v of new Set(values)) {
+    const list = known[v] ?? [];
+    const rest = list.filter((p) => p !== profile);
+    const now = holders.get(v);
+    if (now !== undefined && !rest.includes(now)) rest.push(now);
+    if (rest.length !== list.length || rest.some((p, i) => p !== list[i])) changed = true;
+    if (rest.length) {
+      known[v] = rest;
+      if (v.length >= MIN_REDACT) kept++;
+    } else delete known[v];
+  }
+  if (!changed) return { kept };
+  try {
+    writeKnown(file, known);
+    return { kept };
+  } catch {
+    return null;
+  }
+}
+
 let warnedKnown = false;
-/** Add the profiles' current values to the known file (value → profile), when any is new. */
-function remember(file: string, profiles: Profiles, known: Record<string, string>): boolean {
+/** Add each profile to the holders of its current values in the known file, when any is new. */
+function remember(file: string, profiles: Profiles, known: Known): boolean {
   let changed = false;
   for (const [p, vars] of Object.entries(profiles)) {
     for (const v of Object.values(vars)) {
-      if (v.length >= MIN_REDACT && known[v] !== p) {
-        known[v] = p;
+      if (v.length < MIN_REDACT) continue;
+      const list = (known[v] ??= []);
+      if (!list.includes(p)) {
+        list.push(p);
         changed = true;
       }
     }
   }
   if (!changed) return true;
   try {
-    const tmp = `${knownFile(file)}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(known), { mode: 0o600 });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, knownFile(file));
+    writeKnown(file, known);
     return true;
   } catch (e) {
     if (!warnedKnown) console.error(`secrets: cannot write ${knownFile(file)} (${e instanceof Error ? e.message : String(e)}); values rotated out of ${file} will no longer be redacted`);
@@ -189,10 +257,13 @@ export function redactionOf(file: string, loaded: { profiles: Profiles } | { err
   const known = readKnown(file);
   if ("profiles" in loaded) {
     remember(file, loaded.profiles, known);
-    return redaction(known);
+    // A value is redacted as a profile holding it now, else as the newest that ever did.
+    const lab = labels(known);
+    for (const [p, vars] of Object.entries(loaded.profiles)) for (const v of Object.values(vars)) if (v in lab) lab[v] = p;
+    return redaction(lab);
   }
   // Unusable: the values known so far still redact; with none known, output is withheld.
-  return Object.keys(known).length ? redaction(known) : redaction({}, `the secrets file is unusable (${loaded.error})`);
+  return Object.keys(known).length ? redaction(labels(known)) : redaction({}, `the secrets file is unusable (${loaded.error})`);
 }
 
 /** Replace every value in `profiles` (tests, and callers with profiles in hand). */

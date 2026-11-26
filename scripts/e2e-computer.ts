@@ -25,6 +25,9 @@
  *      every chat until revoked: the owner's turn in the group gets it, hidden as [REDACTED:github]; the
  *      operator's turn in the same group does not; its note's summary is in the prompt, and
  *      update_secret_note keeps what she learned, refusing a note holding the value
+ *  10. personal info (src/secrets/info.ts): the owner says his new address in the DM and info_write keeps it
+ *      (a version recorded as hers); in the group, the owner's turn reads it back with info_read (the
+ *      capability is on in every chat whatever its policy says); an operator's turn is refused info_read
  *
  *   bun scripts/e2e-computer.ts
  */
@@ -34,6 +37,7 @@ import { join } from "node:path";
 import type { Update } from "grammy/types";
 import { consoleGrant } from "../src/capabilities/computer/secrets.ts";
 import { getNote, setNote } from "../src/secrets/notes.ts";
+import { getInfo, infoHistory } from "../src/secrets/info.ts";
 import { putProfile } from "../src/secrets/source.ts";
 import { openDb } from "../src/store/db.ts";
 import { FakeHangar } from "../test/fake-hangar.ts";
@@ -110,6 +114,12 @@ const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
   [/keep the github token in the note/, () => use("update_secret_note", { profile: "github", details: `token ${GH_SECRET}` })],
   [/Saved the note of \\"github\\"/, () => say("Noted the github org.")],
   [/holds the value of the secret profile/, () => say("I cannot keep a secret value in a note.")],
+  [/my new address is/, () => use("info_write", { name: "home-address", summary: "Home address", fields: [{ name: "POSTCODE", about: "postcode", value: "200-0002" }, { name: "CITY", about: "city", value: "Sample City" }, { name: "STREET", about: "street", value: "4-5-6 Example Avenue" }] })],
+  [/Created \\"home-address\\"/, () => say("Kept your new address.")],
+  [/fill the form with my address/, () => use("info_read", { name: "home-address" })],
+  [/what is the owner's address/, () => use("info_read", { name: "home-address" })],
+  [/- STREET \(street\): 4-5-6 Example Avenue/, () => say("The form gets 4-5-6 Example Avenue, Sample City 200-0002.")],
+  [/Refused: `info_read` acts for the owner, and only the owner may ask for it/, () => say("Only the owner can have me read his personal info.")],
   [/declare a package/, () => use("exec", { command: "printf 'apt: [example-tool]\\nsetup: echo configured > configured.txt\\n' > ~/.computer.yaml && echo declared-ok" })],
   [/exit 0 · [^"]*declared-ok/, () => use("apply_computer_config", {})],
   [/Applied ~\/\.computer\.yaml in \d+s: apt: example-tool; the setup script/, () => say("The computer config is applied.")],
@@ -339,6 +349,23 @@ check(!bodies.some((b) => b.includes(GH_SECRET)), "9. nor in anything the model 
 tg.updates.push(dmUpdate(33, "keep the github token in the note"));
 await replied("I cannot keep a secret value in a note.", "9. a note holding the value was refused");
 check(!JSON.stringify(db.$client.query("select * from secret_notes").all()).includes(GH_SECRET), "9. the value is in no note");
+await until("the turn to close", turnsIdle);
+
+// ---- 10. personal info ----------------------------------------------------------------------------------
+tg.updates.push(dmUpdate(40, "my new address is 4-5-6 Example Avenue, Sample City 200-0002"));
+await replied("Kept your new address.", "10. info_write kept the address the owner said");
+const kept = getInfo(db, src, "home-address");
+check(kept?.values?.STREET === "4-5-6 Example Avenue" && kept.values.POSTCODE === "200-0002", "10. sealed in the store as personal info");
+check(infoHistory(db, src, "home-address")[0]?.by.startsWith("assistant in ") === true, "10. its version says she wrote it");
+check(!JSON.stringify(db.$client.query("select * from secret_profiles").all()).includes("Example Avenue"), "10. not in the store in the clear");
+await until("the turn to close", turnsIdle);
+tg.updates.push(groupUpdate(41, GROUP, ownerPerson, "@shuvi_test_bot fill the form with my address"));
+await replied("The form gets 4-5-6 Example Avenue, Sample City 200-0002.", "10. the owner's turn in the group read it with info_read");
+check(bodies.some((b) => b.includes("## Personal info") && b.includes("home-address: Home address")), "10. the group's prompt names it with its summary");
+await until("the turn to close", turnsIdle);
+tg.updates.push(groupUpdate(42, GROUP, alice, "@shuvi_test_bot what is the owner's address"));
+await replied("Only the owner can have me read his personal info.", "10. an operator's turn is refused info_read");
+check(seen.some((t) => /Refused: `info_read` acts for the owner, and only the owner may ask for it/.test(t)), "10. the call was refused at the boundary, not answered");
 await until("the turn to close", turnsIdle);
 
 log("PASS");

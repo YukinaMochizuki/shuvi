@@ -197,6 +197,13 @@
       "when": 1795579897768,
       "tag": "0027_spooky_dust",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1795675008742,
+      "tag": "0028_abandoned_princess_powerful",
+      "breakpoints": true
     }
   ]
 }

@@ -8,6 +8,7 @@ import { eq } from "drizzle-orm";
 import { span, whenDay } from "./chat-extras.ts";
 import { ago, href, html, page, raw, when, type Raw } from "./html.ts";
 import { action, anchor, csrfField, inPage, rowNote, writes, type SettingsContext, type SettingsNote } from "./settings.ts";
+import { confirmToInfo, infoSection, loadInfo, type InfoView } from "./info.ts";
 
 /**
  * The Secrets page (`/settings/secrets`): her credentials. Every secret profile there is, the secrets file's (read
@@ -19,6 +20,9 @@ import { action, anchor, csrfField, inPage, rowNote, writes, type SettingsContex
  * every console write is). A value is only ever typed in (adding a profile, replacing its values) and never drawn
  * back: a refused form comes back with its name and its grant choice, never its values. Delete is a link (GET
  * `?delete=`) to a confirmation, as Settings' Remove is.
+ *
+ * Below the secrets, the PERSONAL INFO section (info.ts): data she reads, whose values are shown. A secret kept here
+ * can be made personal info, and back (`?convert=<name>&to=info|secret`, a confirmation saying what happens).
  */
 
 /** An owner grant, as the page shows it. */
@@ -67,6 +71,10 @@ export interface SecretsPageView {
   noting?: string;
   /** The add form open, with these (never a value). */
   adding?: AddForm;
+  /** The Personal info section. */
+  info: InfoView;
+  /** A change of kind asked for and not yet confirmed: the profile, and what it would become. */
+  converting?: { name: string; to: "info" | "secret" };
 }
 
 /** What the add form is shown again with after a refusal: its name and grant choice, never the values. */
@@ -83,7 +91,7 @@ export const GRANT_CHOICES: { id: OwnerTtl; label: string }[] = [
 ];
 
 /** The page's view now, with what the query asks for (`delete`, `edit`) and the last write's note. */
-export function loadSecretsPage(db: Db, src: SecretSource, q: URLSearchParams, flash?: { note?: SettingsNote; adding?: AddForm }, now = Date.now()): SecretsPageView {
+export function loadSecretsPage(db: Db, src: SecretSource, q: URLSearchParams, flash?: { note?: SettingsNote; adding?: AddForm; addingInfo?: { name?: string } }, now = Date.now()): SecretsPageView {
   const grants: OwnerGrantRow[] = ownerGrants(db, now).map((g) => {
     const card = g.approvalId != null ? db.select({ answeredAt: approvals.answeredAt }).from(approvals).where(eq(approvals.id, g.approvalId)).get() : undefined;
     return { id: g.id, profile: g.profile, expiresAt: g.expiresAt, grantedAt: card?.answeredAt ?? g.createdAt, via: g.approvalId == null ? "console" : "card" };
@@ -109,7 +117,8 @@ export function loadSecretsPage(db: Db, src: SecretSource, q: URLSearchParams, f
     if (r) r.grants.push(g);
     else orphans.push(g);
   }
-  const v: SecretsPageView = { file: src.file, ...("error" in file ? { fileError: file.error } : {}), keyProblem: keyProblem(src), profiles: rows, orphans };
+  const info = loadInfo(db, src, q, flash?.note, flash?.addingInfo);
+  const v: SecretsPageView = { file: src.file, ...("error" in file ? { fileError: file.error } : {}), keyProblem: keyProblem(src), profiles: rows, orphans, info };
   if (flash?.note) v.note = flash.note;
   if (flash?.adding) v.adding = flash.adding;
   const del = q.get("delete");
@@ -118,6 +127,12 @@ export function loadSecretsPage(db: Db, src: SecretSource, q: URLSearchParams, f
   if (edit && rows.some((r) => r.name === edit && r.from === "store")) v.editing = edit;
   const note = q.get("note");
   if (note && rows.some((r) => r.name === note && !r.shadowed)) v.noting = note;
+  const conv = q.get("convert");
+  const to = q.get("to");
+  if (conv && !v.note && !v.keyProblem) {
+    if (to === "info" && rows.some((r) => r.name === conv && r.from === "store" && !r.unreadable)) v.converting = { name: conv, to };
+    if (to === "secret" && info.rows.some((r) => r.name === conv)) v.converting = { name: conv, to };
+  }
   return v;
 }
 
@@ -145,6 +160,7 @@ function grantForm(ctx: SettingsContext, name: string): Raw {
 function profileRow(ctx: SettingsContext, v: SecretsPageView, p: ProfileRow): Raw {
   const id = anchor("p", p.name);
   const confirming = v.confirm === p.name && p.from === "store";
+  const converting = v.converting?.to === "info" && v.converting.name === p.name && p.from === "store";
   const editing = v.editing === p.name && p.from === "store";
   const noting = v.noting === p.name;
   const facts: Raw[] = [
@@ -157,22 +173,22 @@ function profileRow(ctx: SettingsContext, v: SecretsPageView, p: ProfileRow): Ra
       ? html`<p class="why-line c-failed">Not given out: ${p.unreadable}.</p>`
       : "";
   const usable = !p.shadowed && !p.unreadable;
-  const acts = confirming
+  const acts = confirming || converting
     ? ""
     : html`${usable && !p.grants.some((g) => !g.expiresAt) ? grantForm(ctx, p.name) : ""}${
         p.shadowed ? "" : html`<a class="btn${noting ? " on" : ""}" href="${noting ? PAGE : href(PAGE, { note: p.name })}#${id}"${inPage}>${p.note ? "Edit note" : "Add note"}</a>`
       }${
         p.from === "store"
-          ? html`${v.keyProblem ? "" : html`<a class="btn${editing ? " on" : ""}" href="${editing ? PAGE : href(PAGE, { edit: p.name })}#${id}"${inPage}>Replace values</a>`}<a class="btn danger" href="${href(PAGE, { delete: p.name })}#${id}"${inPage}>Delete</a>`
+          ? html`${v.keyProblem ? "" : html`<a class="btn${editing ? " on" : ""}" href="${editing ? PAGE : href(PAGE, { edit: p.name })}#${id}"${inPage}>Replace values</a>`}${v.keyProblem || p.unreadable ? "" : html`<a class="btn" href="${href(PAGE, { convert: p.name, to: "info" })}#${id}"${inPage}>Make it personal info</a>`}<a class="btn danger" href="${href(PAGE, { delete: p.name })}#${id}"${inPage}>Delete</a>`
           : ""
       }`;
-  return html`<div class="srow${p.unreadable || p.shadowed ? " warn" : ""}${confirming ? " confirming" : ""}" id="${id}">
+  return html`<div class="srow${p.unreadable || p.shadowed ? " warn" : ""}${confirming || converting ? " confirming" : ""}" id="${id}">
 <div class="smain"><div class="sl1"><span class="sname mono">${p.name}</span><span class="tag">${p.from === "file" ? "secrets file" : "kept here"}</span></div>
 <p class="sfacts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
 ${problem}${noteLines(ctx, p)}${p.grants.map((g) => grantLine(ctx, g))}${p.from === "file" ? html`<p class="uses">Its values are changed in the secrets file, where shuvi is deployed.</p>` : ""}
 ${rowNote(v, p.name)}</div>
 <div class="sact">${acts}</div>
-${editing ? replaceForm(ctx, p) : ""}${noting ? noteForm(ctx, p) : ""}${confirming ? confirmDelete(ctx, p) : ""}
+${editing ? replaceForm(ctx, p) : ""}${noting ? noteForm(ctx, p) : ""}${confirming ? confirmDelete(ctx, p) : ""}${converting ? confirmToInfo(ctx, p, `${PAGE}#${id}`) : ""}
 </div>`;
 }
 
@@ -246,13 +262,14 @@ ${rowNote(v, "add")}
 <label>Give it to her<select name="grant"><option value="" ${!f.grant ? "selected" : ""}>not yet: she asks when she needs it</option>${GRANT_CHOICES.map((c) => html`<option value="${c.id}" ${f.grant === c.id ? "selected" : ""}>every chat, ${c.label}</option>`)}</select><span class="hint">Every chat's computer gets it, in turns you start only, never an operator's.</span></label>
 <div class="fbtns"><button type="submit" class="btn primary">Add profile</button></div>
 </form></details>`;
-  return html`<section class="sset" id="add"><div class="shd"><h2>Add a profile</h2><span class="meta">kept here, sealed</span></div>${body}</section>`;
+  return html`<section class="sset" id="add"><div class="shd"><h2>Add a secret</h2><span class="meta">kept here, sealed</span></div>${body}</section>`;
 }
 
 export function secretsBody(ctx: SettingsContext, v: SecretsPageView): Raw {
   const granted = v.profiles.filter((p) => p.grants.length).length;
   const facts = [
-    plural(v.profiles.length, "profile"),
+    plural(v.profiles.length, "secret"),
+    plural(v.info.rows.length, "personal info profile", "personal info profiles"),
     granted ? `${granted} granted to every chat` : html`<span class="faint">none granted to every chat</span>`,
     v.keyProblem ? html`<span class="c-failed">no key</span>` : "sealed with SHUVI_SECRETS_KEY",
   ];
@@ -261,16 +278,17 @@ export function secretsBody(ctx: SettingsContext, v: SecretsPageView): Raw {
     ? html`<div class="notice failed">The secrets file cannot be used: ${v.fileError}. No command gets a secret until it is fixed where shuvi is deployed; what is shown of it is what it held.</div>`
     : "";
   return html`<main class="settings secrets">
-<div class="head"><div class="title"><h1>Secrets</h1><span class="meta">her credentials</span></div>
+<div class="head"><div class="title"><h1>Secrets &amp; personal info</h1><span class="meta">what she never sees, and what she reads</span></div>
 <p class="facts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
-<nav class="jump small"><a href="/settings">← Model catalog</a><a href="#profiles">Profiles</a><a href="#add">Add a profile</a></nav></div>
+<nav class="jump small"><a href="/settings">← Model catalog</a><a href="#profiles">Secrets</a><a href="#add">Add a secret</a><a href="#info">Personal info</a></nav></div>
 ${globalNote}${fileNote}
 <section class="sset" id="profiles">
-<div class="shd"><h2>Profiles</h2><span class="meta">names only, never a value</span></div>
+<div class="shd"><h2>Secrets</h2><span class="meta">she never sees these · names only</span></div>
 ${v.profiles.length ? v.profiles.map((p) => profileRow(ctx, v, p)) : html`<p class="empty-s">No secret profiles. Add one below, or in the secrets file (<span class="mono">${v.file}</span>).</p>`}
 ${v.orphans.length ? html`<div class="sgroup"><div class="sgh"><span class="faint">Granted to every chat, but the profile is gone</span></div>${v.orphans.map((g) => html`<div class="srow warn"><div class="smain"><div class="sl1"><span class="sname mono">${g.profile}</span></div>${grantLine(ctx, g)}</div></div>`)}</div>` : ""}
 </section>
 ${addSection(ctx, v)}
+${infoSection(ctx, v.info, v.note, v.keyProblem, v.converting?.to === "secret" ? v.converting.name : undefined)}
 <p class="meta foot">She asks for a profile with <span class="mono">request_secret</span>; your answer on its card in the control bot grants it to that chat or to every chat. Grants to single chats are on each chat's settings page. A command already running keeps the values it started with.</p>
 </main>`;
 }

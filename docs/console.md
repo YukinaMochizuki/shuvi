@@ -2,7 +2,7 @@
 
 A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
 timeline. It is for the owner, to debug and tune her. It is read-only, except for five things: **Settings**,
-which manages the model catalog, **Secrets**, her credentials, **Home**, where her files are edited, **a
+which manages the model catalog, **Secrets & personal info**, her credentials and what she reads about you, **Home**, where her files are edited, **a
 chat's settings** (its model, profile, conversation, permissions, schedules and secret grants), and **deleting
 chat messages and whole turns** (all below). Nothing else in it can change anything.
 
@@ -46,7 +46,8 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
   conversation; its permissions; its schedules, secrets and computer. See below.
 - **Home** (`/home`): her files in `home/`, edited by hand, with each file's history. See below.
 - **Settings** (`/settings`): the model catalog. See below.
-- **Secrets** (`/settings/secrets`): her secret profiles, their notes and the grants to every chat. See below.
+- **Secrets & personal info** (`/settings/secrets`): her secret profiles, their notes and the grants to every chat;
+  your personal info, its history. See below.
 
 ## Live pages
 
@@ -171,6 +172,32 @@ Without script, reload the page to see one finish.
   was typed. An answered or expired link only says so. A request for new values of a profile kept here
   (`request_secret_update`) lists only the variables she asks for; the others keep their values, and its grants
   stay as they are unless you grant it too.
+- **Make it personal info**, on a secret kept here: a confirmation says what happens (she reads its values, they
+  are no longer redacted but for one another secret also holds, every grant of it is revoked), then it moves to
+  Personal info.
+
+## Personal info: what she reads
+
+The second half of `/settings/secrets` (`src/console/info.ts` draws it, `secrets-write.ts` writes; the rules are
+`src/secrets/info.ts`): data about you she needs to READ (an address, a phone, a member number), as against the
+secrets above, which she never sees. She reads it with `info_read` in any chat, in turns you start, and keeps what
+you tell her with `info_write`.
+
+- **Each profile**: its fields, each under what it is (its note's `- NAME: what it is` lines), and who changed it
+  last. The values are **masked** (a fixed row of dots) until you press **Show values** on that profile: a toggle
+  the page's CSS reads, so it shows at once, with no request and no script (`?show=<name>` draws them shown where
+  the browser cannot). They are on the page only inside those spans and the edit boxes, never in its title or a
+  message.
+- **Edit**: one box per field, filled with what it holds and masked like the rest (Show values unmasks them; the
+  boxes are masked with `-webkit-text-security`, which Safari and Chrome honour and Firefox ignores, and are not
+  password fields, so no password manager offers to save them); a box you leave as it is or empty keeps its value, Remove takes the field out, new fields go in the rows below.
+- **History**: each change, newest first: when, by whom (you, or her in which chat), which fields, and the values
+  from before it (masked), with **Restore these values**, which is recorded as a change too. The newest 20 are
+  kept.
+- **Make it a secret**: a confirmation says what happens (redacted from then on, no grant, its history deleted).
+  **Delete** deletes its history and its note too. **New personal info**: a name and one row per field.
+- **Her request** (`request_info`) opens the same provide page as a secret's: it says it is personal info, has no
+  grant choices, and shows what a field holds now, masked until Show current values; Save writes only the fields she asked for, recorded as yours.
 
 ## Home: her files
 

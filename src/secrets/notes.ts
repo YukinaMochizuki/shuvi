@@ -1,6 +1,6 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import type { Db } from "../store/db.ts";
-import { secretNotes } from "../store/schema.ts";
+import { secretNotes, secretProfiles } from "../store/schema.ts";
 import { loadProfiles } from "./redaction.ts";
 import { redactionFor, storedProfiles, type SecretSource } from "./source.ts";
 
@@ -19,7 +19,13 @@ import { redactionFor, storedProfiles, type SecretSource } from "./source.ts";
  * unusable), so a token is never copied into one. A note is kept by the profile's name: deleting a profile kept in
  * the console deletes its note (console/secrets-write.ts); a profile the secrets file drops keeps its note, shown
  * again if the file gains it back.
+ *
+ * A PERSONAL-INFO profile (info.ts) has a note too, kept apart by its kind (`NoteKind`): its summary is in her prompt
+ * beside its name, and its `- NAME: what it is` lines say what each field is. Every function here takes the kind,
+ * a secret's by default.
  */
+
+export type NoteKind = "secret" | "info";
 
 export const SUMMARY_MAX = 200;
 export const DETAILS_MAX = 8000;
@@ -27,16 +33,20 @@ export const DETAILS_MAX = 8000;
 export type SecretNote = typeof secretNotes.$inferSelect;
 
 /** Every note, by name. */
-export function allNotes(db: Db): Map<string, SecretNote> {
-  return new Map(db.select().from(secretNotes).orderBy(asc(secretNotes.name)).all().map((n) => [n.name, n]));
+export function allNotes(db: Db, kind: NoteKind = "secret"): Map<string, SecretNote> {
+  return new Map(db.select().from(secretNotes).where(eq(secretNotes.kind, kind)).orderBy(asc(secretNotes.name)).all().map((n) => [n.name, n]));
 }
 
-export function getNote(db: Db, name: string): SecretNote | undefined {
-  return db.select().from(secretNotes).where(eq(secretNotes.name, name)).get();
+export function getNote(db: Db, name: string, kind: NoteKind = "secret"): SecretNote | undefined {
+  return db.select().from(secretNotes).where(and(eq(secretNotes.kind, kind), eq(secretNotes.name, name))).get();
 }
 
-/** Whether `name` is a profile now (the file's, or one kept in the store), without opening any value. */
-export function isProfile(db: Db, src: SecretSource, name: string): boolean {
+/**
+ * Whether `name` is a profile of `kind` now (a secret: the file's, or one kept in the store; personal info: one kept
+ * in the store), without opening any value.
+ */
+export function isProfile(db: Db, src: SecretSource, name: string, kind: NoteKind = "secret"): boolean {
+  if (kind === "info") return !!db.select({ id: secretProfiles.id }).from(secretProfiles).where(and(eq(secretProfiles.kind, "info"), eq(secretProfiles.name, name))).get();
   const file = loadProfiles(src.file);
   if ("profiles" in file && name in file.profiles) return true;
   return storedProfiles(db).some((p) => p.name === name);
@@ -47,8 +57,8 @@ export function isProfile(db: Db, src: SecretSource, name: string): boolean {
  * `by` says who (`console`, `console: <login>`, `assistant in <chat>`). Refuses a name that is no profile, a
  * summary over one line or SUMMARY_MAX, details over DETAILS_MAX, and anything holding a secret value.
  */
-export function setNote(db: Db, src: SecretSource, name: string, a: { summary?: string; details?: string }, by: string, now = Date.now()): { note: SecretNote } | { error: string } {
-  if (!isProfile(db, src, name)) return { error: `There is no secret profile "${name.slice(0, 64)}".` };
+export function setNote(db: Db, src: SecretSource, name: string, a: { summary?: string; details?: string }, by: string, now = Date.now(), kind: NoteKind = "secret"): { note: SecretNote } | { error: string } {
+  if (!isProfile(db, src, name, kind)) return { error: kind === "info" ? `There is no personal info "${name.slice(0, 64)}".` : `There is no secret profile "${name.slice(0, 64)}".` };
   const summary = a.summary?.trim();
   const details = a.details?.replace(/\r\n?/g, "\n").trim();
   if (summary === undefined && details === undefined) return { error: "Give a summary, details, or both." };
@@ -63,11 +73,11 @@ export function setNote(db: Db, src: SecretSource, name: string, a: { summary?: 
     if (leaked) return { error: `The ${what} holds the value of the secret profile "${leaked}"; a note never holds a secret value. Nothing was saved.` };
   }
   const at = new Date(now).toISOString();
-  const old = getNote(db, name);
+  const old = getNote(db, name, kind);
   const row = { summary: summary ?? old?.summary ?? "", details: details ?? old?.details ?? "", updatedBy: by, updatedAt: at };
-  if (old) db.update(secretNotes).set(row).where(eq(secretNotes.name, name)).run();
-  else db.insert(secretNotes).values({ name, ...row }).run();
-  return { note: getNote(db, name)! };
+  if (old) db.update(secretNotes).set(row).where(and(eq(secretNotes.kind, kind), eq(secretNotes.name, name))).run();
+  else db.insert(secretNotes).values({ kind, name, ...row }).run();
+  return { note: getNote(db, name, kind)! };
 }
 
 /**
@@ -116,16 +126,23 @@ export function withVarAbouts(details: string, abouts: Record<string, string>, r
  * or taken out, nothing else of the note changed. Not when there is nothing to change. A refusal (a value in it) is
  * the caller's to show.
  */
-export function noteVarAbouts(db: Db, src: SecretSource, name: string, abouts: Record<string, string>, removed: readonly string[], by: string, now = Date.now()): { error: string } | null {
+export function noteVarAbouts(db: Db, src: SecretSource, name: string, abouts: Record<string, string>, removed: readonly string[], by: string, now = Date.now(), kind: NoteKind = "secret"): { error: string } | null {
   const clean = Object.fromEntries(Object.entries(abouts).map(([k, v]) => [k, v.replace(/\s+/g, " ").trim()]).filter(([, v]) => v));
   if (!Object.keys(clean).length && !removed.length) return null;
-  const note = getNote(db, name);
+  const note = getNote(db, name, kind);
   const details = withVarAbouts(note?.details ?? "", clean, removed);
   if (details === (note?.details ?? "")) return null;
-  const r = setNote(db, src, name, { details }, by, now);
+  const r = setNote(db, src, name, { details }, by, now, kind);
   return "error" in r ? r : null;
 }
 
-export function deleteNote(db: Db, name: string): void {
-  db.delete(secretNotes).where(eq(secretNotes.name, name)).run();
+export function deleteNote(db: Db, name: string, kind: NoteKind = "secret"): void {
+  db.delete(secretNotes).where(and(eq(secretNotes.kind, kind), eq(secretNotes.name, name))).run();
+}
+
+/** Move the note of `name` from one kind to the other (a profile changing kind); one already there is replaced. */
+export function moveNote(db: Db, name: string, from: NoteKind, to: NoteKind): void {
+  if (from === to || !getNote(db, name, from)) return;
+  deleteNote(db, name, to);
+  db.update(secretNotes).set({ kind: to }).where(and(eq(secretNotes.kind, from), eq(secretNotes.name, name))).run();
 }

@@ -160,7 +160,7 @@ export const MAX_SMALL_BODY = 16 * 1024;
  * multipart field per selected message (about 95 bytes each: a chat page's 200 messages are about 19 KB), and a
  * secret profile's values (a certificate) or note.
  */
-export const LARGE_BODY_WRITES: ReadonlySet<string> = new Set([...HOME_WRITES, "/messages/delete", "/settings/secrets/put", "/settings/secrets/note"]);
+export const LARGE_BODY_WRITES: ReadonlySet<string> = new Set([...HOME_WRITES, "/messages/delete", "/settings/secrets/put", "/settings/secrets/note", "/settings/secrets/info-put"]);
 export const SESSION_COOKIE = "shuvi_console";
 export const SESSION_MS = 7 * 24 * 3600_000;
 
@@ -371,7 +371,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
         return "json" in r ? respond(r.json.body, r.json.status, "application/json; charset=utf-8") : respond(null, 303, "text/plain", { location: r.location });
       }
       if (isSettingsWrite(path)) return respond(null, 303, "text/plain", { location: settingsWrite(deps.db, path, form, ctx.now) });
-      if (path === PROVIDE_PATH) return respond(null, 303, "text/plain", { location: provideWrite(deps.db, secretsOf(deps), form, deps.ownerId !== undefined ? { id: deps.ownerId, name: auth.who ?? "Owner" } : null, ctx.now) });
+      if (path === PROVIDE_PATH) return respond(null, 303, "text/plain", { location: provideWrite(deps.db, secretsOf(deps), form, deps.ownerId !== undefined ? { id: deps.ownerId, name: auth.who ?? "Owner" } : null, ctx.now, auth.who) });
       if (isSecretsWrite(path)) return respond(null, 303, "text/plain", { location: secretsWrite(deps.db, secretsOf(deps), path, form, deps.ownerId !== undefined ? { id: deps.ownerId, name: auth.who ?? "Owner" } : null, auth.who, ctx.now) });
       if (PROFILE_WRITES.has(path)) return respond(null, 303, "text/plain", { location: profileWrite(deps.db, homeOf(deps), path, form, auth.who, ctx.now!) });
       const chatWrite = CHAT_SETTINGS_WRITE.exec(path);
@@ -410,7 +410,7 @@ export async function handleConsole(deps: ConsoleDeps, req: Request): Promise<Re
     if (path === PROVIDE_PATH) {
       // A provide card's link (provide.ts): opened from the control bot, on a phone.
       const sctx = { timeZone: ctx.timeZone, now: ctx.now ?? Date.now(), csrf, ...(ctx.who ? { who: ctx.who } : {}) };
-      return htmlResponse(providePage(sctx, loadProvide(deps.db, secretsOf(deps), Number(url.searchParams.get("card")), takeSecretsFlash(url.searchParams.get("r"), ctx.now), sctx.now)));
+      return htmlResponse(providePage(sctx, { ...loadProvide(deps.db, secretsOf(deps), Number(url.searchParams.get("card")), takeSecretsFlash(url.searchParams.get("r"), ctx.now), sctx.now), ...(url.searchParams.get("show") ? { shown: true } : {}) }));
     }
     if (path === "/settings/secrets") {
       const sctx = { timeZone: ctx.timeZone, now: ctx.now ?? Date.now(), csrf, ...(ctx.who ? { who: ctx.who } : {}) };

@@ -3,6 +3,9 @@ import { consoleGrant, pendingProvide, provideSecret, revokeGrant, revokeProfile
 import { answerApproval } from "../control/approvals.ts";
 import { allProfiles, deleteProfile, putProfile, storedProfiles, updateProfile, VAR_NAME, type SecretSource } from "../secrets/source.ts";
 import { deleteNote, noteVarAbouts, setNote } from "../secrets/notes.ts";
+import { deleteInfo, getInfo, makeInfo, makeSecret, restoreInfo, writeInfo } from "../secrets/info.ts";
+import { provideInfo } from "../capabilities/info/request.ts";
+import { infoAnchor, infoOn, INFO_NEW_ROWS } from "./info.ts";
 import type { Db } from "../store/db.ts";
 import { IMMEDIATE } from "../store/turns.ts";
 import { GRANT_CHOICES, NEW_ROWS, type AddForm } from "./secrets.ts";
@@ -21,20 +24,41 @@ import { FLASH_MAX, FLASH_MS, type Form } from "./settings-write.ts";
  *   delete   name                             delete a profile kept here (`deleteProfile`), revoke its grants (a
  *                                             chat's and every chat's: a later profile of its name inherits none),
  *                                             and delete its note
- *   note     name, summary, details           set a profile's note (`setNote`; not secret, refused if it holds a value)
+ *   note     name, summary, details, kind?    set a profile's note (`setNote`; not secret, refused if it holds a value);
+ *                                             `kind=info`: a personal-info profile's
+ *
+ * PERSONAL INFO (info.ts; src/secrets/info.ts), whose values are not secret and are shown:
+ *   info-put     name, replace?, v_<F>, del_<F>, nn_/na_/nv_<i>   add a profile, or change its fields (an empty or
+ *                                             unchanged field keeps its value); each change recorded as a version
+ *   info-delete  name                         delete it, its history and its note
+ *   info-restore name, version                put back the values from before that version's change (recorded too)
+ *   convert      name, to = info | secret     make a secret kept here personal info (its values leave the known
+ *                                             file but for one another secret holds; every grant of it revoked), or
+ *                                             personal info a secret (its values join the known file; history gone)
  *
  * The answer is a 303 to the page with the result as a FLASH (as settings-write.ts: a random id in `?r=`, kept in
  * memory for FLASH_MS, shown once). A flash never holds a value: a refused add comes back with its name and its
  * grant choice only, and the values are typed again. A note names profiles and variables, never a value.
  */
 
-export const SECRETS_WRITES = ["/settings/secrets/put", "/settings/secrets/grant", "/settings/secrets/revoke", "/settings/secrets/delete", "/settings/secrets/note"] as const;
+export const SECRETS_WRITES = [
+  "/settings/secrets/put",
+  "/settings/secrets/grant",
+  "/settings/secrets/revoke",
+  "/settings/secrets/delete",
+  "/settings/secrets/note",
+  "/settings/secrets/info-put",
+  "/settings/secrets/info-delete",
+  "/settings/secrets/info-restore",
+  "/settings/secrets/convert",
+] as const;
 export type SecretsWrite = (typeof SECRETS_WRITES)[number];
 export const isSecretsWrite = (path: string): path is SecretsWrite => (SECRETS_WRITES as readonly string[]).includes(path);
 
 interface Flash {
   note: SettingsNote;
   adding?: AddForm;
+  addingInfo?: { name?: string };
   exp: number;
 }
 
@@ -45,12 +69,12 @@ function sweep(now: number): void {
 }
 
 /** The flash `id` names (once), if it has not expired. */
-export function takeSecretsFlash(id: string | null, now = Date.now()): { note: SettingsNote; adding?: AddForm } | undefined {
+export function takeSecretsFlash(id: string | null, now = Date.now()): { note: SettingsNote; adding?: AddForm; addingInfo?: { name?: string } } | undefined {
   sweep(now);
   if (!id) return undefined;
   const f = flashes.get(id);
   flashes.delete(id);
-  return f && { note: f.note, ...(f.adding ? { adding: f.adding } : {}) };
+  return f && { note: f.note, ...(f.adding ? { adding: f.adding } : {}), ...(f.addingInfo ? { addingInfo: f.addingInfo } : {}) };
 }
 
 function putFlash(f: Omit<Flash, "exp">, now: number): string {
@@ -68,6 +92,7 @@ interface Outcome {
   note: SettingsNote;
   anchor?: string;
   adding?: AddForm;
+  addingInfo?: { name?: string };
 }
 
 const field = (form: Form, name: string): string => {
@@ -86,15 +111,15 @@ const rawField = (form: Form, name: string): string => {
  * skipped; a row with a value and no name, or a name and no value, is refused by its number (never echoing what was
  * typed: it may be a value).
  */
-function newRowsOf(form: Form): { set: Record<string, string>; abouts: Record<string, string> } | { error: string } {
+function newRowsOf(form: Form, rows = NEW_ROWS, what = "variable"): { set: Record<string, string>; abouts: Record<string, string> } | { error: string } {
   const set: Record<string, string> = {};
   const abouts: Record<string, string> = {};
-  for (let i = 0; i < NEW_ROWS; i++) {
+  for (let i = 0; i < rows; i++) {
     const name = field(form, `nn_${i}`);
     const value = rawField(form, `nv_${i}`);
     if (!name && !value.trim()) continue;
-    if (!name) return { error: `New variable ${i + 1} has a value but no name.` };
-    if (!VAR_NAME.test(name)) return { error: `New variable ${i + 1}'s name is not a variable name (letters, digits and _, not starting with a digit).` };
+    if (!name) return { error: `New ${what} ${i + 1} has a value but no name.` };
+    if (!VAR_NAME.test(name)) return { error: `New ${what} ${i + 1}'s name is not a ${what} name (letters, digits and _, not starting with a digit).` };
     if (!value.trim()) return { error: `${name} has no value.` };
     if (name in set) return { error: `${name} is given twice.` };
     set[name] = value;
@@ -195,10 +220,94 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
     }
     case "/settings/secrets/note": {
       const name = field(form, "name");
-      const r = setNote(db, src, name, { summary: rawField(form, "summary"), details: rawField(form, "details") }, login ? `console: ${login}` : "console", now);
+      const info = field(form, "kind") === "info";
+      const on = info ? infoOn(name) : name;
+      const at = info ? infoAnchor(name) : anchor("p", name);
+      const r = setNote(db, src, name, { summary: rawField(form, "summary"), details: rawField(form, "details") }, login ? `console: ${login}` : "console", now, info ? "info" : "secret");
       // A refused note is not shown back: it may hold the value it was refused for.
-      if ("error" in r) return { note: { tone: "refused", text: r.error, on: name }, anchor: anchor("p", name) };
-      return { note: { tone: "ok", text: `Saved the note of ${name}. Her prompt has the summary from her next turn.`, on: name }, anchor: anchor("p", name) };
+      if ("error" in r) return { note: { tone: "refused", text: r.error, on }, anchor: at };
+      return { note: { tone: "ok", text: `Saved the note of ${name}. Her prompt has the summary from her next turn.`, on }, anchor: at };
+    }
+    case "/settings/secrets/info-put": {
+      const name = field(form, "name");
+      const replace = field(form, "replace") === "1";
+      const by = login ? `console: ${login}` : "console";
+      const on = replace ? infoOn(name) : "add-info";
+      const refused = (text: string): Outcome => ({ note: { tone: "refused", text, on }, anchor: replace ? infoAnchor(name) : "add-info", ...(replace ? {} : { addingInfo: { name } }) });
+      const cur = getInfo(db, src, name);
+      if (replace && !cur) return refused(`There is no personal info ${name} to change.`);
+      if (!replace && cur) return refused(`There is personal info named ${name} already: use its Edit, or another name.`);
+      const rows = newRowsOf(form, INFO_NEW_ROWS, "field");
+      if ("error" in rows) return refused(`${rows.error} Nothing was saved.`);
+      if (replace) {
+        if (!cur!.values) return refused(`${name} cannot be opened now: ${cur!.unreadable ?? "its values do not open"}.`);
+        // A field as it was, or emptied, keeps its value; Remove takes it out; what each is goes to the note.
+        const set: Record<string, string> = { ...rows.set };
+        const remove: string[] = [];
+        for (const f of cur!.fields) {
+          if (field(form, `del_${f}`) === "1") remove.push(f);
+          else {
+            const v = rawField(form, `v_${f}`).replace(/\r\n?/g, "\n").trim();
+            if (v && v !== cur!.values[f]) set[f] = v;
+          }
+        }
+        for (const n of Object.keys(rows.set)) if (cur!.fields.includes(n)) return refused(`${n} is already a field of ${name}: change it in its own box. Nothing was saved.`);
+        const nr0 = (): string => {
+          const nr = noteVarAbouts(db, src, name, rows.abouts, remove, by, now, "info");
+          return nr ? ` What each field is was not kept: ${nr.error}` : "";
+        };
+        if (!Object.keys(set).length && !remove.length) return { note: { tone: "ok", text: `Nothing changed in ${name}.${nr0()}`, on }, anchor: infoAnchor(name) };
+        const r = writeInfo(db, src, name, { set, remove }, by, now);
+        if ("error" in r) return refused(r.error);
+        const extra = nr0();
+        const what = [Object.keys(set).length ? `set ${Object.keys(set).join(", ")}` : "", remove.length ? `removed ${remove.join(", ")}` : ""].filter(Boolean).join("; ");
+        return { note: { tone: extra ? "refused" : "ok", text: `${name}: ${what}. The values before are in its History.${extra}`, on }, anchor: infoAnchor(name) };
+      }
+      if (!Object.keys(rows.set).length) return refused("Give at least one field: its name and its value.");
+      const r = writeInfo(db, src, name, { set: rows.set }, by, now);
+      if ("error" in r) return refused(r.error);
+      const nr = noteVarAbouts(db, src, name, rows.abouts, [], by, now, "info");
+      return { note: { tone: "ok", text: `Added ${name} (${r.fields.join(", ")}). She reads it with info_read, in turns you start.${nr ? ` What each field is was not kept: ${nr.error}` : ""}`, on: infoOn(name) }, anchor: infoAnchor(name) };
+    }
+    case "/settings/secrets/info-delete": {
+      const name = field(form, "name");
+      const r = deleteInfo(db, name);
+      if (!r.deleted) return { note: { tone: "refused", text: `There is no personal info ${name}.` }, anchor: "info" };
+      deleteNote(db, name, "info");
+      return { note: { tone: "ok", text: `Deleted ${name}, its history and its note.` }, anchor: "info" };
+    }
+    case "/settings/secrets/info-restore": {
+      const name = field(form, "name");
+      const r = restoreInfo(db, src, name, Number(field(form, "version")), `${login ? `console: ${login}` : "console"} (restored)`, now);
+      if ("error" in r) return { note: { tone: "refused", text: r.error, on: infoOn(name) }, anchor: infoAnchor(name) };
+      return { note: { tone: "ok", text: r.changed.length ? `${name}: restored the values from before the change of ${r.at.slice(0, 16).replace("T", " ")} UTC (${r.changed.join(", ")}). That is in its History too.` : `${name} holds those values already: nothing changed.`, on: infoOn(name) }, anchor: infoAnchor(name) };
+    }
+    case "/settings/secrets/convert": {
+      const name = field(form, "name");
+      const to = field(form, "to");
+      if (to === "info") {
+        if (!who) return { note: { tone: "refused", text: "The owner is not configured (SHUVI_OWNER_ID), so its grants cannot be revoked as him; nothing was changed.", on: name }, anchor: anchor("p", name) };
+        const r = makeInfo(db, src, name, login ? `console: ${login}` : "console", now);
+        if ("error" in r) return { note: { tone: "refused", text: r.error, on: name }, anchor: anchor("p", name) };
+        const revoked = revokeProfileGrants(db, name, who, now);
+        return {
+          note: { tone: "ok", text: `${name} is personal info now: she reads it with info_read, and its values are no longer redacted${r.kept ? ` (but for ${r.kept === 1 ? "one value" : `${r.kept} values`} another secret also holds)` : ""}.${revoked ? ` Revoked its ${revoked === 1 ? "grant" : `${revoked} grants`}.` : ""}`, on: infoOn(name) },
+          anchor: infoAnchor(name),
+        };
+      }
+      if (to === "secret") {
+        if (!who) return { note: { tone: "refused", text: "The owner is not configured (SHUVI_OWNER_ID), so grants left under its name cannot be revoked as him; nothing was changed.", on: infoOn(name) }, anchor: infoAnchor(name) };
+        const r = makeSecret(db, src, name, now);
+        if ("error" in r) return { note: { tone: "refused", text: r.error, on: infoOn(name) }, anchor: infoAnchor(name) };
+        // A grant of the name may have outlived a secret of that name (the secrets file dropped it): this one starts
+        // with none, as its confirmation says.
+        const revoked = revokeProfileGrants(db, name, who, now);
+        return {
+          note: { tone: "ok", text: `${name} is a secret now: its values are redacted from what she sees, and it has no grant (she asks with request_secret, or grant it here).${revoked ? ` Revoked ${revoked === 1 ? "a grant" : `${revoked} grants`} left under its name.` : ""} Its history was deleted.`, on: name },
+          anchor: anchor("p", name),
+        };
+      }
+      return { note: { tone: "refused", text: "Make it personal info, or a secret." } };
     }
     default:
       throw new Error(`unknown secrets write "${String(path satisfies never)}"`);
@@ -210,7 +319,7 @@ function write(db: Db, src: SecretSource, path: SecretsWrite, form: Form, who: {
  * variable and `grant`) or deny. Answers where to go: the same page, which then shows the result (the card is
  * answered) or, refused, the form again, empty, with why.
  */
-export function provideWrite(db: Db, src: SecretSource, form: Form, owner: { id: number; name: string } | null, now = Date.now()): string {
+export function provideWrite(db: Db, src: SecretSource, form: Form, owner: { id: number; name: string } | null, now = Date.now(), login?: string): string {
   const card = Number(field(form, "card"));
   const back = (note: SettingsNote) => `/settings/secrets/provide?card=${card}&r=${putFlash({ note }, now)}`;
   if (!Number.isInteger(card) || card <= 0) return "/settings/secrets";
@@ -223,6 +332,15 @@ export function provideWrite(db: Db, src: SecretSource, form: Form, owner: { id:
   }
   // Only the variables the card asks for are read: a field of another name is no part of the profile.
   const values = Object.fromEntries(p.vars.map((v) => [v, rawField(form, `v_${v}`)]));
+  if (p.info) {
+    let r: ReturnType<typeof provideInfo>;
+    try {
+      r = provideInfo(db, src, card, values, owner, `${login ? `console: ${login}` : "console"} (from her request)`, now);
+    } catch (e) {
+      r = { error: `Nothing was saved: ${e instanceof Error ? e.message : String(e)}.` };
+    }
+    return back("error" in r ? { tone: "refused", text: r.error } : { tone: "ok", text: `Saved ${r.name}${r.changed.length ? ` (${r.changed.join(", ")})` : ""}. She has been told and carries on.` });
+  }
   let r: ReturnType<typeof provideSecret>;
   try {
     r = provideSecret(db, src, card, values, field(form, "grant"), owner, now);
@@ -242,6 +360,6 @@ export function secretsWrite(db: Db, src: SecretSource, path: SecretsWrite, form
     // Never the form: it may hold a value. The store's error, as it says it.
     out = { note: { tone: "failed", text: `Failed: ${e instanceof Error ? e.message : String(e)}` } };
   }
-  const r = putFlash({ note: out.note, ...(out.adding ? { adding: out.adding } : {}) }, now);
+  const r = putFlash({ note: out.note, ...(out.adding ? { adding: out.adding } : {}), ...(out.addingInfo ? { addingInfo: out.addingInfo } : {}) }, now);
   return `/settings/secrets?r=${r}${out.anchor ? `#${out.anchor}` : ""}`;
 }

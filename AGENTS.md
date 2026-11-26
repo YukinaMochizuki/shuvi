@@ -15,7 +15,7 @@ bun scripts/e2e-openai-compat.ts # the same on an OpenAI-compatible model, again
 bun scripts/e2e-switch.ts   # one chat switched between Claude and an endpoint, lossless, lossy and clean, on the wire
 bun scripts/e2e-control.ts  # the same, plus the control bot on a second fake Bot API
 bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and the workstream desk
-bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts)
+bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts), and personal info
 bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, an unknown group approved
 bun scripts/e2e-media.ts    # videos from links against a fake porchkit (test/fake-porchkit.ts) and a fake Hangar
 bun scripts/e2e-read.ts     # reading links (read_link, save_link, the prewarm) against the same fakes, and her browser (/browse): open, click
@@ -71,6 +71,9 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | secret redaction (transcripts and a chat computer's output) | `src/secrets/redaction.ts` (requests and grants: `src/capabilities/computer/secrets.ts`) |
 | where secret profiles come from (the file, and the console's sealed under SHUVI_SECRETS_KEY), their notes | `src/secrets/source.ts` (`SecretSource`, `allProfiles`, `redactionFor`), `vault.ts`, `notes.ts` |
 | the console's Secrets page: profiles, values typed in and never shown, grants to every chat, notes | `src/console/secrets.ts` (draws), `secrets-write.ts` (the writes) |
+| personal info (data she READS: an address, a phone): its storage beside secrets (`kind = 'info'`), its history and restore, turning a secret into it and back (the known file), what never treats it as a secret | `src/secrets/info.ts` (and `source.ts` `SECRET`, `redaction.ts` `forgetValues`) |
+| her personal-info tools (`info_read`, `info_write`, `request_info`), its prompt section, its provide card | `src/capabilities/info/index.ts`, `request.ts` |
+| the console's Personal info section: masked values and Show, edit, History, convert | `src/console/info.ts` (draws), `secrets-write.ts` (the writes), `provide.ts` (her request) |
 | asking the owner for a secret there is not yet (a provide card, hidden grant options) and the phone page he answers it on | `src/capabilities/computer/secrets.ts` (PROVIDE), `src/control/approvals.ts` (`hidden`), `src/console/provide.ts`, `secrets-write.ts` (`provideWrite`) |
 | typing a secret into her browser (`browser_type` with `secret`, porchkit's `mask`), and the redaction of every browser answer | `src/capabilities/browser/index.ts` (the header's "secrets", `redactingAll`) |
 | the console: who may look (loopback, Host, tailnet login, token), its pages and design | `src/console/server.ts`, `pages.ts`, `DESIGN.md`; docs/console.md |

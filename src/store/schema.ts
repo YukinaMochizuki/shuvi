@@ -883,35 +883,75 @@ export const secretGrants = sqliteTable(
 );
 
 /**
- * Secret profiles the owner keeps in the console (src/secrets/source.ts), beside the secrets file's. The
- * variables' values are SEALED (src/secrets/vault.ts: AES-256-GCM under SHUVI_SECRETS_KEY, the name as
- * additional data); only the profile's name and its variables' NAMES are stored in the clear.
+ * Profiles the owner keeps in the console (src/secrets/source.ts), beside the secrets file's, of two KINDS:
+ * `secret` (her credentials: never shown to her, only injected or typed, and redacted everywhere) and `info`
+ * (PERSONAL INFO, src/secrets/info.ts: an address, a phone, a member number, which she reads and keeps; never
+ * redacted). A name is unique within its kind. The variables' values are SEALED either way (src/secrets/vault.ts:
+ * AES-256-GCM under SHUVI_SECRETS_KEY, the name, and for info the kind, as additional data); only the profile's
+ * name and its variables' NAMES are stored in the clear.
  */
-export const secretProfiles = sqliteTable("secret_profiles", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull().unique(),
-  /** The variables' names, in order, for showing (never a value). */
-  varNames: text("var_names", { mode: "json" }).$type<string[]>().notNull(),
-  sealed: blob("sealed", { mode: "buffer" }).notNull(),
-  createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
-  updatedAt: text("updated_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
-});
+export const secretProfiles = sqliteTable(
+  "secret_profiles",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    kind: text("kind", { enum: ["secret", "info"] }).notNull().default("secret"),
+    name: text("name").notNull(),
+    /** The variables' names, in order, for showing (never a value). */
+    varNames: text("var_names", { mode: "json" }).$type<string[]>().notNull(),
+    sealed: blob("sealed", { mode: "buffer" }).notNull(),
+    createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+    updatedAt: text("updated_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [uniqueIndex("secret_profiles_kind_name").on(t.kind, t.name)],
+);
+
+/**
+ * The history of a personal-info profile (src/secrets/info.ts): one row per change, holding the values the profile
+ * had BEFORE it (sealed as the profile's are; `{}` for its creation), when, by whom (`console: <login>`,
+ * `assistant in <chat>`), and which fields the change touched. The newest INFO_VERSIONS_KEPT per profile are kept.
+ * Gone with the profile, and when it becomes a secret.
+ */
+export const infoVersions = sqliteTable(
+  "info_versions",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    profileId: integer("profile_id")
+      .notNull()
+      .references(() => secretProfiles.id, { onDelete: "cascade" }),
+    /** The fields' names before the change, in order (never a value). */
+    varNames: text("var_names", { mode: "json" }).$type<string[]>().notNull(),
+    sealed: blob("sealed", { mode: "buffer" }).notNull(),
+    /** The fields the change set, added or removed. */
+    changed: text("changed", { mode: "json" }).$type<string[]>().notNull(),
+    by: text("by").notNull(),
+    at: text("at").notNull(),
+  },
+  (t) => [index("info_versions_profile").on(t.profileId, t.id)],
+);
 
 /**
  * What the assistant knows about a secret profile, NOT secret (src/secrets/notes.ts): a one-line `summary` that
  * is in her prompt (what it is for), and `details` she reads with `secret_info` (its scope, the account or org
- * ids it acts on, how to use it, what was tried). Keyed by the profile's name, so a profile of the secrets file
- * has one as well as one kept in the console. Written by the owner in the console or by her
- * (`update_secret_note`); never holding a secret value (refused when it does).
+ * ids it acts on, how to use it, what was tried). Keyed by the profile's kind and name, so a profile of the secrets
+ * file has one as well as one kept in the console, and a personal-info profile's (kind `info`: its summary in her
+ * prompt, its `- NAME: what it is` lines saying what each field is) is apart from a secret's of the same name.
+ * Written by the owner in the console or by her (`update_secret_note`, `info_write`); never holding a secret value
+ * (refused when it does).
  */
-export const secretNotes = sqliteTable("secret_notes", {
-  name: text("name").primaryKey(),
-  summary: text("summary").notNull().default(""),
-  details: text("details").notNull().default(""),
-  /** Who wrote it last: `console` (the owner, with his login if known) or `assistant` (with the chat). */
-  updatedBy: text("updated_by").notNull(),
-  updatedAt: text("updated_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
-});
+export const secretNotes = sqliteTable(
+  "secret_notes",
+  {
+    /** The kind of profile it is the note of: a secret's and a personal-info profile's of one name are two. */
+    kind: text("kind", { enum: ["secret", "info"] }).notNull().default("secret"),
+    name: text("name").notNull(),
+    summary: text("summary").notNull().default(""),
+    details: text("details").notNull().default(""),
+    /** Who wrote it last: `console` (the owner, with his login if known) or `assistant` (with the chat). */
+    updatedBy: text("updated_by").notNull(),
+    updatedAt: text("updated_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+  },
+  (t) => [primaryKey({ columns: [t.kind, t.name] })],
+);
 
 /**
  * Schedules (docs/design.md §10): a one-shot (`at`) or a cron expression, set in a chat. When `next_at`

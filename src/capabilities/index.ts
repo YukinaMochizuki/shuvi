@@ -1,6 +1,7 @@
 import { browser } from "./browser/index.ts";
 import { computer } from "./computer/index.ts";
 import { groups } from "./groups/index.ts";
+import { info } from "./info/index.ts";
 import { jobs } from "./jobs/index.ts";
 import { media } from "./media/index.ts";
 import { memory } from "./memory/index.ts";
@@ -40,6 +41,7 @@ export const CAPABILITIES: readonly Capability<any>[] = [
   media,
   releases,
   browser,
+  info,
 ];
 
 /** The capabilities enabled in this process, in registry order. */

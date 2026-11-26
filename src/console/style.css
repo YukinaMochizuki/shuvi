@@ -1994,6 +1994,237 @@ details.addp[open] > summary::before {
   }
 }
 
+/*
+ * Personal info (info.ts): values she reads, so shown. A profile's fields are a list of label over value on a phone,
+ * label beside value on a wide screen; its History is a list of changes, each with the values from before it.
+ */
+.tag.info {
+  background: rgb(53 198 74 / 0.14);
+  color: var(--done);
+}
+.sintro {
+  margin: var(--s1) 0 var(--s3);
+  max-width: var(--measure);
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.ifields {
+  margin: var(--s2) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  max-width: 640px;
+}
+.ifield {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s2) var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.ifield dt {
+  margin: 0;
+}
+.ilabel {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0 var(--s2);
+}
+.iabout {
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.ifield .ival {
+  margin: 0;
+  font-size: 15px;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.ifields.small .ifield {
+  padding: var(--s1) var(--s3);
+}
+.ifields.small .ival {
+  font-size: var(--t-small);
+}
+.ifield.changed {
+  border-color: rgb(234 208 132 / 0.45);
+  background: rgb(234 208 132 / 0.06);
+}
+.iform .vrow input.ivalin,
+.iform .vrow textarea.ivalin,
+.sform .vnew input.ivalin {
+  font-family: inherit;
+  margin-top: var(--s1);
+}
+.iform .vrow textarea.ivalin {
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.ihist {
+  grid-column: 1 / -1;
+  padding: var(--s3);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.ih-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s3);
+}
+.ih-list {
+  list-style: none;
+  margin: var(--s2) 0 0;
+  padding: 0;
+}
+.ih-item {
+  padding: var(--s3) 0;
+  border-top: 1px solid var(--line-soft);
+}
+.ih-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--s2);
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+}
+.ih-head b {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ih-what {
+  margin-top: 2px;
+  font-size: var(--t-small);
+  color: var(--ink);
+}
+.ih-before {
+  margin-top: var(--s2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  align-items: flex-start;
+}
+.ih-before .ifields {
+  margin: 0;
+  width: 100%;
+}
+.confirm .clist {
+  margin: var(--s2) 0 0;
+  padding-left: 1.2em;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  max-width: var(--measure);
+}
+.confirm .clist b {
+  color: var(--ink);
+  font-weight: 600;
+}
+/*
+ * Masked values: dots until the profile's Show is on. The toggle is a checkbox at the head of the row (`.ishow-t`, out
+ * of the row's grid), read here with :has; a browser without :has gets the `?show=` link instead, which draws the
+ * row `.shown`.
+ */
+.irow {
+  position: relative;
+}
+.ishow-t {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+.ishow {
+  margin-top: var(--s2);
+}
+.ishow .btn {
+  min-height: 32px;
+}
+.ival .iv,
+.ishow-a,
+.ishow-l .when-shown {
+  display: none;
+}
+.ival .imask {
+  color: var(--ink-faint);
+  letter-spacing: 0.12em;
+}
+.iform .vrow .imasked {
+  -webkit-text-security: disc;
+}
+.irow:has(> .ishow-t:checked) .ival .iv {
+  display: inline;
+}
+.irow:has(> .ishow-t:checked) .ival .imask,
+.irow:has(> .ishow-t:checked) .ishow-l .when-hidden {
+  display: none;
+}
+.irow:has(> .ishow-t:checked) .ishow-l .when-shown {
+  display: inline;
+}
+.irow:has(> .ishow-t:checked) .iform .vrow .imasked {
+  -webkit-text-security: none;
+}
+.irow:has(> .ishow-t:focus-visible) .ishow-l {
+  outline: 2px solid var(--accent);
+}
+@supports not selector(:has(a)) {
+  .ishow-l {
+    display: none;
+  }
+  .ishow-a {
+    display: inline-flex;
+  }
+  .irow.shown .ival .iv {
+    display: inline;
+  }
+  .irow.shown .ival .imask {
+    display: none;
+  }
+  .irow.shown .iform .vrow .imasked {
+    -webkit-text-security: none;
+  }
+}
+.pv-kind {
+  font-size: var(--t-meta);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--done);
+}
+.pv-now {
+  font-size: var(--t-small);
+  color: var(--ink-dim);
+  overflow-wrap: anywhere;
+}
+@media (min-width: 720px) {
+  .ifield {
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--s4);
+  }
+  .ifield dt {
+    flex: 0 0 180px;
+  }
+  .ilabel {
+    flex-direction: column;
+    gap: 0;
+  }
+}
+
 /* ---- deleting messages (pages.ts `pickable`, `deleteBar`; console.js) ---------------------------------- */
 /* A deletable bubble. Idle nothing shows; on hover (or focus) a faint "⋯" at its top right; while selecting, a
    round check on its left, in a slot kept for it so nothing moves. */
