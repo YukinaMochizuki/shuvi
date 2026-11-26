@@ -6,9 +6,10 @@ import type { Db } from "../store/db.ts";
 import { approvals } from "../store/schema.ts";
 import { eq } from "drizzle-orm";
 import { span, whenDay } from "./chat-extras.ts";
-import { ago, href, html, page, raw, when, type Raw } from "./html.ts";
+import { ago, href, html, page, when, type Raw } from "./html.ts";
+import { kvTable } from "./kv-table.ts";
 import { action, anchor, csrfField, inPage, rowNote, writes, type SettingsContext, type SettingsNote } from "./settings.ts";
-import { confirmToInfo, infoSection, loadInfo, type InfoView } from "./info.ts";
+import { confirmToInfo, infoSection, loadInfo, noteLines, rowMenu, type InfoView } from "./info.ts";
 
 /**
  * The Secrets page (`/settings/secrets`): her credentials. Every secret profile there is, the secrets file's (read
@@ -17,9 +18,10 @@ import { confirmToInfo, infoSection, loadInfo, type InfoView } from "./info.ts";
  * every chat's computer for the owner's own requests (capabilities/computer/secrets.ts), each with its Revoke.
  *
  * This file READS and draws; the writes are secrets-write.ts (`POST /settings/secrets/<verb>`, CSRF-checked as
- * every console write is). A value is only ever typed in (adding a profile, replacing its values) and never drawn
- * back: a refused form comes back with its name and its grant choice, never its values. Delete is a link (GET
- * `?delete=`) to a confirmation, as Settings' Remove is.
+ * every console write is). A value is only ever typed in (adding a profile, replacing its values: the key/value
+ * table of kv-table.ts, shared with personal info) and never drawn back: a refused form comes back with its name and
+ * its grant choice, never its values (nor its summary, which may hold one). Delete is a link (GET `?delete=`) to a
+ * confirmation, as Settings' Remove is.
  *
  * Below the secrets, the PERSONAL INFO section (info.ts): data she reads, whose values are shown. A secret kept here
  * can be made personal info, and back (`?convert=<name>&to=info|secret`, a confirmation saying what happens).
@@ -173,73 +175,48 @@ function profileRow(ctx: SettingsContext, v: SecretsPageView, p: ProfileRow): Ra
       ? html`<p class="why-line c-failed">Not given out: ${p.unreadable}.</p>`
       : "";
   const usable = !p.shadowed && !p.unreadable;
+  // Primary: Replace values and the grant; the rest in the row's "⋯" menu.
+  const store = p.from === "store";
+  const menu = rowMenu(p.name, [
+    p.shadowed ? "" : html`<a class="mi${noting ? " on" : ""}" href="${noting ? PAGE : href(PAGE, { note: p.name })}#${id}"${inPage}>${p.note ? "Edit note" : "Add note"}</a>`,
+    store && !v.keyProblem && !p.unreadable ? html`<a class="mi" href="${href(PAGE, { convert: p.name, to: "info" })}#${id}"${inPage}>Make it personal info</a>` : "",
+    store ? html`<a class="mi danger" href="${href(PAGE, { delete: p.name })}#${id}"${inPage}>Delete…</a>` : "",
+  ]);
   const acts = confirming || converting
     ? ""
-    : html`${usable && !p.grants.some((g) => !g.expiresAt) ? grantForm(ctx, p.name) : ""}${
-        p.shadowed ? "" : html`<a class="btn${noting ? " on" : ""}" href="${noting ? PAGE : href(PAGE, { note: p.name })}#${id}"${inPage}>${p.note ? "Edit note" : "Add note"}</a>`
-      }${
-        p.from === "store"
-          ? html`${v.keyProblem ? "" : html`<a class="btn${editing ? " on" : ""}" href="${editing ? PAGE : href(PAGE, { edit: p.name })}#${id}"${inPage}>Replace values</a>`}${v.keyProblem || p.unreadable ? "" : html`<a class="btn" href="${href(PAGE, { convert: p.name, to: "info" })}#${id}"${inPage}>Make it personal info</a>`}<a class="btn danger" href="${href(PAGE, { delete: p.name })}#${id}"${inPage}>Delete</a>`
-          : ""
-      }`;
+    : html`${store && !v.keyProblem ? html`<a class="btn${editing ? " on" : ""}" href="${editing ? PAGE : href(PAGE, { edit: p.name })}#${id}"${inPage}>Replace values</a>` : ""}${
+        usable && !p.grants.some((g) => !g.expiresAt) ? grantForm(ctx, p.name) : ""
+      }${menu}`;
   return html`<div class="srow${p.unreadable || p.shadowed ? " warn" : ""}${confirming || converting ? " confirming" : ""}" id="${id}">
 <div class="smain"><div class="sl1"><span class="sname mono">${p.name}</span><span class="tag">${p.from === "file" ? "secrets file" : "kept here"}</span></div>
 <p class="sfacts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
-${problem}${noteLines(ctx, p)}${p.grants.map((g) => grantLine(ctx, g))}${p.from === "file" ? html`<p class="uses">Its values are changed in the secrets file, where shuvi is deployed.</p>` : ""}
+${problem}${noteLines(ctx, p.note)}${p.grants.map((g) => grantLine(ctx, g))}${p.from === "file" ? html`<p class="uses">Its values are changed in the secrets file, where shuvi is deployed.</p>` : ""}
 ${rowNote(v, p.name)}</div>
 <div class="sact">${acts}</div>
 ${editing ? replaceForm(ctx, p) : ""}${noting ? noteForm(ctx, p) : ""}${confirming ? confirmDelete(ctx, p) : ""}${converting ? confirmToInfo(ctx, p, `${PAGE}#${id}`) : ""}
 </div>`;
 }
 
-/** The note under a profile: its summary (what her prompt says), and that there are details, with who wrote it. */
-function noteLines(ctx: SettingsContext, p: ProfileRow): Raw | "" {
-  const n = p.note;
-  if (!n || (!n.summary && !n.details)) return "";
-  const by = html` <span class="faint" title="${when(n.updatedAt, ctx.timeZone, true)}">· ${n.updatedBy.startsWith("assistant") ? "written by her" : "written by you"} ${ago(n.updatedAt, ctx.now)}</span>`;
-  return html`<p class="note-sum">${n.summary || html`<span class="faint">no summary</span>`}${n.details ? html` <span class="faint">· ${plural(n.details.split("\n").length, "line")} of details</span>` : ""}${by}</p>`;
-}
-
 function noteForm(ctx: SettingsContext, p: ProfileRow): Raw {
   const path = `${PAGE}/note`;
   return html`<form class="sform edit note" method="post" action="${path}"${writes(path)}>${csrfField(ctx)}<input type="hidden" name="name" value="${p.name}">
-<label>Summary<input type="text" name="summary" maxlength="${SUMMARY_MAX}" value="${p.note?.summary ?? ""}" placeholder="GitHub token for the example-org repos (issues, PRs)" autocomplete="off"><span class="hint">One line, in her prompt beside the name: what it is for.</span></label>
-<label>Details<textarea name="details" rows="8" maxlength="${DETAILS_MAX}" placeholder="Scope: repo, read:org. Acts as example-bot in example-org (id 1234). Use gh with GH_TOKEN; …">${p.note?.details ?? ""}</textarea><span class="hint">What she reads with <span class="mono">secret_info</span>: scope, account or org ids, how to use it, what failed. She can update it too. Never a secret value: a note holding one is refused.</span></label>
+<label>Summary<input type="text" name="summary" maxlength="${SUMMARY_MAX}" value="${p.note?.summary ?? ""}" placeholder="what it is for, in one line" autocomplete="off"><span class="hint">One line, in her prompt beside the name: what it is for.</span></label>
+<label>Details<textarea name="details" rows="8" maxlength="${DETAILS_MAX}" placeholder="Variables:&#10;- KEY: what it is&#10;&#10;Scope, the account it acts as, how to use it…">${p.note?.details ?? ""}</textarea><span class="hint">What she reads with <span class="mono">secret_info</span>: scope, account or org ids, how to use it, what failed. She can update it too. Never a secret value: a note holding one is refused.</span></label>
 <div class="fbtns"><button type="submit" class="btn primary">Save note</button><a class="btn" href="${PAGE}#${anchor("p", p.name)}"${inPage}>Cancel</a></div>
 </form>`;
 }
 
-/** How many new-variable rows a form has: `shown` of them open, the rest under "More variables". */
-export const NEW_ROWS = 6;
-
-/** Inputs for a value: never filled in, never remembered by the browser. */
-const valueAttrs = raw(` autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"`);
-
-/** One new variable: its name, what it is (kept in the note), its value. Fields `nn_<i>`, `na_<i>`, `nv_<i>`. */
-function newRow(i: number, example?: { name: string; about: string; value: string }): Raw {
-  return html`<div class="vrow vnew"><div class="vnew-names"><input type="text" name="nn_${String(i)}" class="mono" maxlength="64" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="${example?.name ?? "NAME"}" aria-label="variable name"${valueAttrs}><input type="text" name="na_${String(i)}" maxlength="120" placeholder="${example?.about ?? "what it is (for her and for you)"}" aria-label="what it is"></div><input type="text" name="nv_${String(i)}" class="vval" placeholder="${example?.value ?? "value"}" aria-label="value"${valueAttrs}></div>`;
-}
-
-/** `NEW_ROWS` new-variable rows, `shown` of them open. */
-function newRows(shown: number, example?: { name: string; about: string; value: string }): Raw {
-  const rows = Array.from({ length: NEW_ROWS }, (_, i) => newRow(i, i === 0 ? example : undefined));
-  return html`${rows.slice(0, shown)}${shown < NEW_ROWS ? html`<details class="vmore"><summary>More variables</summary>${rows.slice(shown)}</details>` : ""}`;
-}
-
 /**
- * Change a profile's values: one field per variable, under what it is (the note's `- NAME: ...` lines, else its
- * name). An empty field keeps the value it has; "Remove" takes the variable out; new ones go in the rows below.
- * Nothing typed here is ever shown back.
+ * Change a profile's values: its keys in the table (kv-table.ts), each with its description (the note's
+ * `- NAME: ...` line) and an empty value box. An empty box keeps the value it has; ✕ takes the key out; new keys go
+ * in the empty row and those "+ Add a row" adds. Nothing typed here is ever shown back.
  */
 function replaceForm(ctx: SettingsContext, p: ProfileRow): Raw {
   const path = `${PAGE}/put`;
   const abouts = varAbouts(p.note);
-  return html`<form class="sform vform" method="post" action="${path}"${writes(path)}>${csrfField(ctx)}<input type="hidden" name="name" value="${p.name}"><input type="hidden" name="replace" value="1">
-${p.vars.map(
-  (n) => html`<div class="vrow"><div class="vtop"><span class="vlabel">${abouts[n] ? html`<span class="vabout">${abouts[n]}</span><span class="vname mono">${n}</span>` : html`<span class="vabout mono">${n}</span>`}</span><label class="vdel"><input type="checkbox" name="del_${n}" value="1"> Remove</label></div><input type="text" name="v_${n}" class="vval" placeholder="unchanged" aria-label="new value of ${n}"${valueAttrs}></div>`,
-)}
-<p class="hint">Fill in only what changes: an empty field keeps its value. The old values stay redacted from what she sees. What each one is comes from the note (Edit note).</p>
-<div class="vadd"><span class="vhead">Add a variable</span>${newRows(1)}</div>
+  return html`<form class="sform kvform" method="post" action="${path}"${writes(path)}>${csrfField(ctx)}<input type="hidden" name="name" value="${p.name}"><input type="hidden" name="replace" value="1">
+${kvTable("secret", p.vars.map((n) => ({ key: n, ...(abouts[n] ? { about: abouts[n] } : {}) })))}
+<p class="hint">Fill in only what changes: an empty value keeps its value. The old values stay redacted from what she sees.</p>
 <div class="fbtns"><button type="submit" class="btn primary">Save</button><a class="btn" href="${PAGE}#${anchor("p", p.name)}"${inPage}>Cancel</a></div>
 </form>`;
 }
@@ -256,10 +233,12 @@ function addSection(ctx: SettingsContext, v: SecretsPageView): Raw {
     ? html`${rowNote(v, "add")}<p class="notice refused">Profiles cannot be kept here: ${v.keyProblem}. Set it where shuvi is deployed (32 bytes, base64: <span class="mono">openssl rand -base64 32</span>) and restart; until then, only the secrets file's profiles are there.</p>`
     : html`<details class="addp" id="add-profile" ${v.adding || !v.profiles.length ? "open" : ""}><summary>New profile</summary>
 ${rowNote(v, "add")}
-<form class="sform" method="post" action="${path}"${writes(path)}>${csrfField(ctx)}
-<label>Name<input type="text" name="name" required pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,63}" maxlength="64" value="${f.name ?? ""}" placeholder="github" class="mono" autocomplete="off"><span class="hint">what she asks for, and what a provider's key reference starts with (<span class="mono">github.GH_TOKEN</span>)</span></label>
-<div class="vadd"><span class="vhead">Variables</span>${newRows(2, { name: "GH_TOKEN", about: "GitHub token for the example-org repos", value: "ghp_…" })}<span class="hint">A name, what it is (kept in the note, for her and for you), and its value. Values are sealed when saved and never shown again: not here, not to her.</span></div>
-<label>Give it to her<select name="grant"><option value="" ${!f.grant ? "selected" : ""}>not yet: she asks when she needs it</option>${GRANT_CHOICES.map((c) => html`<option value="${c.id}" ${f.grant === c.id ? "selected" : ""}>every chat, ${c.label}</option>`)}</select><span class="hint">Every chat's computer gets it, in turns you start only, never an operator's.</span></label>
+<form class="sform kvform" method="post" action="${path}"${writes(path)}>${csrfField(ctx)}
+<div class="kvtop"><label>Profile<input type="text" name="name" required pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,63}" maxlength="64" value="${f.name ?? ""}" placeholder="example" class="mono" autocomplete="off"><span class="hint">what she asks for, and what a key reference starts with (<span class="mono">example.KEY</span>)</span></label>
+<label>Summary<input type="text" name="summary" maxlength="${SUMMARY_MAX}" placeholder="what it is for, in one line" autocomplete="off"><span class="hint">in her prompt beside the name; never a value</span></label></div>
+${kvTable("secret")}
+<p class="hint">Each key with its value; the description goes into the note, for her and for you. Values are sealed when saved and never shown again: not here, not to her.</p>
+<label class="kvgrant">Give it to her<select name="grant"><option value="" ${!f.grant ? "selected" : ""}>not yet: she asks when she needs it</option>${GRANT_CHOICES.map((c) => html`<option value="${c.id}" ${f.grant === c.id ? "selected" : ""}>every chat, ${c.label}</option>`)}</select><span class="hint">Every chat's computer gets it, in turns you start only, never an operator's.</span></label>
 <div class="fbtns"><button type="submit" class="btn primary">Add profile</button></div>
 </form></details>`;
   return html`<section class="sset" id="add"><div class="shd"><h2>Add a secret</h2><span class="meta">kept here, sealed</span></div>${body}</section>`;

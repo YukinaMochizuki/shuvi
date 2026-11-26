@@ -1890,113 +1890,308 @@ details.addp[open] > summary::before {
   gap: var(--s2);
 }
 /*
- * A profile's values, one field per variable (secrets.ts `replaceForm`, the add form's rows). One column on a phone;
- * on a wide screen the value takes the room and what it is, and Remove, sit beside it.
+ * The key/value table (kv-table.ts) of the Secrets page's forms: a row per key on one line, key | description |
+ * value | ✕, under one row of column headers, with `.sform`'s inputs (30px, 13px). The form is the only frame: no
+ * box per row. Under the phone breakpoint a row stacks (key and description, the value under them) at 16px, since
+ * iOS zooms into a focused input under 16px. "+ Add a row" and a new row's ✕ are script's (console.js).
  */
-.sform.vform {
+.sform.kvform {
   display: flex;
   flex-direction: column;
   gap: var(--s3);
 }
-.vrow {
+.kvtop {
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  gap: var(--s3) var(--s4);
+}
+.kvtab {
+  --kv-cols: minmax(110px, 200px) minmax(0, 1fr) minmax(0, 1.3fr) 26px;
   display: flex;
   flex-direction: column;
+  gap: var(--s1);
+}
+.kvh,
+.kvr {
+  display: grid;
+  grid-template-columns: var(--kv-cols);
   gap: var(--s2);
-  padding: var(--s3);
-  background: var(--surface);
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
+  align-items: center;
 }
-.vlabel {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.vabout {
-  font-size: var(--t-ui);
-  color: var(--ink);
-  font-weight: 500;
-}
-.vname {
+.kvh {
   font-size: var(--t-meta);
   color: var(--ink-faint);
 }
-.vrow input[type="text"] {
-  width: 100%;
-  height: 40px;
-  padding: 0 var(--s3);
-  font-size: 16px;
+span.kvk {
+  font-size: 12.5px;
   color: var(--ink);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  word-break: break-all;
 }
-.vrow input[type="text"]:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-.vrow input.vval {
-  font-family: var(--mono);
-  margin-top: var(--s1);
-}
-.vtop {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: var(--s3);
-}
-.vdel {
-  display: flex;
-  align-items: center;
-  gap: var(--s1);
-  white-space: nowrap;
-  color: var(--refused);
+.sform .kvr textarea {
   font-size: var(--t-small);
-  min-height: 32px;
+  font-family: inherit;
+  line-height: 1.4;
 }
-.vdel input {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--refused);
-}
-.vadd {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-}
-.vhead {
-  font-size: var(--t-meta);
-  color: var(--ink-dim);
-}
-.vnew-names {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-}
-.vmore summary {
+.kvx {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 12px;
   cursor: pointer;
+}
+.kvx:hover {
+  color: var(--refused);
+  background: var(--surface-3);
+}
+.kvx input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+.kvx:has(input:checked) {
+  color: var(--surface);
+  background: var(--refused);
+}
+.kvx:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+}
+/* An existing key marked to go: its row struck through until saved. */
+.kvr:has(.kvx input:checked) > :not(.kvx) {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+html:not(.js) .kvdrop {
+  visibility: hidden;
+}
+.kvadd {
+  display: none;
+  width: fit-content;
+  padding: 2px 0;
+  border: 0;
+  background: none;
   color: var(--accent);
   font-size: var(--t-small);
-  padding: var(--s1) 0;
+  cursor: pointer;
 }
-.vmore[open] {
+.js .kvadd {
+  display: inline-flex;
+}
+.kvgrant {
+  max-width: 480px;
+}
+/* A masked value's own eye (kv-table.ts `infoValue`): inside the end of its box; pressed, that box shows its value. */
+.kvvw {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+.sform .kvvw input[type="text"],
+.sform .kvvw textarea {
+  padding-right: 34px;
+}
+.kveye {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.kveye:hover,
+.kveye:focus-visible {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+.kveye:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.kveye[aria-pressed="false"] .slash {
+  display: none;
+}
+.kveye[aria-pressed="true"] {
+  color: var(--accent);
+}
+.kvvw.on .imasked {
+  -webkit-text-security: none;
+}
+html:not(.js) .kveye {
+  display: none;
+}
+/* A secret's primary actions (Replace values, the grant's duration and button) and its ⋯ on one line. */
+.secrets .sact {
+  max-width: 520px;
+}
+/* A profile row's "⋯" menu (info.ts `rowMenu`): the actions past its primary ones; console.js closes it. */
+.rmenu {
+  position: relative;
+}
+.rmenu > summary {
+  list-style: none;
+  min-width: 30px;
+  justify-content: center;
+  letter-spacing: 0.05em;
+}
+.rmenu > summary::-webkit-details-marker {
+  display: none;
+}
+.rmenu[open] > summary {
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.rmenu-list {
+  position: absolute;
+  right: 0;
+  top: 30px;
+  z-index: 20;
+  min-width: 190px;
   display: flex;
   flex-direction: column;
-  gap: var(--s2);
+  padding: var(--s1);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+  font-size: var(--t-small);
 }
-@media (min-width: 720px) {
-  .vnew-names {
-    flex-direction: row;
+.rmenu.flip .rmenu-list {
+  right: auto;
+  left: 0;
+}
+.rmenu-list .mi {
+  padding: 6px var(--s2);
+  border-radius: 4px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.rmenu-list .mi.on {
+  color: var(--accent);
+}
+.rmenu-list .mi.danger {
+  color: var(--failed);
+}
+.rmenu-list .mi:hover,
+.rmenu-list .mi:focus-visible {
+  background: var(--surface-3);
+  text-decoration: none;
+}
+/* Read only, in the table's columns: a profile's values once shown, History's values from before a change. */
+.kvlist {
+  margin: var(--s2) 0 0;
+  display: flex;
+  flex-direction: column;
+  max-width: 760px;
+  font-size: var(--t-small);
+}
+.kvli {
+  display: grid;
+  grid-template-columns: minmax(110px, 200px) minmax(0, 1fr) minmax(0, 1.3fr);
+  gap: var(--s2);
+  padding: 3px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.kvli > * {
+  margin: 0;
+  min-width: 0;
+}
+.kvli dt {
+  font-size: 12.5px;
+  color: var(--ink);
+  word-break: break-all;
+}
+.kvla {
+  color: var(--ink-dim);
+}
+.kvli .ival {
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.kvli.changed {
+  background: rgb(234 208 132 / 0.06);
+}
+.kvli.changed dt {
+  color: var(--lost);
+}
+@media (max-width: 760px) {
+  .kvtop {
+    grid-template-columns: minmax(0, 1fr);
   }
-  .vnew-names input:first-child {
-    max-width: 220px;
+  .kvh {
+    display: none;
+  }
+  .kvr {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) 32px;
+    grid-template-areas: "k d x" "v v v";
+    row-gap: var(--s1);
+    padding-bottom: var(--s2);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .kvr > .kvk {
+    grid-area: k;
+  }
+  .kvr > .kvd {
+    grid-area: d;
+  }
+  .kvr > .kvv {
+    grid-area: v;
+  }
+  .kvr > .kvx {
+    grid-area: x;
+    width: 32px;
+    height: 32px;
+  }
+  .sform.kvform input[type="text"],
+  .sform.kvform select,
+  .sform .kvr textarea {
+    height: 40px;
+    font-size: 16px;
+  }
+  .sform .kvr textarea {
+    height: auto;
+  }
+  /* A tap target of 40px: the box's whole height at its end. */
+  .sform .kvvw input[type="text"],
+  .sform .kvvw textarea {
+    padding-right: 46px;
+  }
+  .kveye {
+    top: 0;
+    right: 0;
+    width: 44px;
+    height: 40px;
+    border-radius: 0 6px 6px 0;
+  }
+  .kveye svg {
+    width: 20px;
+    height: 20px;
+  }
+  .kvli {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  }
+  .kvli .ival {
+    grid-column: 1 / -1;
   }
 }
 
 /*
- * Personal info (info.ts): values she reads, so shown. A profile's fields are a list of label over value on a phone,
- * label beside value on a wide screen; its History is a list of changes, each with the values from before it.
+ * Personal info (info.ts): values she reads, so shown once asked for (`.kvlist.vals`, below); its History is a list
+ * of changes, each with the values from before it.
  */
 .tag.info {
   background: rgb(53 198 74 / 0.14);
@@ -2008,68 +2203,9 @@ details.addp[open] > summary::before {
   font-size: var(--t-small);
   color: var(--ink-dim);
 }
-.ifields {
-  margin: var(--s2) 0 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s2);
-  max-width: 640px;
-}
-.ifield {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: var(--s2) var(--s3);
-  background: var(--surface);
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-}
-.ifield dt {
-  margin: 0;
-}
-.ilabel {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 0 var(--s2);
-}
-.iabout {
-  font-size: var(--t-small);
+.ih-label {
+  font-size: var(--t-meta);
   color: var(--ink-dim);
-}
-.ifield .ival {
-  margin: 0;
-  font-size: 15px;
-  color: var(--ink);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: all;
-}
-.ifields.small .ifield {
-  padding: var(--s1) var(--s3);
-}
-.ifields.small .ival {
-  font-size: var(--t-small);
-}
-.ifield.changed {
-  border-color: rgb(234 208 132 / 0.45);
-  background: rgb(234 208 132 / 0.06);
-}
-.iform .vrow input.ivalin,
-.iform .vrow textarea.ivalin,
-.sform .vnew input.ivalin {
-  font-family: inherit;
-  margin-top: var(--s1);
-}
-.iform .vrow textarea.ivalin {
-  width: 100%;
-  padding: var(--s2) var(--s3);
-  font-size: 16px;
-  line-height: 1.4;
-  color: var(--ink);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 6px;
 }
 .ihist {
   grid-column: 1 / -1;
@@ -2117,7 +2253,7 @@ details.addp[open] > summary::before {
   gap: var(--s2);
   align-items: flex-start;
 }
-.ih-before .ifields {
+.ih-before .kvlist {
   margin: 0;
   width: 100%;
 }
@@ -2163,8 +2299,14 @@ details.addp[open] > summary::before {
   color: var(--ink-faint);
   letter-spacing: 0.12em;
 }
-.iform .vrow .imasked {
+.kvtab .imasked {
   -webkit-text-security: disc;
+}
+.kvlist.vals {
+  display: none;
+}
+.irow:has(> .ishow-t:checked) .kvlist.vals {
+  display: flex;
 }
 .irow:has(> .ishow-t:checked) .ival .iv {
   display: inline;
@@ -2176,7 +2318,7 @@ details.addp[open] > summary::before {
 .irow:has(> .ishow-t:checked) .ishow-l .when-shown {
   display: inline;
 }
-.irow:has(> .ishow-t:checked) .iform .vrow .imasked {
+.irow:has(> .ishow-t:checked) .kvtab .imasked {
   -webkit-text-security: none;
 }
 .irow:has(> .ishow-t:focus-visible) .ishow-l {
@@ -2195,8 +2337,11 @@ details.addp[open] > summary::before {
   .irow.shown .ival .imask {
     display: none;
   }
-  .irow.shown .iform .vrow .imasked {
+  .irow.shown .kvtab .imasked {
     -webkit-text-security: none;
+  }
+  .irow.shown .kvlist.vals {
+    display: flex;
   }
 }
 .pv-kind {
@@ -2209,20 +2354,6 @@ details.addp[open] > summary::before {
   font-size: var(--t-small);
   color: var(--ink-dim);
   overflow-wrap: anywhere;
-}
-@media (min-width: 720px) {
-  .ifield {
-    flex-direction: row;
-    align-items: baseline;
-    gap: var(--s4);
-  }
-  .ifield dt {
-    flex: 0 0 180px;
-  }
-  .ilabel {
-    flex-direction: column;
-    gap: 0;
-  }
 }
 
 /* ---- deleting messages (pages.ts `pickable`, `deleteBar`; console.js) ---------------------------------- */

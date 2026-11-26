@@ -1,6 +1,7 @@
 // The console's own script (same origin; the pages work without it, and without htmx). Copy buttons, j / k to
 // move through the turn list, a line when the console cannot be reached, selecting messages to delete
 // (below: the "⋯" menu, the pill, the snackbar with its undo; pages.ts `pickable` / `deleteBar`, delete-write.ts),
+// the Secrets page's key/value table (kv-table.ts: adding and removing rows, a value's eye) and its rows' "⋯" menus,
 // and live pages (the stream from /live that keeps a chat's log, a segment, a turn and the list current; live.ts), and
 // last, registering the app's service worker (pwa.ts).
 // htmx (html.ts `page`) swaps pages in place, so nothing here holds on to an element of a page: clicks and keys
@@ -45,6 +46,59 @@ document.addEventListener("click", async (e) => {
     b.textContent = "copy failed";
   }
   setTimeout(() => (b.textContent = "copy"), 1200);
+});
+
+// The Secrets page's key/value table (kv-table.ts): "+ Add a row" puts in its template's row, its fields numbered with
+// the table's next index, and focuses its key; a new row's ✕ takes it out. No limit here: the server bounds a write.
+document.addEventListener("click", (e) => {
+  const t = e.target instanceof Element ? e.target : null;
+  const drop = t?.closest(".kvr.kvnew .kvdrop");
+  if (drop) return void drop.closest(".kvr").remove();
+  const kv = t?.closest("button.kvadd")?.form?.querySelector(".kvtab");
+  const tpl = kv?.querySelector("template.kvt");
+  if (!tpl) return;
+  const i = Number(kv.dataset.next) || 1;
+  kv.dataset.next = String(i + 1);
+  const row = tpl.content.firstElementChild.cloneNode(true);
+  for (const el of row.querySelectorAll("[name]")) el.name = el.name.replace("__i__", String(i));
+  kv.insertBefore(row, tpl);
+  row.querySelector("input")?.focus();
+});
+
+// A masked value's own eye (kv-table.ts): shows or masks that one box again.
+document.addEventListener("click", (e) => {
+  const eye = e.target instanceof Element ? e.target.closest("button.kveye") : null;
+  if (!eye) return;
+  const on = eye.getAttribute("aria-pressed") !== "true";
+  eye.setAttribute("aria-pressed", String(on));
+  eye.title = on ? "Hide this value" : "Show this value";
+  eye.setAttribute("aria-label", eye.getAttribute("aria-label").replace(on ? /^show/ : /^hide/, on ? "hide" : "show"));
+  eye.closest(".kvvw")?.classList.toggle("on", on);
+});
+
+// A profile row's "⋯" menu on the Secrets page (info.ts `rowMenu`): one open at a time, closed by a click outside it or
+// Escape (focus back on its ⋯); opened where it fits (`.flip`: from its left edge when the right would leave the page).
+function closeRowMenus(except) {
+  for (const d of document.querySelectorAll("details.rmenu[open]")) if (d !== except) d.open = false;
+}
+document.addEventListener("click", (e) => closeRowMenus(e.target instanceof Element ? e.target.closest("details.rmenu") : null));
+document.addEventListener(
+  "toggle",
+  (e) => {
+    const d = e.target;
+    if (!(d instanceof HTMLDetailsElement) || !d.matches(".rmenu") || !d.open) return;
+    d.classList.remove("flip");
+    const list = d.querySelector(".rmenu-list");
+    if (list && list.getBoundingClientRect().left < 4) d.classList.add("flip");
+  },
+  true,
+);
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const open = document.querySelector("details.rmenu[open]");
+  if (!open) return;
+  closeRowMenus();
+  open.querySelector("summary")?.focus();
 });
 
 document.addEventListener("change", (e) => {

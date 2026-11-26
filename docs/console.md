@@ -153,12 +153,20 @@ Without script, reload the page to see one finish.
 - **Profiles**: every secret profile, the secrets file's (read only: its values change where shuvi is deployed)
   and those kept here, with their variables' names, never a value. A profile kept here is sealed in the store
   under `SHUVI_SECRETS_KEY`; without the key, or under another one, it is marked and given to nothing.
-- **Add a profile**: a name, then one row per variable (its name, what it is, its value; what it is goes into
-  the note), and optionally a grant to every chat. **Replace values**: one field per variable under what it is;
-  an empty field keeps its value, Remove takes it out, new ones go in the rows below. Values are only ever typed
-  in: a refused form comes back with its name and grant choice, never its values; a replaced or deleted value
-  stays redacted. **Delete** asks
-  first, and deletes the profile's note too.
+- **Each profile is a row**: its name, where it is kept, its keys, its note's summary; beside it its primary
+  actions (**Replace values**, the grant to every chat), and the rest in its **⋯** menu (the note, Make it personal
+  info, Delete), which a click outside or Escape closes.
+- **The key/value table** (`src/console/kv-table.ts`), the same in all four forms (a new secret, Replace values, new
+  personal info, editing personal info): one line per key on a wide screen, KEY | what it is | value | ✕, under one
+  row of headers; on a phone a row stacks (key and what it is, the value under them). A form starts with one empty
+  row; **+ Add a row** adds another each time, and a new row's ✕ takes it out (script; the server reads any number of
+  rows, up to 100 at once). What each key is goes into the note as its `- KEY: what it is` line, and emptying it
+  takes the line out; one holding a secret value is refused, as a note is.
+- **Add a profile**: a name, a one-line summary (the note's), the table, and optionally a grant to every chat.
+  **Replace values**: the table with the profile's keys, each value box empty ("unchanged"); an empty box keeps its
+  value, ✕ marks a key to remove. Values are only ever typed in: a refused form comes back with its name and grant
+  choice, never its values or its summary; a replaced or deleted value stays redacted. **Delete** asks first, and
+  deletes the profile's note too.
 - **Grant to every chat**, for 4 hours, 1 day, 3 days or until revoked: an owner grant, which every chat's
   computer gets in calls made for you, never in a group operator's. Each grant to every chat is listed under
   its profile, with **Revoke now**, which presses its card in the control bot.
@@ -183,19 +191,22 @@ The second half of `/settings/secrets` (`src/console/info.ts` draws it, `secrets
 secrets above, which she never sees. She reads it with `info_read` in any chat, in turns you start, and keeps what
 you tell her with `info_write`.
 
-- **Each profile**: its fields, each under what it is (its note's `- NAME: what it is` lines), and who changed it
-  last. The values are **masked** (a fixed row of dots) until you press **Show values** on that profile: a toggle
-  the page's CSS reads, so it shows at once, with no request and no script (`?show=<name>` draws them shown where
-  the browser cannot). They are on the page only inside those spans and the edit boxes, never in its title or a
-  message.
-- **Edit**: one box per field, filled with what it holds and masked like the rest (Show values unmasks them; the
-  boxes are masked with `-webkit-text-security`, which Safari and Chrome honour and Firefox ignores, and are not
-  password fields, so no password manager offers to save them); a box you leave as it is or empty keeps its value, Remove takes the field out, new fields go in the rows below.
+- **Each profile**: a row as a secret's is: its keys, who changed it last, its summary; beside it **Show values** and
+  **Edit**, and in its **⋯** menu History, the note, Make it a secret and Delete. Its values are not on view until
+  you press **Show values**: a toggle the page's CSS reads, so they show at once, with no request and no script
+  (`?show=<name>` draws them shown where the browser cannot), as a plain list of key, what it is and value. They are
+  on the page only there (masked: a fixed row of dots) and in the edit boxes, never in its title or a message.
+- **Edit**: the key/value table with each value filled in and masked (the boxes are masked with
+  `-webkit-text-security`, which Safari and Chrome honour and Firefox ignores, and are not password fields, so no
+  password manager offers to save them). Each value has its own **eye** at the end of its box, to show that one
+  while editing; Show values unmasks them all. A box you leave as it is or empty keeps its value, ✕ takes the key
+  out, new keys go in new rows.
 - **History**: each change, newest first: when, by whom (you, or her in which chat), which fields, and the values
   from before it (masked), with **Restore these values**, which is recorded as a change too. The newest 20 are
   kept.
 - **Make it a secret**: a confirmation says what happens (redacted from then on, no grant, its history deleted).
-  **Delete** deletes its history and its note too. **New personal info**: a name and one row per field.
+  **Delete** deletes its history and its note too. **New personal info**: any profile name, a one-line summary,
+  and the table: whatever keys you want to keep.
 - **Her request** (`request_info`) opens the same provide page as a secret's: it says it is personal info, has no
   grant choices, and shows what a field holds now, masked until Show current values; Save writes only the fields she asked for, recorded as yours.
 
