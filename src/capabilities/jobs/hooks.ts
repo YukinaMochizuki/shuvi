@@ -1,4 +1,5 @@
 import { sameSecret } from "../../secrets/compare.ts";
+import type { HookRoute } from "../types.ts";
 import type { Db } from "../../store/db.ts";
 import { ensureChat, recordFrameworkEvent } from "../../store/events.ts";
 import { checkJobToken, finishJob, getJob } from "../../store/jobs.ts";
@@ -15,6 +16,9 @@ import { inboundText, inboundTokenVar, loadInboundSources } from "./inbound.ts";
  *   POST /inbound/<source>      an external event. `Authorization: Bearer <SHUVI_INBOUND_<NAME>_TOKEN>`.
  *                               Body: JSON (its `text` or `message`, else the JSON) or plain text. An
  *                               `Idempotency-Key` header makes a retried POST land once.
+ *   POST <a capability's path>   a route an enabled capability adds (`hookRoutes`, capabilities/types.ts),
+ *                               e.g. workstream's `/workstream/wake`. It checks its own token, under the
+ *                               same rule below.
  *
  * Answers, and the rule that NOTHING IS WRITTEN unless the token checked out:
  *   404  no such job (or not a callback job) / no such source (undeclared, or no token in the env)
@@ -34,6 +38,8 @@ export interface HookDeps {
   ownerId: number;
   /** `SHUVI_INBOUND_*_TOKEN` values, by variable name. */
   inboundTokens: Record<string, string>;
+  /** The enabled capabilities' own routes. */
+  routes?: readonly HookRoute[];
 }
 
 const json = (status: number, body: Record<string, unknown>) => Response.json(body, { status });
@@ -108,9 +114,16 @@ export async function handleHook(deps: HookDeps, req: Request): Promise<Response
   const path = new URL(req.url).pathname;
   const job = /^\/jobs\/([^/]+)\/report\/?$/.exec(path);
   const src = /^\/inbound\/([^/]+)\/?$/.exec(path);
-  if (!job && !src) return notFound();
+  const route = deps.routes?.find((r) => r.path === path.replace(/\/+$/, ""));
+  if (!job && !src && !route) return notFound();
   if (req.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
   try {
+    if (route) {
+      // The token first, as for the two above: nothing of an unauthenticated request is read.
+      if (!route.authorize(req)) return unauthorized();
+      const body = await readBody(req);
+      return body instanceof Response ? body : await route.handle(req, body, { db: deps.db });
+    }
     return job ? await jobReport(deps, req, decodeURIComponent(job[1]!)) : await inbound(deps, req, decodeURIComponent(src![1]!));
   } catch (e) {
     console.error(`hooks: ${req.method} ${path} failed:`, e);

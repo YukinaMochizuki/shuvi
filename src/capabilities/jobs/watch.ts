@@ -19,6 +19,10 @@ import { raiseAlert } from "../../store/control.ts";
  * `DEFAULT_POLL_TIMEOUT_MS`): one hung remote holds up neither the other jobs' polls nor their deadlines,
  * and a poll that times out counts as a failed poll.
  *
+ * A poll that comes back "still running" sets the next poll only if nothing moved it while the poll was
+ * out (`setNextPoll`'s `ifStill`): a remote's wake (`pollNow`) that landed meanwhile is polled at the next
+ * pass rather than overwritten by the interval.
+ *
  * It holds no state: everything is on the rows, so a restarted server carries on where it was.
  */
 
@@ -87,7 +91,7 @@ export async function jobWatchPass(deps: WatchDeps): Promise<{ finished: number[
         }
         return;
       }
-      setNextPoll(deps.db, job.id, new Date(now() + (kind?.pollEveryMs ?? DEFAULT_POLL_EVERY_MS)), note);
+      setNextPoll(deps.db, job.id, new Date(now() + (kind?.pollEveryMs ?? DEFAULT_POLL_EVERY_MS)), note, job.nextPollAt);
     }),
   );
   return { finished, expired };

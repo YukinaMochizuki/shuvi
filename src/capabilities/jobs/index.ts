@@ -10,8 +10,8 @@ import { jobWatchPass } from "./watch.ts";
  * one watches them and takes their reports.
  *
  *   the watcher   polls `poll` jobs, and expires any job past its deadline (watch.ts)
- *   the hooks     POST /jobs/<id>/report and POST /inbound/<source> (hooks.ts, inbound.ts), served only
- *                 when SHUVI_HOOK_LISTEN is set
+ *   the hooks     POST /jobs/<id>/report and POST /inbound/<source> (hooks.ts, inbound.ts), and the routes
+ *                 other capabilities add (`hookRoutes`), served only when SHUVI_HOOK_LISTEN is set
  *
  *   SHUVI_HOOK_LISTEN            host:port the hooks listen on, meant to be a tailnet address
  *                                (e.g. 100.64.0.5:8787). Unset: no hooks (jobs are still watched)
@@ -59,7 +59,7 @@ export const jobs = defineCapability<JobsConfig>({
         // Started from the loop so a failure to bind is logged and retried like any loop error.
         run: async () => {
           if (served) return;
-          serveHooks({ db: ctx.db, home: ctx.home, ownerId: ctx.ownerId, inboundTokens: config.inboundTokens }, config.listen!, ctx.signal);
+          serveHooks({ db: ctx.db, home: ctx.home, ownerId: ctx.ownerId, inboundTokens: config.inboundTokens, routes: ctx.hookRoutes ?? [] }, config.listen!, ctx.signal);
           served = true;
         },
       });

@@ -111,6 +111,24 @@ export interface ServerContext {
   signal: AbortSignal;
   /** Every enabled capability's job kinds (`jobKinds`), filled by `capabilityLoops`. */
   jobKinds?: readonly JobKind[];
+  /** Every enabled capability's hook routes (`hookRoutes`), filled by `capabilityLoops`. */
+  hookRoutes?: readonly HookRoute[];
+}
+
+/**
+ * A route a capability adds to the hook endpoints (jobs/hooks.ts), for a caller that talks to that
+ * capability alone (workstream's wake). Served beside `/jobs/<id>/report` and `/inbound/<source>`, under
+ * the same body cap, and only when SHUVI_HOOK_LISTEN is set. The route brings its own check, `authorize`,
+ * which the hooks server runs BEFORE it reads the body (401 when it fails): nothing of an unauthenticated
+ * request is read or written.
+ */
+export interface HookRoute {
+  /** The exact path, e.g. "/workstream/wake". POST only. */
+  path: string;
+  /** Whether the request may be heard (its token), from its headers alone. */
+  authorize(req: Request): boolean;
+  /** Only after `authorize`. `body` is the request body as text, already read and held to the cap. */
+  handle(req: Request, body: string, ctx: { db: Db }): Response | Promise<Response>;
 }
 
 /** What a capability's `perceive` may read besides the event: the store (read only). */
@@ -219,6 +237,8 @@ export interface Capability<C = unknown> {
   secrets?(config: C): Record<string, string>;
   /** The kinds of job it starts (store/jobs.ts): how the jobs watcher polls them. */
   jobKinds?(config: C): JobKind[];
+  /** Routes it adds to the hook endpoints (see `HookRoute`). */
+  hookRoutes?(config: C): HookRoute[];
   /**
    * The names of its tools that act for the owner. The turn's boundary refuses a call to one unless the
    * owner himself is in the turn (agent/turn.ts `ownerAuthority`).
@@ -408,9 +428,13 @@ export function capabilityJobKinds(enabled: readonly EnabledCapability[]): JobKi
   return enabled.flatMap(({ capability, config }) => capability.jobKinds?.(config) ?? []);
 }
 
-/** Every enabled capability's loops, each handed the job kinds of all of them. */
+export function capabilityHookRoutes(enabled: readonly EnabledCapability[]): HookRoute[] {
+  return enabled.flatMap(({ capability, config }) => capability.hookRoutes?.(config) ?? []);
+}
+
+/** Every enabled capability's loops, each handed the job kinds and hook routes of all of them. */
 export function capabilityLoops(enabled: readonly EnabledCapability[], ctx: ServerContext): ServerLoop[] {
-  const full: ServerContext = { ...ctx, jobKinds: ctx.jobKinds ?? capabilityJobKinds(enabled) };
+  const full: ServerContext = { ...ctx, jobKinds: ctx.jobKinds ?? capabilityJobKinds(enabled), hookRoutes: ctx.hookRoutes ?? capabilityHookRoutes(enabled) };
   return enabled.flatMap(({ capability, config }) => capability.loops?.(full, config) ?? []);
 }
 

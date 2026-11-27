@@ -48,7 +48,8 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | how events read to the model; framework events that cannot be forged | `src/agent/render.ts` |
 | jobs: one result per job, back to its origin; deadlines | `src/store/jobs.ts`, `src/capabilities/jobs/watch.ts` |
 | schedules, and firing once after downtime | `src/store/schedules.ts` |
-| the hook endpoints and their tokens | `src/capabilities/jobs/hooks.ts`, `src/capabilities/jobs/inbound.ts` |
+| the hook endpoints and their tokens; a capability's own route (`hookRoutes`) | `src/capabilities/jobs/hooks.ts`, `src/capabilities/jobs/inbound.ts`, `src/capabilities/types.ts` (`HookRoute`) |
+| workstream: the reads, desk requests and their follow-ups, the wake | `src/capabilities/workstream/index.ts`, `reads.ts`, `wake.ts` |
 | receiving updates and the Telegram offset | `src/server/poller.ts`, `src/telegram/inbound.ts` |
 | sending, 429s, long messages | `src/server/sender.ts`, `src/telegram/format.ts` |
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` (the entry point), `src/runner/run.ts` (the turn's body) |

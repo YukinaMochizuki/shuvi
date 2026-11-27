@@ -314,9 +314,11 @@ unknown_chat: ignore      # a group not listed: no response, and the owner is to
   (`ownerAuthority` in src/agent/turn.ts).
 - **A group may have operators.** The owner may name people he trusts in a group (`operators`: their
   user ids, or `members`, everyone there but bots) and the capabilities whose owner-only tools they may
-  ask for too (`delegate: [computer, schedules, media]`). Only the tools a capability declares delegable
-  can be handed over (`delegable`, src/capabilities/types.ts); what is the owner's own (his files and
-  persona, policy, sending to other chats, workstream, the sticker library) never is. The same rule then
+  ask for too (`delegate: [computer, schedules, media, workstream]`). Only the tools a capability declares
+  delegable can be handed over (`delegable`, src/capabilities/types.ts); what is the owner's own (his files
+  and persona, policy, sending to other chats, the sticker library) never is. Workstream is delegable by
+  the owner's choice: its reads only read, held to the chat's products, and whatever an operator's desk
+  request would change still waits for the owner's approval on his phone. The same rule then
   decides, with the operator in the owner's place: a message from an operator, or a schedule or job an
   operator's call set up (recorded on its row, `authorised_by`) while policy still names them, lets a
   delegated tool run (`callAuthority` / `operatorAuthority`); context lines count for nothing. Operators are
@@ -377,7 +379,9 @@ jobs: id, origin(chat, event seq), kind, state(running/done/failed/expired),
 - `exit`: work the framework runs itself; the job watcher waits for it to end.
 - `callback`: every job has its own URL and token (`/jobs/<id>/report`). An external system only POSTs
   there; it knows nothing of chats or origins.
-- `poll`: the framework checks the status periodically.
+- `poll`: the framework checks the status periodically. A remote that knows when it changed may wake the
+  job instead, on a route its capability adds to the hooks (workstream's desk: `/workstream/wake`); the
+  wake carries no result, it only moves the next check to now, and the interval stays the fallback.
 - Past its deadline with no result, a job is polled once; still nothing, it is marked `expired` and that
   is written back to the origin, so nothing vanishes silently. Repeat reports are deduplicated by job id.
 - Whichever way, the result becomes a `job_done` event in the origin chat.
