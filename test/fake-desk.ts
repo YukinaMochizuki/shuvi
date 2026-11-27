@@ -8,12 +8,19 @@ import { z } from "zod";
  * fresh stateless McpServer per POST with JSON responses, and `tell_desk` / `request_status` answering in
  * the desk's text shape (`request <id>: <status>\n\n<text>`, src/service/desk-request.ts there).
  *
- * A request's status is whatever the test sets in `requests`.
+ * A request's status is whatever the test sets in `requests`. A follow-up (`tell_desk` with `request`)
+ * sets it running again, unless `followUpLeavesAnswer` (the desk's turn still ending as it arrived).
+ *
+ * The eight reads answer `<tool> <args as JSON>`, or `listProducts` for list_products, in workstream's
+ * line shape (`<name> (product <id>): ...`).
  */
 export class FakeDesk {
   readonly calls: { tool: string; args: Record<string, unknown> }[] = [];
-  readonly requests = new Map<string, { product: string; message: string; status: "running" | "waiting-approval" | "answered" | "failed"; text: string }>();
+  /** `turn`: the state's key, printed as `(turn <key>)` on the first line as workstream does; unset: none. */
+  readonly requests = new Map<string, { product: string; message: string; status: "running" | "waiting-approval" | "answered" | "failed"; text: string; turn?: string }>();
   readonly products = new Set(["widgetry", "shuvi"]);
+  listProducts = "Widgetry (product widgetry): Login [active] (workstream w1)\nShuvi (product shuvi): M6 [active] (workstream w2)";
+  followUpLeavesAnswer = false;
   private next = 1;
   private server: ReturnType<typeof Bun.serve>;
 
@@ -28,7 +35,7 @@ export class FakeDesk {
   private describe(id: string): string {
     const r = this.requests.get(id)!;
     const next = r.status === "running" || r.status === "waiting-approval" ? `\n\nYou will be woken when it changes; request_status("${id}") reads it any time.` : "";
-    return `request ${id}: ${r.status}\n\n${r.text}${next}`;
+    return `request ${id}: ${r.status}${r.turn && r.status !== "running" ? ` (turn ${r.turn})` : ""}\n\n${r.text}${next}`;
   }
 
   private mcp(): McpServer {
@@ -38,9 +45,15 @@ export class FakeDesk {
     server.registerTool(
       "tell_desk",
       { description: "tell", inputSchema: { product: z.string(), message: z.string(), request: z.string().optional(), wait: z.number().optional() } },
-      async (a: { product: string; message: string; wait?: number }) => {
+      async (a: { product: string; message: string; request?: string; wait?: number }) => {
         this.calls.push({ tool: "tell_desk", args: a });
         if (!this.products.has(a.product)) return failed("tell_desk", `no product "${a.product}"; list_products names them`);
+        if (a.request) {
+          const r = this.requests.get(a.request);
+          if (!r) return failed("tell_desk", `no request "${a.request}"`);
+          if (!this.followUpLeavesAnswer) Object.assign(r, { status: "running", text: "The desk is still working on it." });
+          return text(this.describe(a.request));
+        }
         const id = `req_${this.next++}`;
         this.requests.set(id, { product: a.product, message: a.message, status: "running", text: "The desk is still working on it." });
         return text(this.describe(id));
@@ -51,6 +64,24 @@ export class FakeDesk {
       if (!this.requests.has(a.request)) return failed("request_status", `no request "${a.request}"`);
       return text(this.describe(a.request));
     });
+    const reads: Record<string, Record<string, z.ZodType>> = {
+      list_products: {},
+      waiting: { product: z.string().optional() },
+      workstream_brief: { workstream: z.string(), product: z.string().optional() },
+      session_log: { workstream: z.string().optional(), session: z.string().optional(), entries: z.number().optional(), product: z.string().optional() },
+      recent_questions: { workstream: z.string().optional(), product: z.string().optional() },
+      pull_requests: { product: z.string().optional() },
+      read_note: { workstream: z.string(), title: z.string().optional(), product: z.string().optional() },
+      issues: { workstream: z.string(), product: z.string().optional() },
+    };
+    for (const [name, shape] of Object.entries(reads)) {
+      const answer = (a: Record<string, unknown>) => {
+        this.calls.push({ tool: name, args: a });
+        return text(name === "list_products" ? this.listProducts : `${name} ${JSON.stringify(a)}`);
+      };
+      if (Object.keys(shape).length) server.registerTool(name, { description: name, inputSchema: shape }, async (a: Record<string, unknown>) => answer(a));
+      else server.registerTool(name, { description: name }, async () => answer({}));
+    }
     return server;
   }
 

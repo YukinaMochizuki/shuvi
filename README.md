@@ -10,7 +10,8 @@ assistant's reply text becomes messages, `say` speaks mid-turn, `react` reacts, 
 `/new` and `/newclean` (a fresh start without the last messages, and without looking back) act on the chat.
 Photos and stickers are shown to the model as images (the `vision` capability).
 She keeps her own memory in `home/`, looks back through every chat, runs schedules and background jobs, and
-asks workstream's desk. The sticker library (`home/stickers/*.yaml`, the `stickers` capability) lets her
+reads the owner's work in workstream (what waits on him, a workstream's state, its PRs, answered at once) or
+brings a request to its desk (answered later, as soon as workstream wakes her). The sticker library (`home/stickers/*.yaml`, the `stickers` capability) lets her
 find, view, send and learn stickers; a pack is added in conversation with `add_sticker_pack`. With Hangar
 configured, each chat has its own computer. She can also tell people what is new about her: `release_log` (the
 `releases` capability) lists what changed in the code she runs since a date, a commit or a PR, sorted into

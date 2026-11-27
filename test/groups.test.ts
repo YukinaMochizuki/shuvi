@@ -22,6 +22,7 @@ import { allChats, enqueueOutbound, getChat, kvGet, markSent, type BotMessagePay
 import { claimTurn, finishTurn, getTurn } from "../src/store/turns.ts";
 import { classify } from "../src/telegram/inbound.ts";
 import { dmUpdate, groupUpdate as tgGroupUpdate, lastSeq, memDb, OWNER, ownerChatId, ownerSays, ScriptedAdapter, type Step } from "./helpers.ts";
+import { READ_TOOL_NAMES } from "../src/capabilities/workstream/reads.ts";
 
 const BOT: BotIdentity = { id: 1, username: "shuvi_test_bot" };
 const GROUP = -100777;
@@ -182,7 +183,7 @@ describe("per-chat capabilities and layers", () => {
     expect(sp).not.toContain("PRIVATE PERSONA");
     expect(sp).not.toContain("PRIVATE MEMORY");
     expect(sp).toContain("only these products: widgetry");
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "ask_workstream", "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "send", "propose_policy", "read_policy", "explain_policy", "web_fetch"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "ask_workstream", ...READ_TOOL_NAMES, "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "send", "propose_policy", "read_policy", "explain_policy", "web_fetch"]);
   });
 
   test("workstream-read limits ask_workstream to its products, before the desk is asked", async () => {

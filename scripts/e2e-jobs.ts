@@ -15,7 +15,9 @@
  *   2. a schedule set with the `schedule` tool firing a turn
  *   3. a job reported by callback (and a repeat report writing nothing)
  *   4. a job that expires (and the owner alert)
- *   5. `ask_workstream`: the desk's answer polled back as a job_done
+ *   5. `ask_workstream`: the desk wakes us (`/workstream/wake`; a wrong token is 401) and its answer is read
+ *      back as a job_done at once, long before the poll interval
+ *   6. a workstream read (`workstream_waiting`) answered inside the turn, with no job
  *
  *   bun scripts/e2e-jobs.ts
  */
@@ -83,6 +85,8 @@ const SCRIPT: Array<[RegExp, () => Response]> = [
   [/· ⚙ job \d+ · convert · expired\]/, () => say("The slow conversion never came back.")],
   [/ask the desk about the PR/, () => stream([{ type: "tool_use", name: "mcp__shuvi__ask_workstream", input: { product: "widgetry", message: "is the login PR merged?" } }])],
   [/· ⚙ job \d+ · workstream · done\] asked: \\"widgetry: is the login PR merged\?\\"\\n  Yes, merged as #212\./, () => say("The desk says: merged as #212.")],
+  [/what is waiting on me/, () => stream([{ type: "tool_use", name: "mcp__shuvi__workstream_waiting", input: {} }])],
+  [/waiting \{\}/, () => say("Workstream answered the read.")],
 ];
 
 const anthropic = Bun.serve({
@@ -126,7 +130,9 @@ const env = {
   SHUVI_INBOUND_GRAFANA_TOKEN: "grafana-secret",
   SHUVI_WORKSTREAM_MCP_URL: desk.url,
   SHUVI_WORKSTREAM_MCP_TOKEN: desk.token,
-  SHUVI_WORKSTREAM_POLL_SEC: "1",
+  SHUVI_WORKSTREAM_WAKE_TOKEN: "wake-secret",
+  // Far past the test: an answer that comes back is the wake's doing, not the interval's.
+  SHUVI_WORKSTREAM_POLL_SEC: "600",
   ANTHROPIC_BASE_URL: `http://localhost:${anthropic.port}`,
   ANTHROPIC_API_KEY: "sk-ant-fake",
 };
@@ -212,15 +218,31 @@ check(
 );
 await until("the turn to close", turnsIdle);
 
-// ---- 5. the workstream desk, polled ------------------------------------------------------------------
+// ---- 5. the workstream desk, woken -------------------------------------------------------------------
 tg.updates.push(dmUpdate(2, "ask the desk about the PR"));
 await replied("I asked the widgetry desk.", "ask_workstream asked the desk and the turn ended");
 const reqId = [...desk.requests.keys()][0]!;
 check(desk.calls.some((c) => c.tool === "tell_desk" && c.args.wait === 0), "tell_desk was called with wait: 0");
-await until("the watcher to poll the desk", () => desk.calls.some((c) => c.tool === "request_status"), 15_000);
 desk.requests.get(reqId)!.status = "answered";
 desk.requests.get(reqId)!.text = "Yes, merged as #212.";
+const wakeBody = JSON.stringify({ text: `[workstream] request ${reqId} answered.`, request: reqId, status: "answered" });
+check((await postHook("/workstream/wake", wakeBody, { authorization: "Bearer wrong", "content-type": "application/json" })).status === 401, "wake: a wrong token is 401");
+const doneBefore = events("job_done");
+// No poll of its own yet (the first is due 5 s after the ask): what ends the job is the wake.
+check(!desk.calls.some((c) => c.tool === "request_status"), "wake: the job has not been polled before it");
+const woke = Date.now();
+check((await postHook("/workstream/wake", wakeBody, { authorization: "Bearer wake-secret", "content-type": "application/json" })).status === 200, "wake: the right token is accepted");
+await until("the job to end after the wake", () => events("job_done") === doneBefore + 1, 4_000);
+log(`wake → job_done in ${Date.now() - woke} ms (the poll interval is 600 s, the first poll 5 s)`);
 await replied("The desk says: merged as #212.", "the desk's answer came back to the asking chat as a job_done");
+await until("the turn to close", turnsIdle);
+
+// ---- 6. a workstream read, inside the turn -----------------------------------------------------------
+const jobsBefore = (db.$client.query("select count(*) as n from jobs").get() as { n: number }).n;
+tg.updates.push(dmUpdate(3, "what is waiting on me in workstream?"));
+await replied("Workstream answered the read.", "workstream_waiting answered in the same turn");
+check(desk.calls.some((c) => c.tool === "waiting"), "the desk's waiting read was called");
+check((db.$client.query("select count(*) as n from jobs").get() as { n: number }).n === jobsBefore, "a read makes no job");
 
 log("PASS");
 cleanup();

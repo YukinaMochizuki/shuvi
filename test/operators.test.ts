@@ -22,6 +22,7 @@ import { createJob, finishJob, getJob } from "../src/store/jobs.ts";
 import { activeSchedules, createSchedule, fireDue } from "../src/store/schedules.ts";
 import { claimTurn, finishTurn } from "../src/store/turns.ts";
 import { classify } from "../src/telegram/inbound.ts";
+import { FakeDesk } from "./fake-desk.ts";
 import { FakeHangar } from "./fake-hangar.ts";
 import { FakePorchkit } from "./fake-porchkit.ts";
 import { groupUpdate as tgGroupUpdate, lastSeq, memDb, OWNER, ScriptedAdapter, type Step } from "./helpers.ts";
@@ -129,7 +130,7 @@ describe("policy: operators and delegate", () => {
   test("a proposal may delegate only capabilities with delegable tools; explain_policy lists them", () => {
     expect(checkDelegate(CAPABILITIES, ["computer", "schedules", "media"])).toBeNull();
     expect(checkDelegate(CAPABILITIES, ["memory"])).toContain("memory has no tools that can be delegated");
-    expect(checkDelegate(CAPABILITIES, ["workstream"])).toContain("ask_workstream, stay the owner's");
+    expect(checkDelegate(CAPABILITIES, ["workstream"])).toBeNull();
     expect(checkDelegate(CAPABILITIES, ["nope"])).toContain('"nope" is not a capability');
     const doc = explainPolicy(CAPABILITIES, "tools.computer");
     expect("text" in doc && doc.text).toContain("DELEGABLE TO OPERATORS (delegate):\n    exec, read_job");
@@ -144,7 +145,7 @@ describe("policy: operators and delegate", () => {
   test("every delegable tool is one of its capability's owner-only tools; the owner's own stay undelegable", () => {
     for (const c of CAPABILITIES) for (const t of c.delegable ?? []) expect([...(c.ownerOnly ?? []), ...Object.keys(c.ownerOnlyWhen ?? {})]).toContain(t);
     const delegable = new Set(CAPABILITIES.flatMap((c) => c.delegable ?? []));
-    for (const t of ["edit_home", "write_home", "send", "propose_policy", "ask_workstream", "add_sticker_pack", "remove_sticker_pack"]) expect(delegable.has(t)).toBe(false);
+    for (const t of ["edit_home", "write_home", "send", "propose_policy", "add_sticker_pack", "remove_sticker_pack"]) expect(delegable.has(t)).toBe(false);
   });
 
   test("/policy <group> shows who the operators are and what they may ask for", () => {
@@ -171,6 +172,54 @@ describe("authority in a group with operators", () => {
     expect(s!.authorisedBy).toBe(ALICE);
     expect(String(a.calls[0]!.prompt)).toMatch(/Alice · ⚙ operator\]/);
     expect(a.calls[0]!.systemPrompt).toContain("do not ask anyone to tag him");
+  });
+
+  test("workstream, delegated: an operator reads and asks within the chat's products; the desk is told who asked, the job records them", async () => {
+    const desk = new FakeDesk();
+    try {
+      const policy = policyOf(yaml(`
+tools:
+  chat: {}
+  workstream: { products: [widgetry] }
+operators: [${ALICE}]
+delegate: [workstream]
+`));
+      const env = { ...ENV, SHUVI_WORKSTREAM_MCP_URL: desk.url, SHUVI_WORKSTREAM_MCP_TOKEN: desk.token };
+      const db = memDb();
+      say(db, policy, ALICE, "@shuvi_test_bot what is waiting in widgetry, and ask the desk about the login PR");
+      const a = await groupTurn(
+        db,
+        policy,
+        [
+          { tool: "workstream_waiting", args: { product: "widgetry" } },
+          { tool: "workstream_pull_requests", args: { product: "shuvi" } },
+          { tool: "ask_workstream", args: { product: "widgetry", message: "is the login PR merged?" } },
+        ],
+        env,
+      );
+      expect(a.toolResults[0]!.result.isError).toBeFalsy();
+      expect(text(a, 0)).toBe('waiting {"product":"widgetry"}');
+      // The prompt tells her an operator's change waits on the owner.
+      expect(a.calls[0]!.systemPrompt).toContain("happens only once the owner approves it on his phone");
+      // Held to the chat's products, operator or not.
+      expect(a.toolResults[1]!.result.isError).toBe(true);
+      expect(a.toolResults[2]!.result.isError).toBeFalsy();
+      const told = desk.calls.find((c) => c.tool === "tell_desk")!;
+      expect(String(told.args.message)).toStartWith(`(Asked by a group operator, Telegram user ${ALICE}, in "Friends": not the owner himself.`);
+      expect(String(told.args.message)).toEndWith("\n\nis the login PR merged?");
+      const job = db.$client.query("select owner_authorised as o, authorised_by as by from jobs where kind = 'workstream'").get() as { o: number; by: number };
+      expect(job).toEqual({ o: 0, by: ALICE });
+      closeTurn(db);
+
+      // Someone who is not an operator is still refused, before the desk hears of it.
+      const before = desk.calls.length;
+      say(db, policy, BOB, "@shuvi_test_bot what is waiting in widgetry?");
+      const b = await groupTurn(db, policy, [{ tool: "workstream_waiting", args: { product: "widgetry" } }], env);
+      expect(refused(b, 0)).toBe(true);
+      expect(desk.calls.length).toBe(before);
+    } finally {
+      desk.stop();
+    }
   });
 
   test("someone who is not an operator is refused, and the refusal names who may ask", async () => {

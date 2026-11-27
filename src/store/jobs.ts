@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import { recordFrameworkEvent, type JobDonePayload } from "./events.ts";
 import { jobs } from "./schema.ts";
@@ -122,9 +122,25 @@ export function updateJobSpec(db: Db, id: number, patch: Record<string, unknown>
   if (job) db.update(jobs).set({ spec: { ...job.spec, ...patch } }).where(eq(jobs.id, id)).run();
 }
 
-/** Record when to poll next, and why the last poll failed if it did. */
-export function setNextPoll(db: Db, id: number, at: Date, note: string | null = null): void {
-  db.update(jobs).set({ nextPollAt: at.toISOString(), note }).where(eq(jobs.id, id)).run();
+/**
+ * Record when to poll next, and why the last poll failed if it did. With `ifStill` (the `next_poll_at`
+ * the poll was started from), only if nothing moved it meanwhile: a `pollNow` that landed while the poll
+ * was out wins over the interval the poll would set, so a wake during a poll is not lost.
+ */
+export function setNextPoll(db: Db, id: number, at: Date, note: string | null = null, ifStill?: string | null): void {
+  const where = ifStill === undefined ? eq(jobs.id, id) : ifStill === null ? and(eq(jobs.id, id), isNull(jobs.nextPollAt)) : and(eq(jobs.id, id), eq(jobs.nextPollAt, ifStill));
+  db.update(jobs).set({ nextPollAt: at.toISOString(), note }).where(where).run();
+}
+
+/** Have a running `poll` job polled at the watcher's next pass (a wake from its remote). True if it was one. */
+export function pollNow(db: Db, id: number): boolean {
+  const r = db
+    .update(jobs)
+    .set({ nextPollAt: new Date().toISOString() })
+    .where(and(eq(jobs.id, id), eq(jobs.state, "running"), eq(jobs.report, "poll")))
+    .returning({ id: jobs.id })
+    .all();
+  return r.length > 0;
 }
 
 /**

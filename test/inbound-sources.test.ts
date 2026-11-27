@@ -6,6 +6,7 @@ import { renderMessage } from "../src/agent/render.ts";
 import { runTurn } from "../src/agent/turn.ts";
 import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { handleHook } from "../src/capabilities/jobs/hooks.ts";
+import { READ_TOOL_NAMES } from "../src/capabilities/workstream/reads.ts";
 import { inboundText, inboundTokens, inboundTokenVar, loadInboundSources } from "../src/capabilities/jobs/inbound.ts";
 import type { Db } from "../src/store/db.ts";
 import { DELETE_UNDO_MS, deleteTurns, purgeDeletions } from "../src/store/deletions.ts";
@@ -140,7 +141,7 @@ describe("POST /inbound/<source>", () => {
     expect(adapter.calls[0]!.prompt).toContain("⚙ inbound: backup-log]\n  backup ok");
     expect(adapter.calls[0]!.prompt).toContain("⚙ inbound: grafana]\n  disk 91%");
     // An outside system is not the owner: the owner-only tools are offered, and refused.
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "ask_workstream"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "ask_workstream", ...READ_TOOL_NAMES]);
     expect(adapter.toolResults[0]!.result.isError).toBe(true);
     const p = JSON.parse(externals(db)[0]!.payload) as ExternalPayload;
     expect(p.trigger).toBe(false);
