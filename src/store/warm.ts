@@ -1,14 +1,14 @@
-import { and, asc, eq, isNull, ne } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import { IMMEDIATE, type Turn } from "./turns.ts";
-import { turns, warmRunners } from "./schema.ts";
+import { chats, turns, warmRunners } from "./schema.ts";
 
 /**
  * The store's side of WARM RUNNERS (runner/warm.ts has the runner's side, server/waker.ts the hand-off):
  *
  *   - a row of `warm_runners` exists only while its runner is IDLE, one per chat. The runner writes it when its
- *     turn is over (`registerWarm`), and it goes when the runner is handed a turn (`claimTurn` with `handTo`, in
- *     the claim's own transaction), when the runner leaves (`removeWarm`), or when anyone RETIRES it
+ *     turn is over, or once its CLI is open after a turnless start for a pinned chat (`registerWarm`), and it goes
+ *     when the runner is handed a turn (store/turns.ts `claimTurn` with `warm`, in the claim's own transaction), when the runner leaves (`removeWarm`), or when anyone RETIRES it
  *     (`retireWarm`, `retireAllWarm`): a runner that finds its row gone or changed by someone else exits, so
  *     deleting the row is the retire, and the SIGUSR2 that usually follows only makes it quick. Since a hand-off
  *     needs the row, a runner whose row was deleted by anyone else is never handed a turn after that.
@@ -22,7 +22,10 @@ import { turns, warmRunners } from "./schema.ts";
  *        CLI), and then the runner registers with nothing running. Each CLI remembers the last closed turn it has
  *        seen, and is reopened on a resume when the chat's last closed turn is another (runner/warm-session.ts).
  *   - the cap (`SHUVI_WARM_MAX`): registering one more than the cap retires the least recently idle runner, or
- *     refuses this one if it is the oldest.
+ *     refuses this one if it is the oldest. It counts UNPINNED runners only: a chat the owner PINNED warm
+ *     (`chats.warm_pinned`, the console) is never retired for the cap nor refused by it, and its runner never idles
+ *     out (runner/warm.ts); the server starts one for it whenever it has none (server/warm.ts `PinKeeper`). Unpinned,
+ *     it counts again at once (`enforceCap`, the server's warm pass), and its idle clock starts then.
  *   - a turn handed to a runner is `handoff = 'pending'` until the runner takes it (`ackHandoff`, which needs
  *     `pending`); one whose runner died first never started, and the waker closes it without counting a failed
  *     attempt. One not taken in time is `abandoned` and closed in one transaction (store/turns.ts
@@ -66,12 +69,63 @@ export function allWarmRunners(db: Db): WarmRunner[] {
   return db.select().from(warmRunners).orderBy(asc(warmRunners.idleSince)).all();
 }
 
+/** The chats the owner pinned warm (`chats.warm_pinned`), by id. */
+export function pinnedChats(db: Db): number[] {
+  return db
+    .select({ id: chats.id })
+    .from(chats)
+    .where(eq(chats.warmPinned, true))
+    .orderBy(asc(chats.id))
+    .all()
+    .map((r) => r.id);
+}
+
+export function isPinned(db: Db, chatId: number): boolean {
+  return !!db
+    .select({ id: chats.id })
+    .from(chats)
+    .where(and(eq(chats.id, chatId), eq(chats.warmPinned, true)))
+    .get();
+}
+
+/**
+ * Pin a chat warm, or unpin it (the console's chat settings). False when there is no such chat. Unpinning sets its
+ * idle runner's `idle_since` to now, in the same transaction: it counts toward the cap from now, as the most
+ * recently idle (not the cap's first victim), and its idle time starts now (runner/warm.ts reads it from the row).
+ */
+export function setWarmPinned(db: Db, chatId: number, pinned: boolean): boolean {
+  return db.transaction((tx) => {
+    const found = tx.update(chats).set({ warmPinned: pinned }).where(eq(chats.id, chatId)).returning({ id: chats.id }).all().length > 0;
+    if (found && !pinned) tx.update(warmRunners).set({ idleSince: new Date().toISOString() }).where(eq(warmRunners.chatId, chatId)).run();
+    return found;
+  }, IMMEDIATE);
+}
+
+/** The unpinned idle runners, least recently idle first: the ones the cap counts. */
+function capped(tx: Pick<Db, "select">, except?: number): WarmRunner[] {
+  const pinned = new Set(
+    tx
+      .select({ id: chats.id })
+      .from(chats)
+      .where(eq(chats.warmPinned, true))
+      .all()
+      .map((r) => r.id),
+  );
+  return tx
+    .select()
+    .from(warmRunners)
+    .orderBy(asc(warmRunners.idleSince))
+    .all()
+    .filter((r) => r.chatId !== except && !pinned.has(r.chatId));
+}
+
 /**
  * Register runner `row` as idle for its chat, within the cap `max`. A row of another runner for the same chat
  * (one left behind, or a runner that is still leaving) is replaced, and returned among `retired` for the caller
  * to signal. Beyond the cap, the least recently idle runner is retired; if that would be this one (it is the
- * oldest, or the cap is 0) nothing is written and `registered` is false (`refused: "cap"`). While a turn of the
- * chat runs (another process's: the runner's own is closed by now) nothing is written either (`refused: "busy"`).
+ * oldest, or the cap is 0) nothing is written and `registered` is false (`refused: "cap"`). The cap counts
+ * UNPINNED runners only: a pinned chat's runner is never retired for it, nor refused. While a turn of the chat
+ * runs (another process's: the runner's own is closed by now) nothing is written either (`refused: "busy"`).
  */
 export function registerWarm(db: Db, row: WarmRunner, max: number): { registered: boolean; retired: WarmRunner[]; refused?: "busy" | "cap" } {
   return db.transaction((tx) => {
@@ -85,15 +139,17 @@ export function registerWarm(db: Db, row: WarmRunner, max: number): { registered
       .get();
     if (busy) return { registered: false, retired: [], refused: "busy" as const };
     const same = tx.select().from(warmRunners).where(eq(warmRunners.chatId, row.chatId)).get();
-    const others = tx.select().from(warmRunners).where(ne(warmRunners.chatId, row.chatId)).orderBy(asc(warmRunners.idleSince)).all();
-    // Oldest first; this one among them by its own idle_since.
-    const all = [...others, row].sort((a, b) => a.idleSince.localeCompare(b.idleSince));
-    const over = all.length - max;
-    const out = all.slice(0, Math.max(0, over));
-    if (out.includes(row)) return { registered: false, retired: [], refused: "cap" as const };
-    for (const r of out) {
-      tx.delete(warmRunners).where(and(eq(warmRunners.chatId, r.chatId), eq(warmRunners.pid, r.pid))).run();
-      retired.push(r);
+    const pinned = !!tx.select({ id: chats.id }).from(chats).where(and(eq(chats.id, row.chatId), eq(chats.warmPinned, true))).get();
+    if (!pinned) {
+      const others = capped(tx as unknown as Db, row.chatId);
+      // Oldest first; this one among them by its own idle_since.
+      const all = [...others, row].sort((a, b) => a.idleSince.localeCompare(b.idleSince));
+      const out = all.slice(0, Math.max(0, all.length - max));
+      if (out.includes(row)) return { registered: false, retired: [], refused: "cap" as const };
+      for (const r of out) {
+        tx.delete(warmRunners).where(and(eq(warmRunners.chatId, r.chatId), eq(warmRunners.pid, r.pid))).run();
+        retired.push(r);
+      }
     }
     if (same) {
       tx.delete(warmRunners).where(eq(warmRunners.chatId, row.chatId)).run();
@@ -101,6 +157,19 @@ export function registerWarm(db: Db, row: WarmRunner, max: number): { registered
     }
     tx.insert(warmRunners).values(row).run();
     return { registered: true, retired };
+  }, IMMEDIATE);
+}
+
+/**
+ * The cap over the unpinned runners as they are now (a chat unpinned makes its runner count again): the least
+ * recently idle beyond `max` are retired (deleted here), and returned for the caller to signal.
+ */
+export function enforceCap(db: Db, max: number): WarmRunner[] {
+  return db.transaction((tx) => {
+    const unpinned = capped(tx as unknown as Db);
+    const out = unpinned.slice(0, Math.max(0, unpinned.length - max));
+    for (const r of out) tx.delete(warmRunners).where(and(eq(warmRunners.chatId, r.chatId), eq(warmRunners.pid, r.pid))).run();
+    return out;
   }, IMMEDIATE);
 }
 

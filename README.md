@@ -86,7 +86,11 @@ either cold start (loading shuvi, about 0.6 s, and starting the CLI, about 0.85 
 chat's system prompt changes (an edit to `home/`, the policy), it starts a new CLI for it at once, in the
 background. `SHUVI_WARM_IDLE_SEC` (default 600) is how long one waits for its chat's next turn before it
 exits; `SHUVI_WARM_MAX` (default 2) is the most that wait at once, each holding about 300 MB. `/new`,
-`/newclean`, a switch of model, provider or profile, and a shutdown retire them (`src/runner/warm.ts`).
+`/newclean`, a switch of model, provider or profile, and a shutdown retire them (`src/runner/warm.ts`). A chat can
+be pinned warm from the console (its settings page, Keep warm): its runner then never idles out, does not count
+toward `SHUVI_WARM_MAX`, and is started again by the server whenever it has none (after a restart, a `/new`, …),
+so even its first message after a quiet stretch is answered without a cold start. Pinning is saved with the switch
+off too, and has effect once it is on; only a chat on a Claude model can be warm.
 
 Which models turns run on is the model catalog in `shuvi.db` (`src/store/models.ts`): providers (a Claude
 login, or an OpenAI-compatible endpoint whose key is named in the secrets file) and their models, one of

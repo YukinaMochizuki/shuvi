@@ -66,6 +66,12 @@ export const chats = sqliteTable("chats", {
    * none, the base. One that no longer exists is run on the base (agent/turn.ts `chatLayers`).
    */
   profile: text("profile"),
+  /**
+   * PINNED WARM (the owner's choice, from the console's chat settings): with `SHUVI_WARM_RUNNERS` on, the chat's warm
+   * runner never idles out and does not count toward `SHUVI_WARM_MAX`, and the server starts one whenever the chat
+   * has none (server/warm.ts `PinKeeper`), so even the first message after a quiet stretch is handed to a runner.
+   */
+  warmPinned: integer("warm_pinned", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
 

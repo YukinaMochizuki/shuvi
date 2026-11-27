@@ -8,7 +8,9 @@ import { readPolicyText } from "../policy/load.ts";
 import { parsePolicy, proposedGroupEntry, resolveChat, TOOL_ALIASES, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
-import { defaultModel, listModels } from "../store/models.ts";
+import { chatModel, defaultModel, listModels } from "../store/models.ts";
+import { isPinned, warmRunnerFor } from "../store/warm.ts";
+import { isAlive } from "../server/spawn.ts";
 import { runningTurnFor } from "../store/turns.ts";
 import type { CapabilityRow, ChatSettingsView, ModelGroup, PermissionsView, Picked, SettingsCategory, Switching } from "./chat-settings.ts";
 import type { Flash } from "./home.ts";
@@ -36,12 +38,14 @@ export interface ChatSettingsDeps {
   enabled?: ReadonlySet<string>;
   /** The computer's configuration, when it is set up in this process (its secrets file, its idle time, Hangar). */
   computer?: ComputerConfig | null;
+  /** Whether warm runners are on in the server (`SHUVI_WARM_RUNNERS`). */
+  warmRunners?: boolean;
 }
 
 /** The result of a write, shown once on the page it comes back to (chat-settings-write.ts keeps it). */
 export interface ChatSettingsResult {
   chatId: number;
-  section: "model" | "profile" | "conversation" | "permissions" | "schedules" | "secrets";
+  section: "model" | "profile" | "conversation" | "warm" | "permissions" | "schedules" | "secrets";
   flash?: Flash;
   /** A switch asked for from the page: the page follows it until it is done. */
   switchRequest?: number;
@@ -170,6 +174,15 @@ export function loadChatSettings(
   }
   const running = runningTurnFor(db, chatId);
 
+  // Keep warm: the pin, and the chat's warm runner as the store has it now (alive: its pid and start time).
+  let claude = false;
+  try {
+    claude = chatModel(db, getChat(db, chatId)!).provider.kind === "claude";
+  } catch {
+    claude = false;
+  }
+  const row = warmRunnerFor(db, chatId);
+
   return {
     chat: { id: chat.id, name: chatName(chat), kind: chat.kind as "private" | "group", tgChatId: chat.tgChatId },
     category,
@@ -190,6 +203,14 @@ export function loadChatSettings(
       confirmNew: q.get("confirm") === "new",
       confirmClean: q.get("confirm") === "clean",
       ...(flashFor("conversation") ? { flash: flashFor("conversation")! } : {}),
+    },
+    warm: {
+      pinned: isPinned(db, chatId),
+      on: !!deps.warmRunners,
+      claude,
+      ...(row ? { runner: { pid: row.pid, alive: isAlive(row.pid, row.pidStart), idleSince: row.idleSince, cliStartedAt: row.cliStartedAt } } : {}),
+      ...(running && running.handoff ? { inTurn: true } : {}),
+      ...(flashFor("warm") ? { flash: flashFor("warm")! } : {}),
     },
     permissions: loadPermissions(deps, { kind: chat.kind as "private" | "group", tgChatId: chat.tgChatId }, result),
     // The Automation & machine page's sections, read only there (the secrets file, the computer's row).

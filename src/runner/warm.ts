@@ -10,7 +10,7 @@ import { childEnv, processStart, signalWarm } from "../server/spawn.ts";
 import { getChat, pendingCommands, triggersAfter, turnOwnerName, type CommandPayload } from "../store/events.ts";
 import { chatModel } from "../store/models.ts";
 import { lastClosedTurn, markTurn } from "../store/turns.ts";
-import { ackHandoff, isDraining, pendingHandoff, registerWarm, removeWarm, updateWarm, warmRunnerFor } from "../store/warm.ts";
+import { ackHandoff, isDraining, isPinned, pendingHandoff, registerWarm, removeWarm, updateWarm, warmRunnerFor } from "../store/warm.ts";
 import { codeVersion, runnerConfigHash } from "../version.ts";
 import { runOne, type RunnerContext, type RunnerSignals, type TurnRun } from "./run.ts";
 import { warmFingerprint, type WarmSpec } from "./warm-session.ts";
@@ -51,6 +51,15 @@ import { warmFingerprint, type WarmSpec } from "./warm-session.ts";
  * while it waits (it does not start another to wait with); the drain flag. Its own row is deleted first: once that is done no turn
  * can be handed to it. Finding the row already gone, it first looks for a turn handed to it in between and runs it.
  *
+ * PINNED (`chats.warm_pinned`, the console's Keep warm): its runner never idles out (the idle clock is held while the
+ * chat is pinned, and starts when it is unpinned) and does not count toward `SHUVI_WARM_MAX` (store/warm.ts). The
+ * server starts a TURNLESS runner for a pinned chat that has none (server/warm.ts `PinKeeper`, `child.ts --warm`,
+ * run.ts `runWarmStart`): it runs no turn of its own, opens the chat's CLI (on a resume of its conversation, or for
+ * a new one when it has none, which its first turn then starts with `run`), registers as above and waits. Every
+ * other rule above applies to it alike, the two guards included: a turnless start that finds the chat's turn
+ * running elsewhere does not register (guard 1), and its CLI's last-seen turn is the chat's last closed one when it
+ * opened (guard 2).
+ *
  * Its timings: a handed turn is marked `acked` when it is taken and `ready` when it starts, never `child`;
  * `cli` when the turn had to open a CLI.
  */
@@ -60,16 +69,22 @@ export const CHECK_MS = 3_000;
 
 type Spec = { spec: WarmSpec; fingerprint: string } | { exit: string };
 
-export async function stayWarm(runner: RunnerContext, first: TurnRun, signals: RunnerSignals): Promise<string> {
+/**
+ * Stay warm after `start`, the turn this child was started for; or, for a TURNLESS start (`{ turnless: chatId }`: a
+ * pinned chat with no runner, started by the server, server/warm.ts `PinKeeper`), open the chat's CLI and go straight
+ * to waiting.
+ */
+export async function stayWarm(runner: RunnerContext, start: TurnRun | { turnless: number }, signals: RunnerSignals): Promise<string> {
+  const first = "turnless" in start ? null : start;
   const { db, cfg } = runner;
   const pid = process.pid;
   const pidStart = processStart(pid);
   const version = codeVersion();
   const configHash = runner.configHash ?? runnerConfigHash(childEnv(), runner.capabilities.map((c) => c.capability.id));
-  const lines = [first.line];
+  const lines = [first ? first.line : `warm start for chat ${"turnless" in start ? start.turnless : "?"}`];
   const log = (chatId: number | undefined, line: string) => console.log(`warm runner ${pid}${chatId !== undefined ? ` (chat ${chatId})` : ""}: ${line}`);
-  let last = first;
-  let chatId = first.chatId;
+  let last: TurnRun | null = first;
+  let chatId = first ? first.chatId : "turnless" in start ? start.turnless : undefined;
   let exit: string | undefined;
 
   /** What the chat's next turn would be given now, or why it cannot be run here. */
@@ -107,9 +122,9 @@ export async function stayWarm(runner: RunnerContext, first: TurnRun, signals: R
   };
 
   // Its CLI has seen the turn it was started for.
-  runner.warm?.served(first.turnId);
+  if (first) runner.warm?.served(first.turnId);
   for (;;) {
-    exit = whyNotStay(runner, last, signals);
+    exit = last ? whyNotStay(runner, last, signals) : chatId === undefined ? "no chat" : whyNotWait(runner, chatId, signals);
     if (exit) break;
     // Right after the turn: what the next one would be given, and a new CLI for it if that changed.
     const next = nextSpec();
@@ -120,7 +135,7 @@ export async function stayWarm(runner: RunnerContext, first: TurnRun, signals: R
     const misfit = runner.warm!.misfit(next.spec);
     if (misfit) {
       await runner.warm!.ensure(next.spec);
-      log(chatId, `re-warmed after its turn: ${misfit}`);
+      log(chatId, last ? `re-warmed after its turn: ${misfit}` : "opened its CLI (a turnless start)");
     }
     let fingerprint = next.fingerprint;
     const idleSince = new Date().toISOString();
@@ -138,7 +153,9 @@ export async function stayWarm(runner: RunnerContext, first: TurnRun, signals: R
     // Waiting.
     let handed: number | undefined;
     let lastCheck = Date.now();
-    const since = Date.parse(idleSince);
+    // The idle clock: from registration, held at now while the chat is pinned (so an unpinned runner's idle time
+    // starts when it was unpinned).
+    let idleFrom = Date.parse(idleSince);
     for (;;) {
       let why: string | undefined;
       if (signals.stop.aborted) why = "SIGTERM while idle";
@@ -150,10 +167,16 @@ export async function stayWarm(runner: RunnerContext, first: TurnRun, signals: R
           break;
         }
         const row = warmRunnerFor(db, chatId!);
-        if (!row || row.pid !== pid || row.pidStart !== pidStart || row.fingerprint !== fingerprint || row.idleSince !== idleSince) why = "its row is gone";
-        else if (Date.now() - since > cfg.warm.idleMs) why = `idle past ${Math.round(cfg.warm.idleMs / 1000)} s`;
-        else if (isDraining(db)) why = "the server is draining";
-        else if (!runner.warm!.alive && !runner.warm!.busy) why = "its CLI died";
+        // Its own row: its pid, start time and fingerprint. `idle_since` is not checked: an unpin sets it to now
+        // (store/warm.ts `setWarmPinned`), and the idle clock follows it.
+        if (!row || row.pid !== pid || row.pidStart !== pidStart || row.fingerprint !== fingerprint) why = "its row is gone";
+        else {
+          if (isPinned(db, chatId!)) idleFrom = Date.now();
+          else idleFrom = Math.max(idleFrom, Date.parse(row.idleSince));
+          if (Date.now() - idleFrom > cfg.warm.idleMs) why = `idle past ${Math.round(cfg.warm.idleMs / 1000)} s`;
+        }
+        if (!why && isDraining(db)) why = "the server is draining";
+        else if (!why && !runner.warm!.alive && !runner.warm!.busy) why = "its CLI died";
       }
       if (why) {
         // Its own row first: once it is gone no turn can be handed here. Already gone: one may have been, just now.
@@ -205,15 +228,21 @@ export async function stayWarm(runner: RunnerContext, first: TurnRun, signals: R
 
 /** Why the runner must not stay after turn `last`, or undefined when it may (the header's list). */
 export function whyNotStay(runner: RunnerContext, last: TurnRun, signals: Pick<RunnerSignals, "stop" | "retired">): string | undefined {
-  const { db } = runner;
   if (signals.stop.aborted || last.outcome === "stopped") return "its turn was stopped";
-  if (signals.retired()) return "retired (SIGUSR2)";
   if (last.chatId === undefined) return "no chat";
   if (last.kind !== "claude") return last.kind ? `its turn ran on a ${last.kind} provider` : "its turn ran on no model";
   if (runner.warm?.lost) return "its conversation was lost";
   if (!runner.warm?.alive) return "no live CLI";
+  return whyNotWait(runner, last.chatId, signals);
+}
+
+/** What keeps any runner from waiting for chat `chatId`, after a turn or at a turnless start. */
+export function whyNotWait(runner: RunnerContext, chatId: number, signals: Pick<RunnerSignals, "stop" | "retired">): string | undefined {
+  const { db } = runner;
+  if (signals.stop.aborted) return "SIGTERM";
+  if (signals.retired()) return "retired (SIGUSR2)";
   if (isDraining(db)) return "the server is draining";
-  if (hasPendingSwitch(db, last.chatId)) return "a switch of its model is waiting";
-  if (pendingCommands(db).some((c) => c.chatId === last.chatId && ["new", "newclean"].includes((c.payload as unknown as CommandPayload).command))) return "a /new is waiting";
+  if (hasPendingSwitch(db, chatId)) return "a switch of its model is waiting";
+  if (pendingCommands(db).some((c) => c.chatId === chatId && ["new", "newclean"].includes((c.payload as unknown as CommandPayload).command))) return "a /new is waiting";
   return undefined;
 }

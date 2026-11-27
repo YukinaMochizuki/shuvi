@@ -9,6 +9,7 @@
  *             recorded new events, so a message starts its turn without waiting out the interval (loop.ts)
  *   commands  /stop, /new, /model (commands.ts); switch requests, and the control cards waiting on them
  *             (control/model-cards.ts `switchCardPass`)
+ *   warm      keep the chats the owner pinned warm with a runner each, and the cap over the others (warm.ts)
  *   catalog   probes of OpenAI-compatible models, and the `/models` listings `/provider add` waits on (probes.ts)
  *   sender    deliver what turns queued (sender.ts); kicked by a runner child's SIGUSR2 after it queues a row
  *             (wake.ts), and after the waker's command pass reacts to a command
@@ -72,7 +73,7 @@ import { sendPass } from "./sender.ts";
 import { childEnv, signalTurn, spawnTurn } from "./spawn.ts";
 import { onWake, recordServerProcess } from "./wake.ts";
 import { wakerPass } from "./waker.ts";
-import { drainWarmRunners, startWarmRunners, type RunnerIdentity } from "./warm.ts";
+import { drainWarmRunners, PinKeeper, startWarmRunners, type RunnerIdentity } from "./warm.ts";
 import { codeVersion, runnerConfigHash } from "../version.ts";
 
 const cfg = loadConfig();
@@ -168,6 +169,11 @@ void loop(
   },
   1000,
 );
+// Chats the owner pinned warm: a turnless runner for each that has none, the cap over the unpinned (server/warm.ts).
+{
+  const keeper = new PinKeeper({ db, enabled: cfg.warm.enabled, max: cfg.warm.max, draining: () => vitals.draining, policy: () => policies.current(), ownerId: cfg.ownerId, identity: runnerIdentity });
+  void loop("warm", async () => void keeper.pass(), 1000);
+}
 // Started in the background; the rows say what is asked, so a restart's interrupted ones start again here.
 void loop("catalog", async () => void backgroundPass(db, { secrets: cfg.secrets }), 1000);
 // Awaited at exit (`shutdown`), so the server never exits in the middle of a send.
@@ -230,6 +236,7 @@ if (consoleOn(cfg.console)) {
           secrets: cfg.secrets,
           // Home's Preview builds a chat's prompt as a turn would (the owner's name is a turn's own, from his message).
           prompt: { capabilities, policy: () => policies.current(), ownerId: cfg.ownerId, owner: cfg.ownerLanguage ? { language: cfg.ownerLanguage } : {} },
+          warmRunners: cfg.warm.enabled,
         },
         stop.signal,
       );

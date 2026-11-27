@@ -86,7 +86,12 @@ conversation, in the background, before the next message; a turn that still does
 at its start. The runner leaves on SIGUSR2 (retire), on SIGTERM (which keeps meaning "stop the turn"), idle
 past `SHUVI_WARM_IDLE_SEC`, after a turn whose conversation was lost, or when its row is deleted, which is
 how the server retires it (`/new`, `/newclean`, a switch of model, provider or profile, the drain, a server
-on other code). At most `SHUVI_WARM_MAX` wait at once. What a turn says, and its idempotency keys, are as for any
+on other code). At most `SHUVI_WARM_MAX` wait at once. The owner can PIN a chat warm from the console (Keep warm on its
+settings page, `chats.warm_pinned`): its runner never idles out and does not count toward that cap, and the server
+starts a turnless runner for it (it opens the chat's CLI and waits, with no turn of its own) whenever it has none,
+so after a deploy, a restart, a `/new` or any exit of its runner, the chat is warm again before its next message;
+not while draining, and with a backoff and one alert when starts keep failing. Every other retire rule applies to
+a pinned runner too. What a turn says, and its idempotency keys, are as for any
 turn (invariant 2); the reply of every turn is queued when the driver reports its result, before the CLI has
 settled (`src/agent/turn.ts`).
 
@@ -754,7 +759,7 @@ changed them). So there are two concepts for her, sharing one storage:
 
 - Turns run on agent-runtime's drivers: Claude's starts a Claude Code subprocess per turn, so the machine
   needs at least 4 GB of memory for 2–3 turns at once (with warm runners on, each waiting one holds about
-  300 MB, a Bun runner and its CLI, up to `SHUVI_WARM_MAX`); an OpenAI-compatible model is called from the runner
+  300 MB, a Bun runner and its CLI: at most `SHUVI_WARM_MAX` unpinned ones plus one per chat pinned warm); an OpenAI-compatible model is called from the runner
   child, its tools through the same boundary. Which models exist is the catalog in `shuvi.db`; a first
   start seeds it with the Claude login and `SHUVI_MODEL`.
 - Heavy computation runs remotely.

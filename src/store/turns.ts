@@ -293,75 +293,73 @@ export function closeNeverStarted(db: Db, id: number, error: string, opts: { aba
 }
 
 function finishTurnIn(tx: Tx, id: number, outcome: TurnClose): void {
-  {
-    const t = tx.select().from(turns).where(eq(turns.id, id)).get();
-    if (!t || t.status !== "running") return; // already closed (a stop racing an end, or boot recovery)
-    const u = outcome.usage;
-    // A turn the wall-clock limit stopped says so on its row, whichever process closes it (the child on
-    // SIGTERM, or the waker after SIGKILL): `term_at` plus this error is what tells it from an owner /stop.
-    // A reason set while it ran (`markDrainStop`) is kept unless the close gives its own.
-    const error = outcome.status === "stopped" && t.termAt ? WALL_CLOCK_STOP : (outcome.error ?? t.error ?? null);
-    tx.update(turns)
-      .set({
-        status: outcome.status,
-        error,
-        endedAt: new Date().toISOString(),
-        ...(u
-          ? {
-              costMicroUsd: Math.round(u.costUsd * 1_000_000),
-              inputTokens: u.inputTokens,
-              outputTokens: u.outputTokens,
-              cacheReadTokens: u.cacheReadTokens,
-              cacheCreationTokens: u.cacheCreationTokens,
-            }
-          : {}),
-      })
-      .where(eq(turns.id, id))
-      .run();
+  const t = tx.select().from(turns).where(eq(turns.id, id)).get();
+  if (!t || t.status !== "running") return; // already closed (a stop racing an end, or boot recovery)
+  const u = outcome.usage;
+  // A turn the wall-clock limit stopped says so on its row, whichever process closes it (the child on
+  // SIGTERM, or the waker after SIGKILL): `term_at` plus this error is what tells it from an owner /stop.
+  // A reason set while it ran (`markDrainStop`) is kept unless the close gives its own.
+  const error = outcome.status === "stopped" && t.termAt ? WALL_CLOCK_STOP : (outcome.error ?? t.error ?? null);
+  tx.update(turns)
+    .set({
+      status: outcome.status,
+      error,
+      endedAt: new Date().toISOString(),
+      ...(u
+        ? {
+            costMicroUsd: Math.round(u.costUsd * 1_000_000),
+            inputTokens: u.inputTokens,
+            outputTokens: u.outputTokens,
+            cacheReadTokens: u.cacheReadTokens,
+            cacheCreationTokens: u.cacheCreationTokens,
+          }
+        : {}),
+    })
+    .where(eq(turns.id, id))
+    .run();
 
-    let cursor: number | null = null;
-    if (outcome.status === "done") cursor = t.toSeq;
-    else if (outcome.status === "stopped") {
-      const limit = t.stopSeq != null ? Math.min(t.toSeq, t.stopSeq) : t.toSeq;
-      const last = tx
-        .select({ m: max(chatEvents.seq) })
+  let cursor: number | null = null;
+  if (outcome.status === "done") cursor = t.toSeq;
+  else if (outcome.status === "stopped") {
+    const limit = t.stopSeq != null ? Math.min(t.toSeq, t.stopSeq) : t.toSeq;
+    const last = tx
+      .select({ m: max(chatEvents.seq) })
+      .from(chatEvents)
+      .where(and(eq(chatEvents.chatId, t.chatId), gt(chatEvents.seq, t.fromSeq), lte(chatEvents.seq, limit), inArray(chatEvents.kind, TRIGGER_KINDS)))
+      .get();
+    cursor = last?.m ?? null;
+  } else {
+    const recent = tx.select().from(turns).where(eq(turns.chatId, t.chatId)).orderBy(desc(turns.id)).limit(MAX_ATTEMPTS).all();
+    const chat = tx.select().from(chats).where(eq(chats.id, t.chatId)).get()!;
+    const tdb = tx as unknown as Db;
+    if (recent.length === MAX_ATTEMPTS && recent.every((r) => r.status === "failed" && r.fromSeq === t.fromSeq)) {
+      cursor = t.toSeq;
+      console.error(`chat ${t.chatId}: ${MAX_ATTEMPTS} turns failed on the same input; moving past seq ${t.toSeq} unanswered (${outcome.error ?? ""})`);
+      const lost = tx
+        .select()
         .from(chatEvents)
-        .where(and(eq(chatEvents.chatId, t.chatId), gt(chatEvents.seq, t.fromSeq), lte(chatEvents.seq, limit), inArray(chatEvents.kind, TRIGGER_KINDS)))
-        .get();
-      cursor = last?.m ?? null;
-    } else {
-      const recent = tx.select().from(turns).where(eq(turns.chatId, t.chatId)).orderBy(desc(turns.id)).limit(MAX_ATTEMPTS).all();
-      const chat = tx.select().from(chats).where(eq(chats.id, t.chatId)).get()!;
-      const tdb = tx as unknown as Db;
-      if (recent.length === MAX_ATTEMPTS && recent.every((r) => r.status === "failed" && r.fromSeq === t.fromSeq)) {
-        cursor = t.toSeq;
-        console.error(`chat ${t.chatId}: ${MAX_ATTEMPTS} turns failed on the same input; moving past seq ${t.toSeq} unanswered (${outcome.error ?? ""})`);
-        const lost = tx
-          .select()
-          .from(chatEvents)
-          .where(and(eq(chatEvents.chatId, t.chatId), gt(chatEvents.seq, t.fromSeq), lte(chatEvents.seq, t.toSeq), inArray(chatEvents.kind, TRIGGER_KINDS)))
-          .orderBy(chatEvents.seq)
-          .all();
-        // One alert per message, keyed on its seq and never rate-limited: an unanswered message must not
-        // go unseen because another one in the same chat was reported a minute earlier.
-        for (const e of lost) {
-          const p = e.payload as { text?: string; title?: string; note?: string };
-          raiseAlert(tdb, {
-            key: `unanswered:${e.seq}`,
-            turnId: t.id,
-            text: `Unanswered in ${chatLabel(chat)}: "${excerpt(p.text ?? p.title ?? p.note ?? e.kind)}" (#${e.seq}). ${MAX_ATTEMPTS} turns failed on it, so it was skipped. Last error: ${excerpt(outcome.error ?? "unknown", 300)}`,
-          });
-        }
-      } else {
+        .where(and(eq(chatEvents.chatId, t.chatId), gt(chatEvents.seq, t.fromSeq), lte(chatEvents.seq, t.toSeq), inArray(chatEvents.kind, TRIGGER_KINDS)))
+        .orderBy(chatEvents.seq)
+        .all();
+      // One alert per message, keyed on its seq and never rate-limited: an unanswered message must not
+      // go unseen because another one in the same chat was reported a minute earlier.
+      for (const e of lost) {
+        const p = e.payload as { text?: string; title?: string; note?: string };
         raiseAlert(tdb, {
-          key: `turn-failed:${t.id}`,
+          key: `unanswered:${e.seq}`,
           turnId: t.id,
-          topic: `turn-failed:${t.chatId}`,
-          text: `Turn ${t.id} failed in ${chatLabel(chat)}: ${excerpt(outcome.error ?? "unknown", 300)}. It will be retried.`,
+          text: `Unanswered in ${chatLabel(chat)}: "${excerpt(p.text ?? p.title ?? p.note ?? e.kind)}" (#${e.seq}). ${MAX_ATTEMPTS} turns failed on it, so it was skipped. Last error: ${excerpt(outcome.error ?? "unknown", 300)}`,
         });
       }
+    } else {
+      raiseAlert(tdb, {
+        key: `turn-failed:${t.id}`,
+        turnId: t.id,
+        topic: `turn-failed:${t.chatId}`,
+        text: `Turn ${t.id} failed in ${chatLabel(chat)}: ${excerpt(outcome.error ?? "unknown", 300)}. It will be retried.`,
+      });
     }
-    if (cursor != null && cursor > t.fromSeq) tx.update(chats).set({ cursorSeq: cursor }).where(eq(chats.id, t.chatId)).run();
-    if (outcome.contextTokens !== undefined) tx.update(chats).set({ contextTokens: outcome.contextTokens }).where(eq(chats.id, t.chatId)).run();
   }
+  if (cursor != null && cursor > t.fromSeq) tx.update(chats).set({ cursorSeq: cursor }).where(eq(chats.id, t.chatId)).run();
+  if (outcome.contextTokens !== undefined) tx.update(chats).set({ contextTokens: outcome.contextTokens }).where(eq(chats.id, t.chatId)).run();
 }

@@ -79,6 +79,26 @@ export async function runChild(turnId: number, signals: RunnerSignals): Promise<
 }
 
 /**
+ * A TURNLESS start (`child.ts --warm <chatId>`): the server keeps a chat the owner pinned warm (server/warm.ts
+ * `PinKeeper`), so this child runs no turn of its own: it opens the chat's Claude CLI and waits as its warm runner
+ * (runner/warm.ts), detached like any runner child, talking to nothing but the store. Leaves at once when warm
+ * runners are off.
+ */
+export async function runWarmStart(chatId: number, signals: RunnerSignals): Promise<string> {
+  const cfg = loadConfig({ needToken: false });
+  if (!cfg.warm.enabled) return `warm start for chat ${chatId}: warm runners are off`;
+  const db = openDb(cfg.dbPath);
+  onTurnRowQueued(wakeServer);
+  const capabilities = enabledCapabilities();
+  const runner: RunnerContext = { cfg, db, capabilities, configHash: runnerConfigHash(childEnv(), capabilities.map((c) => c.capability.id)) };
+  const { WarmClaude } = await import("./warm-session.ts");
+  await loadDriver("claude");
+  runner.warm = new WarmClaude(await import("agent-runtime/claude"));
+  const { stayWarm } = await import("./warm.ts");
+  return stayWarm(runner, { turnless: chatId }, signals);
+}
+
+/**
  * Run turn `turnId` in this runner to its end. `spawned`: the turn this child was started for (its start is
  * marked as `child`); a turn handed to a warm runner is not.
  */

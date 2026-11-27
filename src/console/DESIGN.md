@@ -213,7 +213,7 @@ Chat.
 
 Three categories, each a page with its own URL, as real tabs at the top of the detail pane (the Tabs component:
 the page's own tab underlined in the accent, `aria-current="page"`): **Chat** (`/chats/<id>/settings`: Model,
-Profile, Conversation), **Permissions** (`/permissions`), **Automation & machine** (`/automation`: Schedules,
+Profile, Conversation, Keep warm), **Permissions** (`/permissions`), **Automation & machine** (`/automation`: Schedules,
 Secrets, Computer). Each page is short; a write's 303 comes back to the page it was made on. Adjacent pieces of
 inline text (a label and its hint, a radio's name and its description) have real whitespace between them in the
 markup, so a page still reads when its stylesheet does not load.
@@ -235,6 +235,10 @@ markup, so a page still reads when its stylesheet does not load.
 │   └───────────────────────────────────────────────────────────┘     │
 │ PROFILE ──────────────────────────────────── Profiles in Home →     │
 │ CONVERSATION  facts · [Stop the turn] · [New conv.] · [Start clean] │
+│ KEEP WARM  a runner and its CLI kept ready for this chat ────────── │
+│ (switch off / not a Claude model: a refused notice, the pin saves)  │
+│ Kept warm  never idles out, outside the warm limit [Stop keeping…]  │
+│ ● A warm runner waits now: process 4242, idle since …, CLI started… │
 │ (Permissions:)                                                      │
 │ PERMISSIONS  policy.yaml, listed as "-100123" ──────────────────    │
 │ Wakes her  ○ every message ◉ only: ☑ mention ☑ reply ☐ follow-up 3  │

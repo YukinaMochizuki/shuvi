@@ -54,6 +54,21 @@ export const spawnTurn: SpawnTurn = (turnId) => {
   return proc.pid;
 };
 
+/** Start a TURNLESS runner child for chat `chatId` (`child.ts --warm`: a pinned chat kept warm, server/warm.ts). */
+export type SpawnWarm = (chatId: number) => number;
+
+export const spawnWarm: SpawnWarm = (chatId) => {
+  const proc = Bun.spawn([process.execPath, CHILD, "--warm", String(chatId)], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+    detached: true,
+    env: childEnv(),
+  });
+  proc.unref();
+  return proc.pid;
+};
+
 /**
  * A process's start time, in clock ticks since boot (field 22 of /proc/<pid>/stat), or null when there is
  * no such process or no /proc. The second field (the command name) is in parentheses and may itself hold

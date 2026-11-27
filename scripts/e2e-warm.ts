@@ -19,6 +19,10 @@
  *      the drain, and its runner exits instead of staying.
  *   6. The `turns.timings` of the cold, the warm and the re-warmed turn, side by side, and the RSS of an idle warm
  *      runner with its CLI.
+ *   7. PINNED (the console's Keep warm): pinned through the console's write boundary, the chat is warm at once with no
+ *      message; after a server restart it is warm again before any message, and the next message is handed to that
+ *      runner (`handed`, no `spawned`, no `cli`). After `/new` it is warm again before the next message, on a CLI for a
+ *      new conversation, and that message is handed to it too. Its timings join the table.
  *
  *   bun scripts/e2e-warm.ts
  */
@@ -27,7 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/store/db.ts";
 import { isAlive } from "../src/server/spawn.ts";
-import { dmUpdate, FakeTelegram, OWNER, tapLines } from "../test/helpers.ts";
+import { consolePortIn, dmUpdate, FakeTelegram, OWNER, tapLines } from "../test/helpers.ts";
 
 const t0 = Date.now();
 const log = (m: string) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s] ${m}`);
@@ -72,7 +76,9 @@ const anthropic = Bun.serve({
     if (url.pathname.endsWith("/count_tokens")) return Response.json({ input_tokens: 10 });
     if (!url.pathname.endsWith("/v1/messages")) return Response.json({});
     if (!body.tools?.some((t) => t.name === "mcp__shuvi__say")) return reply("msg_side", "ok");
-    const latest = JSON.stringify(body.messages?.at(-1) ?? "");
+    // Only what is new in the last message: a fresh conversation (after /new) opens with the chat's earlier
+    // messages ("a slow one" among them) before "(New messages:)".
+    const latest = JSON.stringify(body.messages?.at(-1) ?? "").split("(New messages:)").at(-1)!;
     requests.push({ system: JSON.stringify(body.system ?? ""), latest });
     const n = requests.length;
     if (latest.includes("a slow one, stop me")) {
@@ -110,15 +116,20 @@ const env = {
   SHUVI_TZ: "Asia/Taipei",
   SHUVI_METRICS_LISTEN: "127.0.0.1:0",
   SHUVI_WARM_RUNNERS: "on",
+  SHUVI_CONSOLE_LISTEN: "127.0.0.1:0",
+  SHUVI_CONSOLE_USERS: "owner@example.com",
   ANTHROPIC_BASE_URL: `http://localhost:${anthropic.port}`,
   ANTHROPIC_API_KEY: "sk-ant-fake",
 };
 let server: ReturnType<typeof Bun.spawn> | null = null;
 const serverLines: string[] = [];
+let consolePort = 0;
 const startServer = () => {
+  consolePort = 0;
   server = Bun.spawn([process.execPath, "src/server/main.ts"], { env, stdout: "pipe", stderr: "inherit", detached: true });
   tapLines(server.stdout, (line) => {
     serverLines.push(line);
+    consolePort = consolePortIn(line) ?? consolePort;
     if (/warm|turn \d+:/.test(line)) console.log(`    | ${line}`);
   });
 };
@@ -301,6 +312,47 @@ check(texts().slice(beforeDrain).includes("Finished during the drain."), "and wa
 await until("its runner to exit", () => !isAlive(draining.pid!, draining.pid_start), 10_000);
 check(!warmRow(), "its runner exited instead of staying warm (the drain flag)");
 
+// ---- 7. pinned: kept warm from the console, across a restart and a /new --------------------------------------------
+startServer();
+await until("the console", () => consolePort > 0);
+const origin = `http://127.0.0.1:${consolePort}`;
+const login = { "Tailscale-User-Login": "owner@example.com" };
+const settingsHtml = await (await fetch(`${origin}/chats/1/settings`, { headers: login })).text();
+const csrf = /name="csrf" value="([^"]+)"/.exec(settingsHtml)?.[1] ?? "";
+check(settingsHtml.includes('id="warm"') && settingsHtml.includes("Keep warm") && !!csrf, "the chat's settings page offers Keep warm");
+const pinRes = await fetch(`${origin}/chats/1/settings/warm`, { method: "POST", redirect: "manual", headers: { ...login, origin }, body: new URLSearchParams([["csrf", csrf], ["pin", "on"]]) });
+check(pinRes.status === 303 && q<{ p: number }>("select warm_pinned as p from chats where id = 1").p === 1, "pinned through the console's write boundary");
+await until("the pinned chat warm, with no message", () => !!warmRow() && isAlive(warmRow()!.pid, warmRow()!.pid_start), 20_000);
+const firstPinned = warmRow()!.pid;
+runners.add(firstPinned);
+check(q<{ n: number }>("select count(*) as n from turns where status = 'running'").n === 0, `the server started runner ${firstPinned} for it with no turn (a turnless start)`);
+server!.kill("SIGTERM");
+check((await server!.exited) === 0, "the server drained and exited");
+server = null;
+await until("the pinned runner to leave with the drain", () => !isAlive(firstPinned), 10_000);
+startServer();
+const restartedAt = Date.now();
+await until("the pinned chat warm again after the restart, before any message", () => !!warmRow() && warmRow()!.pid !== firstPinned && isAlive(warmRow()!.pid, warmRow()!.pid_start), 20_000);
+const pinnedRunner = warmRow()!.pid;
+runners.add(pinnedRunner);
+log(`    (warm ${((Date.now() - restartedAt) / 1000).toFixed(1)} s after the server started)`);
+const pinned = await say("please say seven", "Reply seven.");
+const pm = marks(pinned);
+check(pinned.pid === pinnedRunner && !!pm.handed && !pm.spawned && !pm.cli, "the first message after the restart was handed to the runner that waited for it, on its CLI");
+await until("it to wait again", () => warmRow()?.pid === pinnedRunner);
+tg.updates.push(dmUpdate(++update, "/new"));
+await until("the /new to retire it", () => !isAlive(pinnedRunner), 10_000);
+await until("the pinned chat warm again after /new, before the next message", () => !!warmRow() && warmRow()!.pid !== pinnedRunner && isAlive(warmRow()!.pid, warmRow()!.pid_start), 20_000);
+const freshRunner = warmRow()!.pid;
+runners.add(freshRunner);
+const afterNew = await say("please say eight", "Reply eight.");
+const am = marks(afterNew);
+const opening = q<{ o: string | null }>("select opening as o from turns where id = ?", afterNew.id).o;
+check(afterNew.pid === freshRunner && !!am.handed && !am.cli && opening === "new", `after /new, handed to the runner warmed for a new conversation, which its first turn started (${opening})`);
+server!.kill("SIGTERM");
+await server!.exited;
+server = null;
+
 // ---- 6. timings: cold, warm, re-warmed --------------------------------------------------------------------------
 const sentAt = (id: number) =>
   q<{ s: string | null } | null>("select sent_at as s from chat_events where turn_id = ? and kind = 'bot_message' order by seq limit 1", id)?.s ?? null;
@@ -308,19 +360,21 @@ const rows: [string, TurnRow][] = [
   ["cold", turn(cold.id)],
   ["warm", turn(warm.id)],
   ["re-warmed", turn(rewarmed.id)],
+  ["pinned*", turn(pinned.id)],
+  ["after /new", turn(afterNew.id)],
 ];
 const order = ["claimed", "spawned", "handed", "child", "acked", "ready", "cli", "query", "firstOutput", "result", "queuedFirst", "returned"];
 console.log("\nturns.timings, ms after `claimed` (and sent: chat_events.sent_at of its reply)");
-console.log(["mark".padEnd(12), ...rows.map(([n]) => n.padStart(10))].join(""));
+console.log(["mark".padEnd(12), ...rows.map(([n]) => n.padStart(12))].join(""));
 for (const k of [...order, "sent"]) {
   const cells = rows.map(([, t]) => {
     const m = marks(t);
     const v = k === "sent" ? (sentAt(t.id) ? Date.parse(sentAt(t.id)!) : undefined) : m[k];
-    return (v === undefined || m.claimed === undefined ? "-" : String(v - m.claimed)).padStart(10);
+    return (v === undefined || m.claimed === undefined ? "-" : String(v - m.claimed)).padStart(12);
   });
   console.log([k.padEnd(12), ...cells].join(""));
 }
-console.log("");
+console.log("(pinned*: the first message after a server restart, to a chat kept warm from the console)\n");
 
 log("PASS");
 cleanup();

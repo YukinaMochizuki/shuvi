@@ -18,7 +18,9 @@
  *            an idle one exits at once.
  *   SIGUSR1  a warm runner was handed a turn: look now (it also polls the store).
  *   SIGUSR2  retire: a warm runner exits (once its turn is over, if it is in one).
- * Usage: `bun src/runner/child.ts <turnId>`. What the turn runs on, and how: runner/run.ts.
+ * Usage: `bun src/runner/child.ts <turnId>`, or `bun src/runner/child.ts --warm <chatId>` for a TURNLESS start: the
+ * server keeping a pinned chat warm starts a runner that opens the chat's CLI and waits, with no turn of its own
+ * (run.ts `runWarmStart`). What a turn runs on, and how: runner/run.ts.
  *
  * The handlers are installed BEFORE anything else is loaded, which is why this file is only an entry point and
  * the turn's code is imported dynamically (one `await import` of run.ts): static imports are all loaded and
@@ -63,12 +65,13 @@ const signals: RunnerSignals = {
     }),
 };
 
-const turnId = Number(process.argv[2]);
-if (!Number.isSafeInteger(turnId)) {
-  console.error("usage: child.ts <turnId>");
+const warm = process.argv[2] === "--warm";
+const id = Number(process.argv[warm ? 3 : 2]);
+if (!Number.isSafeInteger(id)) {
+  console.error("usage: child.ts <turnId> | child.ts --warm <chatId>");
   process.exit(2);
 }
 
-const { runChild } = await import("./run.ts");
-console.log(await runChild(turnId, signals));
+const { runChild, runWarmStart } = await import("./run.ts");
+console.log(warm ? await runWarmStart(id, signals) : await runChild(id, signals));
 process.exit(0);

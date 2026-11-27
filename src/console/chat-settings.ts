@@ -27,6 +27,9 @@ import { computerSection, schedulesSection, secretsSection, type ComputerView, t
  *                 conversation, which asks first (`?confirm=new#conversation`); Start clean, as New
  *                 conversation but opening with no messages (agent/switch.ts `startClean`), which asks first too
  *                 (`?confirm=clean`).
+ *   Keep warm     the pin (store/warm.ts `setWarmPinned`): with warm runners on, the chat keeps a warm runner all the
+ *                 time (server/warm.ts `PinKeeper`). Shows its runner now, and says when pinning does nothing (the
+ *                 switch off, a model not on a Claude login).
  *   Permissions   the chat's entry as a form; "Review changes" comes back with the diff to policy.yaml, then
  *                 "Save" writes it; a form the parser refuses comes back as it was typed, with its reason.
  *   Schedules, Secrets, Computer   chat-extras.ts.
@@ -133,6 +136,12 @@ export interface ChatSettingsView {
   profile: { current: string | null; gone: boolean; rows: ProfileRow[]; flash?: Flash };
   /** `clean`: the conversation is a clean one (`chats.clean_since`): she has no search_chats / read_chat in it. */
   conversation: { began: string | null; how?: string; segments: number; contextTokens: number | null; clean?: boolean; running?: RunningTurn; confirmNew: boolean; confirmClean?: boolean; flash?: Flash };
+  /**
+   * Keep warm (`chats.warm_pinned`): the pin; whether warm runners are on in the server (`on`); whether the chat's model
+   * is on a Claude login, the only kind that can be warm (`claude`); its warm runner now, as its row says (`runner`;
+   * `alive` by its pid and start time), or a turn handed to one running (`inTurn`).
+   */
+  warm: { pinned: boolean; on: boolean; claude: boolean; runner?: { pid: number; alive: boolean; idleSince: string; cliStartedAt: string | null }; inTurn?: boolean; flash?: Flash };
   permissions: PermissionsView;
   /** Loaded for the Automation & machine page only. */
   schedules?: SchedulesView;
@@ -208,6 +217,34 @@ function profileSection(v: ChatSettingsView): Raw {
 ${flashLine(p.flash)}${p.gone ? html`<p class="notice refused">This chat is on <b>${p.current}</b>, which no longer exists: it runs on Base.</p>` : ""}
 <form method="post" action="${base(v)}/profile" class="plist" role="radiogroup" aria-label="Profile">${csrfField(v)}
 ${row("", undefined, "her own files, no overlay")}${p.rows.map((r) => row(r.name, r.label, r.own ? `${plural(r.own, "file")} of its own` : "no files of its own yet"))}</form></section>`;
+}
+
+// ---- keep warm ---------------------------------------------------------------------------------------------
+
+function warmSection(v: ChatSettingsView): Raw {
+  const w = v.warm;
+  const now = w.runner
+    ? w.runner.alive
+      ? html`<p class="xline">${dot("running")}A warm runner waits for this chat now: process <span class="mono">${w.runner.pid}</span>, idle since <b>${when(w.runner.idleSince, v.timeZone)}</b>${
+          w.runner.cliStartedAt ? html`, its Claude CLI started <b>${when(w.runner.cliStartedAt, v.timeZone)}</b>` : ""
+        }.</p>`
+      : html`<p class="xline">Its warm runner (process <span class="mono">${w.runner.pid}</span>) is gone; the next turn starts cold${w.pinned && w.on ? ", unless the server warms it first" : ""}.</p>`
+    : w.inTurn
+      ? html`<p class="xline">${dot("running")}Its warm runner is running a turn now.</p>`
+      : html`<p class="xline">No warm runner for this chat now: its next turn starts cold${w.pinned && w.on && w.claude ? ", unless the server warms it first (within seconds)" : ""}.</p>`;
+  const notes = [
+    !w.on ? html`<p class="notice refused">Warm runners are off on this server (<span class="mono">SHUVI_WARM_RUNNERS</span>): pinning is saved, but has no effect until they are on.</p>` : "",
+    !w.claude ? html`<p class="notice refused">This chat's model is not on a Claude login: only a Claude model can be kept warm, so pinning has no effect while it is on this one.</p>` : "",
+  ];
+  const button = w.pinned
+    ? html`<form method="post" action="${base(v)}/warm">${csrfField(v)}<input type="hidden" name="pin" value="off"><button type="submit" class="btn">Stop keeping warm</button></form>`
+    : html`<form method="post" action="${base(v)}/warm">${csrfField(v)}<input type="hidden" name="pin" value="on"><button type="submit" class="btn">Keep warm</button></form>`;
+  return html`<section class="cs" id="warm"><div class="cshd"><h2>Keep warm</h2> <span class="faint">a runner and its Claude CLI kept ready for this chat, so a message is answered without starting them</span></div>
+${flashLine(w.flash)}${notes}<div class="crow"><div class="stext"><b>${w.pinned ? "Kept warm" : "Not pinned"}</b> <span>${
+    w.pinned
+      ? "Its runner never idles out and does not count toward the warm limit; the server starts one whenever it has none. It costs memory only (about 300 MB), no model calls."
+      : "Its runner stays warm for a while after a turn, as for every chat, within the warm limit."
+  }</span></div>${button}</div>${now}</section>`;
 }
 
 // ---- conversation ------------------------------------------------------------------------------------------
@@ -371,7 +408,7 @@ function body(v: ChatSettingsView): Raw {
     const c = { chatId: v.chat.id, csrf: v.csrf, timeZone: v.timeZone, now: v.now };
     return html`${v.schedules ? schedulesSection(c, v.schedules) : ""}${v.secrets ? secretsSection(c, v.secrets) : ""}${v.computer ? computerSection(c, v.computer) : ""}`;
   }
-  return html`${modelSection(v)}${profileSection(v)}${conversationSection(v)}`;
+  return html`${modelSection(v)}${profileSection(v)}${conversationSection(v)}${warmSection(v)}`;
 }
 
 /** The whole page: the chats list on the left (`pane`), the settings on the right. */

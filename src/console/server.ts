@@ -130,6 +130,8 @@ export interface ConsoleDeps {
   transcriptDays?: number;
   /** What Home's Preview builds a chat's prompt with: the enabled capabilities, the policy, the owner. */
   prompt?: PromptDeps;
+  /** Whether warm runners are on in this server (`SHUVI_WARM_RUNNERS`): a chat's settings page says what pinning does. */
+  warmRunners?: boolean;
   /** How a chat's settings page stops a running turn (server/spawn.ts `signalTurn`; a test passes its own). */
   signalTurn?: SignalTurn;
   /**
@@ -308,6 +310,7 @@ function settingsDeps(deps: ConsoleDeps): ChatSettingsDeps {
     ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}),
     ...(deps.prompt ? { enabled: new Set(deps.prompt.capabilities.map((c) => c.capability.id)) } : {}),
     computer: computerOf(deps),
+    warmRunners: !!deps.warmRunners,
   };
 }
 

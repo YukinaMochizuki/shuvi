@@ -9,6 +9,7 @@ import { stopTurn } from "../server/commands.ts";
 import type { SignalTurn } from "../server/spawn.ts";
 import type { Db } from "../store/db.ts";
 import { forgetConversations } from "../store/events.ts";
+import { setWarmPinned } from "../store/warm.ts";
 import { HISTORY_ON_NEW } from "../agent/turn.ts";
 import { startClean } from "../agent/switch.ts";
 import { revokeGrant } from "../capabilities/computer/secrets.ts";
@@ -42,6 +43,9 @@ import { chatById } from "./queries.ts";
  *            (`forgetConversations`); the next turn opens with the last HISTORY_ON_NEW messages.
  *   clean    "Start clean": as `new`, but the next turn opens with its new messages only, not the last
  *            HISTORY_ON_NEW (agent/switch.ts `startClean`, the opening of a clean start).
+ *   warm     pin the chat warm (`pin=on`) or unpin it (`pin=off`): store/warm.ts `setWarmPinned`. The server keeps a
+ *            pinned chat's runner warm from its next pass (server/warm.ts `PinKeeper`); unpinned, the idle rule and
+ *            the cap apply to it again. Saved whatever the switch, which the page names when it is off.
  *   policy   the chat's entry in policy.yaml, from the Permissions form (policy-form.ts). `action=review` checks it
  *            with the policy parser and answers the diff; `action=save` writes it, as ONE commit in home/ authored
  *            as the owner from the console (`commitHomeEdit`, `by.console`, `expect`: the text it was decided on),
@@ -57,7 +61,7 @@ import { chatById } from "./queries.ts";
  *            (computer/secrets.ts `revokeGrant`): the card is answered and edited to say so.
  */
 
-export const CHAT_SETTINGS_WRITE = /^\/chats\/(\d+)\/settings\/(switch|profile|stop|new|policy|clean|schedule-cancel|schedule-pause|schedule-resume|revoke)$/;
+export const CHAT_SETTINGS_WRITE = /^\/chats\/(\d+)\/settings\/(switch|profile|stop|new|policy|clean|warm|schedule-cancel|schedule-pause|schedule-resume|revoke)$/;
 
 const KEEP_MS = 10 * 60_000;
 const KEEP_MAX = 20;
@@ -150,6 +154,21 @@ export function chatSettingsWrite(deps: ChatSettingsWriteDeps, chatId: number, v
       return back({
         section: "conversation",
         flash: { tone: "ok", text: `${stopped ? `Stopped turn ${stopped.id}; ` : ""}${label} starts clean: her next turn here opens with its new messages only, no earlier ones, and she cannot look back through the chat's history while this conversation lasts.` },
+      });
+    }
+    case "warm": {
+      const pin = text(form, "pin");
+      if (pin !== "on" && pin !== "off") return back({ section: "warm", flash: { tone: "refused", text: "Pick Keep warm or Stop keeping warm." } });
+      setWarmPinned(db, chatId, pin === "on");
+      return back({
+        section: "warm",
+        flash: {
+          tone: "ok",
+          text:
+            pin === "on"
+              ? `${label} is kept warm: its runner never idles out, and the server starts one when it has none.`
+              : `${label} is no longer kept warm: its runner idles out and counts toward the warm limit again, from now.`,
+        },
       });
     }
     case "policy":

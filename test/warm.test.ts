@@ -13,14 +13,15 @@ import { WarmClaude, warmFingerprint, type FingerprintParts, type WarmSpec } fro
 import { commandPass, switchRequestPass } from "../src/server/commands.ts";
 import { processStart } from "../src/server/spawn.ts";
 import { HANDOFF_ACK_MS, HANDOFF_LOST, wakerPass } from "../src/server/waker.ts";
-import { drainWarmRunners, retireChatRunner, startWarmRunners } from "../src/server/warm.ts";
+import { drainWarmRunners, PIN_AFTER_TURN_GRACE_MS, PIN_ALERT_AFTER, PIN_BACKOFF_MAX_MS, PIN_START_GRACE_MS, PIN_WARM_MIN_MS, pinBackoffMs, PinKeeper, retireChatRunner, startWarmRunners } from "../src/server/warm.ts";
 import type { Db } from "../src/store/db.ts";
 import { ensureChat, getChat, lastOwnerName, recordFrameworkEvent, recordInbound, triggersAfter, turnOwnerName, type CommandPayload } from "../src/store/events.ts";
 import { addModel, defaultModel, seedModels } from "../src/store/models.ts";
 import { setChatProfile } from "../src/store/profiles.ts";
 import { claimTurn, closeNeverStarted, finishTurn, getTurn, lastClosedTurn, MAX_ATTEMPTS, retryDelayMs, runningTurns } from "../src/store/turns.ts";
 import { fileSource } from "../src/secrets/source.ts";
-import { ackHandoff, allWarmRunners, isDraining, pendingHandoff, registerWarm, setDraining, warmRunnerFor, type WarmRunner } from "../src/store/warm.ts";
+import { ackHandoff, allWarmRunners, enforceCap, isDraining, pendingHandoff, registerWarm, setDraining, setWarmPinned, warmRunnerFor, type WarmRunner } from "../src/store/warm.ts";
+import { defaultPolicy } from "../src/policy/policy.ts";
 import { codeVersion, runnerConfigHash } from "../src/version.ts";
 import { memDb, OWNER, ownerChatId, ownerSays, ScriptedAdapter } from "./helpers.ts";
 
@@ -683,6 +684,51 @@ describe("a warm runner waiting (runner/warm.ts)", () => {
     await p;
   });
 
+  test("pinned, it never idles out; unpinned, its idle time starts then", async () => {
+    const w = await setup({ idleMs: 300 });
+    setWarmPinned(w.db, w.chatId, true);
+    const p = quiet(() => stayWarm(w.runner, w.first, w.signals));
+    await registered(w.db, w.chatId);
+    await Bun.sleep(900);
+    expect(warmRunnerFor(w.db, w.chatId)?.pid).toBe(process.pid); // three idle limits later, still there
+    const unpinnedAt = Date.now();
+    setWarmPinned(w.db, w.chatId, false);
+    const line = await p;
+    expect(line).toContain("idle past");
+    expect(Date.now() - unpinnedAt).toBeGreaterThanOrEqual(250);
+  });
+
+  test("a turnless start (a pinned chat, no conversation yet) opens a CLI for a new conversation; its first turn runs on it", async () => {
+    const w = await setup();
+    FakeBackend.turns = [];
+    const opened = FakeSession.opened.length;
+    w.runner.warm = new WarmClaude(fakeClaude, () => {}); // a fresh runner: no CLI yet
+    const p = quiet(() => stayWarm(w.runner, { turnless: w.chatId }, w.signals));
+    await registered(w.db, w.chatId);
+    expect(FakeSession.opened.length).toBe(opened + 1);
+    expect(FakeSession.opened.at(-1)!.resumeSessionId).toBeUndefined(); // no conversation: a new one
+    ownerSays(w.db, "first words");
+    const t = wakerPass({ db: w.db, spawn: () => { throw new Error("must not spawn"); }, alive: () => true, signalWarm: () => {} }).started[0]!;
+    const done = await closed(w.db, t);
+    expect([done.status, done.handoff]).toEqual(["done", "acked"]);
+    expect(done.timings!.cli).toBeUndefined(); // on the CLI the start opened
+    expect(FakeBackend.turns.at(-1)!.conversation).toBeNull(); // `run`: it started the conversation
+    expect(getChat(w.db, w.chatId)!.backendSessionId).toBe("s-warm");
+    w.retire();
+    await p;
+  });
+
+  test("a turnless start does not register while another process runs the chat's turn (guard 1), and leaves", async () => {
+    const w = await setup();
+    w.runner.warm = new WarmClaude(fakeClaude, () => {});
+    ownerSays(w.db, "cold");
+    const cold = claimTurn(w.db, w.chatId)!; // a child runs it
+    const line = await quiet(() => stayWarm(w.runner, { turnless: w.chatId }, w.signals));
+    expect(line).toContain("another process runs its chat's turn");
+    expect(warmRunnerFor(w.db, w.chatId)).toBeUndefined();
+    finishTurn(w.db, cold.id, { status: "done" });
+  });
+
   test("it does not stay after a stopped turn, a lost conversation, a drain, a /new or a switch waiting, or another provider", async () => {
     const w = await setup();
     const sig = { stop: new AbortController().signal, retired: () => false };
@@ -828,6 +874,11 @@ describe("review fixes: identity, the abandon's transaction, a concluded turn, t
     expect(runnerConfigHash(base, ["speech"])).not.toBe(h);
     // Nothing of a value is in it.
     expect(h.includes("a2V5")).toBe(false);
+    // What a process manager or shell sets anew on every start does not count (systemd's INVOCATION_ID, a shell's PWD).
+    const started = { ...base, INVOCATION_ID: "a1", JOURNAL_STREAM: "8:1", SYSTEMD_EXEC_PID: "10", PWD: "/a", SHLVL: "1", _: "/usr/bin/bun" };
+    expect(runnerConfigHash(started, ids)).toBe(h);
+    expect(runnerConfigHash({ ...started, INVOCATION_ID: "b2", JOURNAL_STREAM: "8:2", SYSTEMD_EXEC_PID: "11", OLDPWD: "/b" }, ids)).toBe(h);
+    expect(runnerConfigHash({ ...started, INVOCATION_ID: "b2", SHUVI_WARM_IDLE_SEC: "30" }, ids)).not.toBe(h);
     // Both retire at the server's start, and at a hand-off.
     for (const other of [capability, key]) {
       const db = memDb();
@@ -920,6 +971,232 @@ describe("review fixes: identity, the abandon's transaction, a concluded turn, t
     expect(turnOwnerName(db, chatId, OWNER, input)).toBe("Second");
     // A warm runner looks at the same events (what is past the cursor): the same name.
     expect(turnOwnerName(db, chatId, OWNER, triggersAfter(db, chatId, getChat(db, chatId)!.cursorSeq))).toBe("Second");
+  });
+});
+
+describe("pinned warm (chats.warm_pinned; server/warm.ts PinKeeper)", () => {
+  function pinWorld(o: { now?: number; identity?: { codeVersion: string; configHash: string } } = {}) {
+    const db = memDb();
+    seedModels(db, {});
+    ownerSays(db, "hi");
+    const chatId = ownerChatId(db);
+    let now = o.now ?? 1_000_000;
+    const signals: string[] = [];
+    let draining = false;
+    const spawned: number[] = [];
+    const alive = new Set<number>();
+    let nextPid = 7000;
+    const keeper = new PinKeeper({
+      db,
+      enabled: true,
+      max: 2,
+      draining: () => draining,
+      policy: () => defaultPolicy(),
+      ownerId: OWNER,
+      ...(o.identity ? { identity: o.identity } : {}),
+      spawn: (c) => {
+        spawned.push(c);
+        const pid = nextPid++;
+        alive.add(pid);
+        return pid;
+      },
+      alive: (pid) => alive.has(pid),
+      startOf: () => "1",
+      signal: (pid, _s, sig) => void signals.push(`${pid}:${sig}`),
+      kill: (pid) => void alive.delete(pid),
+      now: () => now,
+      log: () => {},
+    });
+    const lastPid = () => nextPid - 1;
+    /** The started runner opens its CLI and registers, as runner/warm.ts would. */
+    const registers = (pid = lastPid()) => registerWarm(db, row(chatId, pid, new Date(now).toISOString(), { pidStart: "1" }), 2);
+    /** Pass every second for `ms` (as the server's loop does). */
+    const run = (ms: number) => {
+      const out: number[] = [];
+      for (let t = 0; t < ms; t += 1000) {
+        out.push(...keeper.pass());
+        now += 1000;
+      }
+      return out;
+    };
+    return { db, chatId, keeper, spawned, alive, lastPid, registers, signals, run, tick: (ms: number) => (now += ms), drain: (on: boolean) => (draining = on) };
+  }
+
+  test("a pinned chat gets a runner on the server's first pass, none while unpinned, draining, or a turn runs", () => {
+    const w = pinWorld();
+    expect(w.keeper.pass()).toEqual([]); // not pinned
+    setWarmPinned(w.db, w.chatId, true);
+    w.drain(true);
+    expect(w.keeper.pass()).toEqual([]);
+    w.drain(false);
+    const t = claimTurn(w.db, w.chatId)!; // a turn runs: its runner may stay after it
+    expect(w.keeper.pass()).toEqual([]);
+    finishTurn(w.db, t.id, { status: "done" });
+    expect(w.keeper.pass()).toEqual([w.chatId]); // as after a server start, and right after pinning
+    // Opening its CLI: no second start.
+    w.tick(1000);
+    expect(w.keeper.pass()).toEqual([]);
+    w.registers();
+    w.tick(5000);
+    expect(w.keeper.pass()).toEqual([]);
+  });
+
+  test("after its runner exits (a /stop, a /new, a retire), the next pass starts another", () => {
+    const w = pinWorld();
+    setWarmPinned(w.db, w.chatId, true);
+    w.keeper.pass();
+    w.registers();
+    w.run(PIN_WARM_MIN_MS + 1000); // warm long enough: its start succeeded
+    // It leaves (its row goes, its process ends).
+    w.db.$client.query("delete from warm_runners").run();
+    w.alive.delete(w.lastPid());
+    w.tick(3000);
+    expect(w.keeper.pass()).toEqual([w.chatId]);
+  });
+
+  test("starts that keep failing back off (doubling) and alert the owner once", () => {
+    const w = pinWorld();
+    setWarmPinned(w.db, w.chatId, true);
+    const starts: number[] = [];
+    for (let i = 0; i < 40; i++) {
+      if (w.keeper.pass().length) starts.push(i);
+      w.alive.clear(); // every runner dies before it is warm
+      w.tick(1000);
+    }
+    // Gaps between starts grow: 5 s, 10 s, 20 s ... (a tight loop would start ~20 times).
+    expect(starts.length).toBeLessThanOrEqual(5);
+    const gaps = starts.slice(1).map((s, i) => s - starts[i]!);
+    for (let i = 1; i < gaps.length; i++) expect(gaps[i]!).toBeGreaterThanOrEqual(gaps[i - 1]!);
+    expect(pinBackoffMs(1)).toBe(5000);
+    expect(pinBackoffMs(30)).toBe(10 * 60_000);
+    const sent = alerts(w.db).filter((a) => a.k.startsWith(`warm-pin:${w.chatId}:`));
+    expect(sent.length).toBe(1);
+    // A start that succeeds (warm for PIN_WARM_MIN_MS) resets it.
+    w.tick(PIN_BACKOFF_MAX_MS);
+    expect(w.keeper.pass()).toEqual([w.chatId]);
+    w.registers();
+    w.run(PIN_WARM_MIN_MS + 1000);
+    w.db.$client.query("delete from warm_runners").run();
+    w.alive.clear();
+    w.tick(3000);
+    expect(w.keeper.pass()).toEqual([w.chatId]); // no backoff left
+  });
+
+  test("a runner that registers and then dies soon after (its CLI died idle, it found it could not stay) is a failed start: backoff and one alert", () => {
+    const w = pinWorld();
+    setWarmPinned(w.db, w.chatId, true);
+    let starts = 0;
+    for (let t = 0; t < 1200; t++) {
+      if (w.keeper.pass().length) {
+        starts++;
+        w.registers(); // it opens its CLI and registers at once...
+      } else if (warmRunnerFor(w.db, w.chatId)) {
+        // ...and dies 2 s later.
+        w.db.$client.query("delete from warm_runners").run();
+        w.alive.clear();
+      }
+      w.tick(1000);
+    }
+    // 1200 s: without the rule, a start every ~2 s (~600); with it, the backoff's handful.
+    expect(starts).toBeLessThanOrEqual(10);
+    expect(alerts(w.db).filter((a) => a.k.startsWith(`warm-pin:${w.chatId}:`)).length).toBe(1);
+  });
+
+  test("a start succeeds once its runner served a turn, even before PIN_WARM_MIN_MS", () => {
+    const w = pinWorld();
+    setWarmPinned(w.db, w.chatId, true);
+    // Two failed starts first (each dies before it is warm): the next waits 10 s.
+    expect(w.keeper.pass()).toEqual([w.chatId]);
+    w.alive.clear();
+    w.tick(1000);
+    w.keeper.pass();
+    w.tick(pinBackoffMs(1));
+    expect(w.keeper.pass()).toEqual([w.chatId]);
+    w.alive.clear();
+    w.tick(1000);
+    w.keeper.pass();
+    w.tick(pinBackoffMs(2));
+    expect(w.keeper.pass()).toEqual([w.chatId]);
+    const pid = w.lastPid();
+    w.registers(pid);
+    w.tick(1000);
+    w.keeper.pass();
+    // Handed a turn and ran it (its row goes with the hand-off), then retired by a /new right after: 5 s of life.
+    ownerSays(w.db, "go");
+    const t = claimTurn(w.db, w.chatId, undefined, { alive: () => true, retired: [] })!;
+    finishTurn(w.db, t.id, { status: "done" });
+    w.alive.delete(pid);
+    w.tick(3000);
+    // Its start succeeded: no backoff (the next would otherwise wait 20 s), and no third failure.
+    expect(w.keeper.pass()).toEqual([w.chatId]);
+    expect(alerts(w.db).filter((a) => a.k.startsWith("warm-pin:"))).toEqual([]);
+  });
+
+  test("a row on other code or configuration than this server is retired and replaced, not taken as warm", () => {
+    const w = pinWorld({ identity: { codeVersion: "v1", configHash: "c1" } });
+    setWarmPinned(w.db, w.chatId, true);
+    w.alive.add(4242);
+    registerWarm(w.db, row(w.chatId, 4242, new Date().toISOString(), { pidStart: "1", codeVersion: "v0" }), 2);
+    expect(w.keeper.pass()).toEqual([w.chatId]);
+    expect(w.signals).toEqual(["4242:SIGUSR2"]);
+    // Ours, when it registers on this server's identity, is warm.
+    registerWarm(w.db, row(w.chatId, w.lastPid(), new Date().toISOString(), { pidStart: "1" }), 2);
+    w.tick(5000);
+    expect(w.keeper.pass()).toEqual([]);
+    expect(w.signals).toEqual(["4242:SIGUSR2"]);
+  });
+
+  test("right after a turn closes, its runner is given PIN_AFTER_TURN_GRACE_MS to register again before a second one is started", () => {
+    const w = pinWorld({ now: Date.now() }); // the turn's ended_at is the real clock's
+    setWarmPinned(w.db, w.chatId, true);
+    w.alive.add(5151);
+    ownerSays(w.db, "go");
+    const t = claimTurn(w.db, w.chatId)!;
+    w.db.$client.query("update turns set pid = 5151, pid_start = '1' where id = ?").run(t.id);
+    finishTurn(w.db, t.id, { status: "done" });
+    expect(w.keeper.pass()).toEqual([]); // its runner (alive) may come back
+    w.tick(PIN_AFTER_TURN_GRACE_MS / 2);
+    expect(w.keeper.pass()).toEqual([]);
+    w.tick(PIN_AFTER_TURN_GRACE_MS);
+    expect(w.keeper.pass()).toEqual([w.chatId]); // it did not: the keeper steps in
+    // And a turn's runner that is gone is not waited for.
+    const w2 = pinWorld({ now: Date.now() });
+    setWarmPinned(w2.db, w2.chatId, true);
+    ownerSays(w2.db, "go");
+    const t2 = claimTurn(w2.db, w2.chatId)!;
+    w2.db.$client.query("update turns set pid = 5252, pid_start = '1' where id = ?").run(t2.id);
+    finishTurn(w2.db, t2.id, { status: "done" });
+    expect(w2.keeper.pass()).toEqual([w2.chatId]);
+  });
+
+  test("a start that does not open its CLI in time is killed and counted as failed", () => {
+    const w = pinWorld();
+    setWarmPinned(w.db, w.chatId, true);
+    w.keeper.pass();
+    const pid = w.lastPid();
+    w.tick(PIN_START_GRACE_MS + 1);
+    expect(w.keeper.pass()).toEqual([]); // killed, backing off
+    expect(w.alive.has(pid)).toBe(false);
+  });
+
+  test("a pinned runner neither counts toward SHUVI_WARM_MAX nor is retired by it; unpinned, it counts again", () => {
+    const db = memDb();
+    const [a, b, c] = [1, 2, 3].map((n) => ensureChat(db, { id: n, kind: "private" }).id) as [number, number, number];
+    setWarmPinned(db, a, true);
+    registerWarm(db, row(a, 1, "2026-01-01T00:00:01Z"), 1); // pinned, the oldest
+    expect(registerWarm(db, row(b, 2, "2026-01-01T00:00:02Z"), 1).registered).toBe(true); // the cap of 1 is b's alone
+    const r = registerWarm(db, row(c, 3, "2026-01-01T00:00:03Z"), 1);
+    expect(r.retired.map((x) => x.pid)).toEqual([2]); // b, not the pinned a
+    expect(allWarmRunners(db).map((x) => x.pid).sort()).toEqual([1, 3]);
+    // Pinned with a cap of 0: still registered.
+    setWarmPinned(db, b, true);
+    expect(registerWarm(db, row(b, 2, "2026-01-01T00:00:04Z"), 0).registered).toBe(true);
+    // a unpinned: the cap (1) over a and c applies at once.
+    setWarmPinned(db, a, false);
+    // Unpinned now: its idle_since is now, the most recently idle, so the cap retires c, not a.
+    expect(Date.now() - Date.parse(warmRunnerFor(db, a)!.idleSince)).toBeLessThan(5000);
+    expect(enforceCap(db, 1).map((x) => x.pid)).toEqual([3]);
+    expect(allWarmRunners(db).map((x) => x.pid).sort()).toEqual([1, 2]);
   });
 });
 
