@@ -22,6 +22,12 @@ const CHILD = join(dirname(fileURLToPath(import.meta.url)), "../runner/child.ts"
  * The child gets the server's environment minus the bot tokens: it never talks to Telegram. It runs in the
  * server's working directory, and Claude Code files a session under the directory it runs in: a session
  * agent/switch.ts makes is placed for this same one.
+ *
+ * A WARM RUNNER (`SHUVI_WARM_RUNNERS`, runner/warm.ts) is such a child that stayed after its turn: the same
+ * detached process, so it outlives a server restart exactly as a turn's child does, and the same liveness (its
+ * `warm_runners` row holds its pid and start time). The server signals it only through `signalWarm`, with the
+ * same check: SIGUSR1 "you were handed a turn", SIGUSR2 "retire". SIGTERM to a child keeps meaning "stop the
+ * turn" (and a runner stopped mid-turn, or idle, exits).
  */
 export type SpawnTurn = (turnId: number) => number;
 
@@ -96,6 +102,22 @@ export function isAlive(pid: number, start: string | null = null): boolean {
 }
 
 export type SignalTurn = (pid: number, start: string | null, signal: "SIGTERM" | "SIGKILL") => void;
+
+export type SignalWarm = (pid: number, start: string | null, signal: "SIGUSR1" | "SIGUSR2") => void;
+
+/**
+ * Signal a warm runner (SIGUSR1: a turn was handed to it; SIGUSR2: retire), only if it is still that process.
+ * Without a start time to check (no /proc) nothing is sent: either signal's default action would end a process
+ * that is not ours, and the runner polls the store anyway.
+ */
+export const signalWarm: SignalWarm = (pid, start, signal) => {
+  if (start === null || !isAlive(pid, start)) return;
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // gone in between
+  }
+};
 
 /** Signal a turn's process, but only if it is still that process. A process already gone is not an error. */
 export const signalTurn: SignalTurn = (pid, start, signal) => {

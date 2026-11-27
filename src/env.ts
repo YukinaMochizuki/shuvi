@@ -47,6 +47,11 @@ import { secretSource, type SecretSource } from "./secrets/source.ts";
  *                             before it is killed (default 15)
  *   SHUVI_METRICS_LISTEN      where /healthz and /metrics listen, LOOPBACK ONLY (default 127.0.0.1:8788;
  *                             server/health.ts); anything else is refused here, at startup
+ *   SHUVI_WARM_RUNNERS        "on" keeps a WARM RUNNER per chat between turns: the runner child of a Claude
+ *                             turn stays, holding a resident Claude Code CLI, and is handed the chat's next turn
+ *                             (runner/warm.ts). Default off: every turn spawns a child that exits after it
+ *   SHUVI_WARM_IDLE_SEC       how long a warm runner waits for its chat's next turn before it exits (default 600)
+ *   SHUVI_WARM_MAX            the most warm runners at once; one more retires the least recently idle (default 2)
  *
  * These are the framework's own variables. A capability reads its own (e.g. SHUVI_WEB,
  * SHUVI_TAVILY_API_KEY) in its own module, src/capabilities/<id>/, which lists them in its header.
@@ -74,6 +79,29 @@ export interface Config {
   drainMs: number;
   drainGraceMs: number;
   metricsListen: string;
+  /** Warm runners (`SHUVI_WARM_*`, runner/warm.ts). */
+  warm: WarmConfig;
+}
+
+export interface WarmConfig {
+  enabled: boolean;
+  idleMs: number;
+  max: number;
+}
+
+export const DEFAULT_WARM_IDLE_SEC = 600;
+export const DEFAULT_WARM_MAX = 2;
+
+/** `SHUVI_WARM_RUNNERS` (on: "on", "1", "true"; anything else, or unset: off), `SHUVI_WARM_IDLE_SEC`, `SHUVI_WARM_MAX`. */
+export function warmFromEnv(env: Record<string, string | undefined>): WarmConfig {
+  const on = ["on", "1", "true"].includes((env.SHUVI_WARM_RUNNERS ?? "").trim().toLowerCase());
+  const idle = env.SHUVI_WARM_IDLE_SEC?.trim();
+  const idleSec = idle ? Number(idle) : DEFAULT_WARM_IDLE_SEC;
+  if (!(idleSec > 0)) throw new Error("SHUVI_WARM_IDLE_SEC must be a positive number of seconds");
+  const maxS = env.SHUVI_WARM_MAX?.trim();
+  const max = maxS ? Number(maxS) : DEFAULT_WARM_MAX;
+  if (!Number.isInteger(max) || max < 0) throw new Error("SHUVI_WARM_MAX must be a whole number, 0 or more");
+  return { enabled: on, idleMs: Math.round(idleSec * 1000), max };
 }
 
 export const DEFAULT_CONSOLE_LISTEN = "127.0.0.1:8787";
@@ -142,6 +170,7 @@ export function loadConfig(opts: { needToken?: boolean } = {}): Config {
     drainMs: seconds("SHUVI_DRAIN_SEC", DEFAULT_DRAIN_SEC),
     drainGraceMs: seconds("SHUVI_DRAIN_GRACE_SEC", DEFAULT_DRAIN_GRACE_SEC),
     metricsListen: metricsListenFrom(process.env),
+    warm: warmFromEnv(process.env),
   };
 }
 

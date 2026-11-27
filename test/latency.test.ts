@@ -9,7 +9,7 @@ import { Kick, loop } from "../src/server/loop.ts";
 import { sendPass } from "../src/server/sender.ts";
 import { onWake, recordServerProcess, serverProcess, wakeServer } from "../src/server/wake.ts";
 import { wakerPass } from "../src/server/waker.ts";
-import { enqueueOutbound, getEvent } from "../src/store/events.ts";
+import { enqueueOutbound, getEvent, onTurnRowQueued } from "../src/store/events.ts";
 import { claimTurn, getTurn, markTurn } from "../src/store/turns.ts";
 import { FakeTelegram, memDb, ownerChatId, ownerSays, ScriptedAdapter } from "./helpers.ts";
 
@@ -119,6 +119,8 @@ describe("waking the sender from a runner child (server/wake.ts)", () => {
     const db = memDb();
     const kick = new Kick();
     removers.push(onWake(() => kick.kick()));
+    // As a runner child installs it (runner/run.ts): the store calls the hook, the hook wakes the server.
+    removers.push(onTurnRowQueued(wakeServer));
     recordServerProcess(db);
     expect(serverProcess(db)?.pid).toBe(process.pid);
 

@@ -107,15 +107,8 @@ const oneLine = (s: string, n = 160) => {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
 
-/**
- * The commit this server runs: `SHUVI_COMMIT` when the deployment sets it (a build without .git), else
- * `git describe --always --dirty` of the code checkout, read once at startup.
- */
-export function deployedCommit(repoDir: string, env: Record<string, string | undefined> = process.env): string {
-  if (env.SHUVI_COMMIT) return env.SHUVI_COMMIT;
-  const r = Bun.spawnSync(["git", "-C", repoDir, "describe", "--always", "--dirty"], { stderr: "ignore" });
-  return r.exitCode === 0 ? r.stdout.toString().trim() : "unknown";
-}
+/** The commit this server runs (src/version.ts, where a runner child reads it too without loading this module). */
+export { deployedCommit } from "../version.ts";
 
 /** What /status says. */
 export function statusText(db: Db, deps: ControlDeps): string {

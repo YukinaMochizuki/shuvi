@@ -233,7 +233,21 @@ try {
   // → lossless → T6 on another model of the same Claude login, with no conversation yet: a fork.
   addModel(store, { provider: "claude", model: "claude-opus-4-1" });
   const claudeDir = join(dataDir, "claude");
-  const sonnetBytes = readFileSync(sessionFile(claudeDir, claudeSession)!, "utf8");
+  // The conversation: its entries (each has a `uuid`), without Claude Code's per-process metadata lines
+  // (`last-prompt`, `cost-state`, …). A CLI appends those when it exits, which for a warm runner's resident CLI
+  // (SHUVI_WARM_RUNNERS) is when it is closed, possibly after the copy below.
+  const conversationOf = (text: string) =>
+    text
+      .split("\n")
+      .filter((l) => {
+        try {
+          return "uuid" in (JSON.parse(l) as object);
+        } catch {
+          return false;
+        }
+      })
+      .join("\n");
+  const sonnetBytes = conversationOf(readFileSync(sessionFile(claudeDir, claudeSession)!, "utf8"));
   check(switchModel(store, chat().id, "claude/claude-opus-4-1", "lossless").carried > 0, "a lossless switch to a model of the same login with no conversation copies it");
   const opusSession = chat().session!;
   check(chat().owner === "claude/claude-opus-4-1" && opusSession !== claudeSession && !!sessionFile(claudeDir, opusSession), "a new session id, in the same login");
@@ -242,7 +256,7 @@ try {
   check(claudeModels.at(-1) !== claudeModels.at(-2), `T6 ran on another model than T5 (${claudeModels.at(-2)} → ${claudeModels.at(-1)})`);
   check(inOrder(r6, ["T1-PROMPT", '"name":"mcp__shuvi__say"', "T1-SAY", "T1-ANSWER", "T3-PROMPT", "T3-ANSWER", "T4-PROMPT", "T4-ANSWER", "T5-PROMPT", "T5-ANSWER", "T6-PROMPT"]).length === 0 && !r6.includes("T2-"), "the CLI resumed the copy: sonnet's conversation as it was, then T6's prompt");
   check(["T1-PROMPT", "T5-PROMPT"].every((m) => count(r6, m) === 1), "each earlier turn once");
-  check(readFileSync(sessionFile(claudeDir, claudeSession)!, "utf8") === sonnetBytes, "sonnet's own session file is untouched");
+  check(conversationOf(readFileSync(sessionFile(claudeDir, claudeSession)!, "utf8")) === sonnetBytes, "sonnet's own session file is untouched");
 
   // → lossy → T7 on sonnet: its own session, without T6.
   switchModel(store, chat().id, "claude/claude-sonnet-4-5", "lossy");

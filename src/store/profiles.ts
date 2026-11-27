@@ -1,7 +1,7 @@
 import { asc, eq } from "drizzle-orm";
 import type { Db } from "./db.ts";
 import type { Chat } from "./events.ts";
-import { chats } from "./schema.ts";
+import { chats, warmRunners } from "./schema.ts";
 
 /**
  * Which profile each chat uses (`chats.profile`; the profiles themselves are folders in home/:
@@ -10,7 +10,11 @@ import { chats } from "./schema.ts";
  */
 
 export function setChatProfile(db: Db, chatId: number, profile: string | null): void {
-  db.update(chats).set({ profile }).where(eq(chats.id, chatId)).run();
+  db.transaction((tx) => {
+    tx.update(chats).set({ profile }).where(eq(chats.id, chatId)).run();
+    // The chat's warm runner, if one waits, is retired (store/warm.ts): its CLI's prompt was the old profile's.
+    tx.delete(warmRunners).where(eq(warmRunners.chatId, chatId)).run();
+  });
 }
 
 /** The chats set to `profile`, oldest first. */

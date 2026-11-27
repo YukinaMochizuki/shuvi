@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import type { Acting } from "./acting.ts";
-import { LostSessionError, type BackendAdapter, type Prompt, type ToolBoundary } from "agent-runtime";
+import { LostSessionError, type BackendAdapter, type Prompt, type ToolBoundary, type TurnUsage } from "agent-runtime";
 import {
   capabilityDelegated,
   capabilityHolds,
@@ -20,6 +20,7 @@ import { raiseAlert } from "../store/control.ts";
 import {
   enqueueOutbound,
   getChat,
+  turnOwnerName,
   previousEvent,
   recentHistory,
   resetConversation,
@@ -99,8 +100,15 @@ export function isLostSession(e: unknown): boolean {
  * How the model's output becomes messages (docs/design.md §4, "C'"):
  *   - Reply TEXT (not thinking) is buffered and becomes one message at each boundary: when a tool call
  *     arrives (`onTool`, which fires before the tool runs, so the text before a `say` is queued before the
- *     `say`), and when the turn ends. Thinking is never sent: on Opus 5.5 it carries reasoning summaries
- *     that cannot be told apart from progress notes.
+ *     `say`), and when the turn ends. The turn ends for the reply when the driver reports its RESULT
+ *     (`onResult`), which on Claude comes some hundreds of ms before the driver returns (the CLI still has to
+ *     exit, or the resident one to settle): the last text is queued there, and the transcript records it then
+ *     as it would at the return. The turn itself still closes (`finishTurn`, the cursor) only once the driver
+ *     has returned, so the conversation is fully written before the next turn can start. A driver that fails
+ *     AFTER its result (a CLI exiting non-zero) does not undo it: the reply is queued, so the turn closes as
+ *     `done`, with the result's usage and a transcript note; failing it would answer the same messages again. A
+ *     stop is still a stop. Thinking is never sent: on Opus 5.5 it carries reasoning summaries that cannot be
+ *     told apart from progress notes.
  *   - `say` queues a message mid-turn, for progress the model wants the person to see. The `say`, `react`
  *     and `pass` tools live in src/capabilities/speech/; the rules they rely on (queueMessage, the
  *     boundary) stay here.
@@ -160,8 +168,8 @@ export function isLostSession(e: unknown): boolean {
  * depends on it.
  *
  * TIMINGS (store/turns.ts `markTurn`): when the driver is called (`query`), its first output, token or tool
- * (`firstOutput`), and when it returns (`returned`); the first row queued is marked where every row is queued
- * (store/events.ts). Best effort, like the transcript.
+ * (`firstOutput`), its result (`result`), and when it returns (`returned`); the first row queued is marked where
+ * every row is queued (store/events.ts). Best effort, like the transcript.
  */
 
 export interface TurnDeps {
@@ -557,8 +565,12 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     finishTurn(db, turnId, { status: "failed", error: rec.redactText(e instanceof Error ? e.message : String(e)) });
     return "failed";
   }
-  const firstOwnerMessage = input.find((e) => e.kind === "message" && (deps.ownerId === undefined || (e.payload as unknown as MessagePayload).from.id === deps.ownerId));
-  const ownerName = deps.ownerName ?? (firstOwnerMessage ? (firstOwnerMessage.payload as unknown as MessagePayload).from.name : undefined);
+  // The owner's name by the one rule a warm runner uses too (store/events.ts `turnOwnerName`), so both build the same
+  // prompt. Without an owner id (a bare call, a test): whoever wrote first in the input.
+  const anyone = input.find((e) => e.kind === "message");
+  const ownerName =
+    deps.ownerName ??
+    (deps.ownerId !== undefined ? turnOwnerName(db, chat.id, deps.ownerId, input) : anyone ? (anyone.payload as unknown as MessagePayload).from.name : undefined);
   const owner: OwnerInfo = { ...(ownerName ? { name: ownerName } : {}), ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
   const tools = capabilityTools(capabilities, {
     db,
@@ -577,6 +589,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive, opening) : renderTurnInput(input, deps.timeZone, perceive, opening);
   let lastThinking = false;
   let output = false;
+  /** The driver's result, once reported (`onResult`): the turn's reply is queued from then on. */
+  let concluded: { usage: TurnUsage } | null = null;
   const outputSeen = () => {
     if (output) return;
     output = true;
@@ -604,6 +618,14 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     onSessionId: (id: string) => {
       saveSession(db, chat.id, id);
       setTurnConversation(db, turnId, { backendSessionId: id });
+    },
+    // The reply goes out at the result, not when the driver returns (the header). What is queued here is the
+    // same text the return's flush would have queued; that flush then finds nothing left.
+    onResult: (info: { usage: TurnUsage }) => {
+      concluded = info;
+      markTurn(db, turnId, { result: Date.now() });
+      lastThinking = false;
+      flush();
     },
     // The driver compacted the conversation (agent-runtime's `onCompaction`, from its claude-compaction-event
     // change on): a step in the transcript. Typed here, so this compiles against a runtime without it too.
@@ -636,7 +658,8 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
           opts,
         );
       } catch (e) {
-        if (deps.signal?.aborted || !isLostSession(e)) throw e;
+        // A turn that has concluded (its result reported, its reply queued) is never started over.
+        if (deps.signal?.aborted || !isLostSession(e) || concluded) throw e;
         resetConversation(db, chat.id);
         setTurnConversation(db, turnId, { opening: "lost" });
         raiseAlert(db, {
@@ -661,6 +684,17 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     finishTurn(db, turnId, { status: "done", usage: u, contextTokens: u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens + u.outputTokens });
     return "done";
   } catch (e) {
+    const why = rec.redactText(e instanceof Error ? e.message : String(e));
+    const done = concluded as { usage: TurnUsage } | null;
+    if (done && !deps.signal?.aborted) {
+      // The driver failed AFTER its result (the CLI exiting badly, say): the reply is queued already, so the turn
+      // is done, as it would be had the driver returned. Failing it would answer the same messages again.
+      const u = done.usage;
+      rec.note(`The driver failed after reporting the turn's result (${why}); the reply had been queued, so the turn closed as done.`);
+      rec.end(u.model);
+      finishTurn(db, turnId, { status: "done", usage: u, contextTokens: u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens + u.outputTokens });
+      return "done";
+    }
     // What was half-written was not sent; the transcript keeps it as such.
     rec.end();
     if (deps.signal?.aborted) {
@@ -669,7 +703,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       return "stopped";
     }
     // Redacted like the transcript: the error is shown in the console and sent in the control bot's alert.
-    finishTurn(db, turnId, { status: "failed", error: rec.redactText(e instanceof Error ? e.message : String(e)) });
+    finishTurn(db, turnId, { status: "failed", error: why });
     return "failed";
   }
 }

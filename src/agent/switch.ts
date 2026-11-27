@@ -6,7 +6,7 @@ import { conversationEnd, conversationExists, conversationSince, insertMessages 
 import type { Db } from "../store/db.ts";
 import { getChat, lastChatSeq, type Chat } from "../store/events.ts";
 import { chatModel, defaultModel, findModel, getProvider, laneOf, listModels, listProviders, parseLane, SEEDED_PROVIDER, unknownLane, type CatalogModel } from "../store/models.ts";
-import { chatConversations, chats, modelSwitches, modelSwitchRequests, turns } from "../store/schema.ts";
+import { chatConversations, chats, modelSwitches, modelSwitchRequests, turns, warmRunners } from "../store/schema.ts";
 import { getTurn, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
 
 /** A read: the store itself, or the handle of a transaction the caller holds. */
@@ -254,6 +254,8 @@ export function startClean(db: Db, chatId: number, since?: number): void {
     tx.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null, conversationModel: model, cleanSince: since ?? lastChatSeq(tx, chatId) }).where(eq(chats.id, chatId)).run();
     tx.delete(chatConversations).where(eq(chatConversations.chatId, chatId)).run();
     tx.insert(modelSwitches).values({ chatId, fromModel: model, toModel: model, mode: "clean", fromSessionId: chat.backendSessionId, toSessionId: null, carried: 0, compacted: false }).run();
+    // The chat's warm runner, if one waits, is retired (store/warm.ts), as `/new` retires it.
+    tx.delete(warmRunners).where(eq(warmRunners.chatId, chatId)).run();
   }, IMMEDIATE);
 }
 
@@ -367,6 +369,8 @@ export function applySwitchRequest(db: Db, req: SwitchRequest, opts: SwitchOptio
   const doneAt = () => new Date().toISOString();
   try {
     const result = switchModel(db, req.chatId, req.toModel, req.mode, { ...opts, stoppedTurnId: req.stoppedTurnId });
+    // The chat's warm runner, if one waits, is retired (store/warm.ts): its CLI served the model or conversation left.
+    if (result.changed) db.delete(warmRunners).where(eq(warmRunners.chatId, req.chatId)).run();
     db.update(modelSwitchRequests).set({ status: "done", result: { ...result }, doneAt: doneAt() }).where(eq(modelSwitchRequests.id, req.id)).run();
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);

@@ -1,0 +1,1 @@
+ALTER TABLE `warm_runners` ADD `config_hash` text DEFAULT '' NOT NULL;
