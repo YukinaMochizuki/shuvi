@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelMessage } from "agent-runtime/openai-compat";
 import { appendToClaudeSession } from "agent-runtime/convert";
-import { makeDriver } from "../src/agent/backend.ts";
+import { loadDriver, makeDriver } from "../src/agent/backend.ts";
 import { enterChatModel, switchModel } from "../src/agent/switch.ts";
 import { runTurn } from "../src/agent/turn.ts";
 import { conversationLabel } from "../src/console/pages.ts";
@@ -17,6 +17,10 @@ import { addModel, addProvider, setDefaultModel } from "../src/store/models.ts";
 import { stepsOf } from "../src/store/transcripts.ts";
 import { claimTurn, finishTurn, getTurn, saveSession, setTurnConversation } from "../src/store/turns.ts";
 import { memDb, ownerChatId, ownerSays, ScriptedAdapter } from "./helpers.ts";
+
+// As the runner does before it builds a driver (backend.ts `loadDriver`).
+await loadDriver("claude");
+await loadDriver("openai-compat");
 
 const dirs: string[] = [];
 const originalFetch = globalThis.fetch;

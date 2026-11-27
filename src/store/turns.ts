@@ -107,6 +107,38 @@ export function setTurnPid(db: Db, id: number, pid: number, pidStart: string | n
   db.update(turns).set({ pid, pidStart }).where(eq(turns.id, id)).run();
 }
 
+/**
+ * Where a turn's time went (`turns.timings`), as epoch-ms marks, each written by the process that saw it:
+ *
+ *   claimed      the waker claimed the turn                    (server/waker.ts)
+ *   spawned      the waker's spawn of the runner child returned
+ *   child        the runner child's process began (`performance.timeOrigin`)   (runner/run.ts)
+ *   ready        the runner is about to call `runTurn`: its modules, config, store and driver loaded
+ *   query        the driver was called                          (agent/turn.ts)
+ *   firstOutput  the driver's first token (thinking included) or tool call
+ *   queuedFirst  the turn's first outbound row was queued       (store/events.ts `enqueueOutbound`)
+ *   returned     the driver returned (not on a throw or a stop)
+ */
+export type TurnMark = "claimed" | "spawned" | "child" | "ready" | "query" | "firstOutput" | "queuedFirst" | "returned";
+export type TurnTimings = Partial<Record<TurnMark, number>>;
+
+/**
+ * Record marks of turn `id` (`TurnTimings`). A mark already recorded is kept (`json_insert`), so "first" marks
+ * need no read before the write, and two processes writing different marks never lose each other's. Best effort:
+ * a failure is logged and swallowed; it never fails the turn.
+ */
+export function markTurn(db: Db, id: number, marks: TurnTimings): void {
+  const entries = Object.entries(marks).filter(([, v]) => typeof v === "number" && Number.isFinite(v));
+  if (!entries.length) return;
+  try {
+    // The keys are `TurnMark`s (fixed words), never input; the values are bound.
+    const paths = entries.map(([k]) => `'$.${k}', ?`).join(", ");
+    db.$client.query(`update turns set timings = json_insert(coalesce(timings, '{}'), ${paths}) where id = ?`).run(...entries.map(([, v]) => Math.round(v as number)), id);
+  } catch (e) {
+    console.error(`turn ${id}: could not record timings:`, e instanceof Error ? e.message : e);
+  }
+}
+
 /** Record that the waker sent SIGTERM for the wall-clock limit (the first time only). */
 export function markTerm(db: Db, id: number, at: string): void {
   db.update(turns).set({ termAt: at }).where(and(eq(turns.id, id), isNull(turns.termAt))).run();

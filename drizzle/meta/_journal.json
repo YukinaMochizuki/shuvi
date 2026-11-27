@@ -204,6 +204,13 @@
       "when": 1795675008742,
       "tag": "0028_abandoned_princess_powerful",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1795790234804,
+      "tag": "0029_big_tusk",
+      "breakpoints": true
     }
   ]
 }

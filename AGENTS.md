@@ -53,6 +53,8 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | receiving updates and the Telegram offset | `src/server/poller.ts`, `src/telegram/inbound.ts` |
 | sending, 429s, long messages | `src/server/sender.ts`, `src/telegram/format.ts` |
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` (the entry point), `src/runner/run.ts` (the turn's body) |
+| waking the waker and the sender early (a loop's `Kick`, a runner child's SIGUSR2 to the recorded server; polling stays the guarantee), and what a runner child loads before its turn | `src/server/loop.ts`, `src/server/wake.ts`; `src/runner/run.ts`, `src/agent/backend.ts` (`loadDriver`) |
+| where a turn's time went (`turns.timings`), when a row went out (`chat_events.sent_at`) | `src/store/turns.ts` (`markTurn`), `src/store/events.ts` (`enqueueOutbound`, `markSent`) |
 | shutting down: the drain on SIGTERM, its deadline, what it keeps | `src/server/drain.ts`, `src/server/main.ts` (`shutdown`); docs/design.md §16 |
 | the retry of a turn the drain stopped (`DRAIN_STOP`, the retry note) | `src/store/turns.ts`, `src/agent/turn.ts` (`isRetryAfterDrain`), `src/agent/render.ts` (`RETRY_NOTE`) |
 | the container, CI and the release | `Dockerfile`, `.github/workflows/ci.yml`, `release.yml`; the README's "Deploying" |

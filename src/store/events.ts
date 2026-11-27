@@ -1,6 +1,8 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, max, ne, notInArray, or } from "drizzle-orm";
 import type { Db } from "./db.ts";
+import { wakeServer } from "../server/wake.ts";
 import { asksForTurn, chatConversations, chatEvents, chats, deletedEvents, kv, OUTBOUND_KINDS, spentIdemKeys, TRIGGER_KINDS } from "./schema.ts";
+import { markTurn } from "./turns.ts";
 
 /**
  * Reads and writes on `chat_events`, `chats` and `kv`. Every write that must happen once is an
@@ -400,6 +402,10 @@ export function recordFrameworkEvent(
 /**
  * Queue something for the sender. `idemKey` makes a repeat a no-op: a turn that is re-run, or a tool
  * handler that is retried, writes the same key and the second write is dropped.
+ *
+ * A row carrying `turnId` is a turn's, queued from its runner child (agent/turn.ts and the capabilities' tools):
+ * a new one records the turn's `queuedFirst` mark (turns.ts `markTurn`) and wakes the server's sender
+ * (server/wake.ts), both best effort. Every path that queues for a turn comes through here, so none is missed.
  */
 export function enqueueOutbound(
   db: Db,
@@ -422,6 +428,10 @@ export function enqueueOutbound(
     .onConflictDoNothing()
     .returning({ seq: chatEvents.seq })
     .get();
+  if (row && e.turnId !== undefined) {
+    markTurn(db, e.turnId, { queuedFirst: Date.now() });
+    wakeServer(db);
+  }
   // A second write of the same key wrote nothing: the row that holds the key is the message.
   return row?.seq ?? db.select({ seq: chatEvents.seq }).from(chatEvents).where(eq(chatEvents.idemKey, e.idemKey)).get()?.seq ?? null;
 }
@@ -446,7 +456,7 @@ export function recordPartSent(db: Db, seq: number, payload: BotMessagePayload, 
 }
 
 export function markSent(db: Db, seq: number, tgMessageId: number | null): void {
-  db.update(chatEvents).set({ status: "sent", tgMessageId }).where(eq(chatEvents.seq, seq)).run();
+  db.update(chatEvents).set({ status: "sent", tgMessageId, sentAt: new Date().toISOString() }).where(eq(chatEvents.seq, seq)).run();
 }
 
 export function markFailed(db: Db, seq: number, note: string): void {

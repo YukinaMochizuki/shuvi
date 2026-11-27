@@ -5,7 +5,7 @@ import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
 import { allChats, getChat, lastTriggerSeq, triggersAfter } from "../store/events.ts";
-import { chatLabel, claimTurn, finishTurn, IMMEDIATE, markTerm, retryDelayMs, runningTurns, setTurnPid } from "../store/turns.ts";
+import { chatLabel, claimTurn, finishTurn, IMMEDIATE, markTerm, markTurn, retryDelayMs, runningTurns, setTurnPid } from "../store/turns.ts";
 import { isAlive, processStart, signalTurn, type SignalTurn, type SpawnTurn } from "./spawn.ts";
 
 /**
@@ -155,9 +155,13 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
     if (caps.length && triggersAfter(db, chat.id, chat.cursorSeq).some((e) => capabilityHolds(caps, e, now()))) continue;
     const turn = claimTurn(db, chat.id, trigger);
     if (!turn) continue;
+    // Wall-clock marks (store/turns.ts `markTurn`), written once the child is on its way.
+    const claimed = Date.now();
+    let spawned: number;
     let pid: number;
     try {
       pid = spawn(turn.id);
+      spawned = Date.now();
     } catch (e) {
       finishTurn(db, turn.id, { status: "failed", error: `spawn failed: ${e instanceof Error ? e.message : String(e)}` });
       continue;
@@ -169,6 +173,7 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
     } catch (e) {
       console.error(`waker: could not record pid ${pid} for turn ${turn.id}:`, e);
     }
+    markTurn(db, turn.id, { claimed, spawned });
     started.push(turn.id);
   }
   return { reaped, started, limited };

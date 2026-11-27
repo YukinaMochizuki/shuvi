@@ -1,6 +1,3 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-
 /**
  * A client for workstream's desk, as a trusted source sees it: its tools on the `/mcp` endpoint, with the
  * source's Bearer token (workstream's docs/decisions/desk-sources.md, src/server/mcp-endpoint.ts): the
@@ -16,6 +13,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
  *
  * which `parseDeskReply` reads. The `(turn <key>)` names the state (absent while running, and from a desk
  * older than it): two answers that read the same are told apart by it (index.ts, a follow-up). A tool error (an unknown product or request) comes back as `isError`.
+ *
+ * The MCP SDK is imported on the first call, not with this module: it is a large graph (ajv, its schemas) that
+ * every runner child would otherwise load before its turn starts, while only a turn that calls the desk uses it.
  */
 
 export interface DeskConfig {
@@ -37,6 +37,7 @@ export interface DeskReply {
 
 /** Call one desk tool; returns its text, or throws (with the desk's own message for a tool error). */
 export async function callDesk(cfg: DeskConfig, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+  const [{ Client }, { StreamableHTTPClientTransport }] = await Promise.all([import("@modelcontextprotocol/sdk/client/index.js"), import("@modelcontextprotocol/sdk/client/streamableHttp.js")]);
   const client = new Client({ name: "shuvi", version: "0.0.0" });
   const transport = new StreamableHTTPClientTransport(new URL(cfg.url), { requestInit: { headers: { authorization: `Bearer ${cfg.token}` } } });
   try {

@@ -35,7 +35,7 @@ import {
 } from "../store/events.ts";
 import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
-import { chatLabel, DRAIN_STOP, extendTurn, finishTurn, getTurn, hadEarlierTurn, saveSession, setTurnConversation, type Turn } from "../store/turns.ts";
+import { chatLabel, DRAIN_STOP, extendTurn, finishTurn, getTurn, hadEarlierTurn, markTurn, saveSession, setTurnConversation, type Turn } from "../store/turns.ts";
 import { HomeLayers } from "../capabilities/memory/layers.ts";
 import { turns } from "../store/schema.ts";
 import { eq } from "drizzle-orm";
@@ -158,6 +158,10 @@ export function isLostSession(e: unknown): boolean {
  * prompt by section, its input, and a timeline of thinking, text blocks (with the message each became),
  * tool calls and appends. The boundary's record hooks and the driver callbacks feed it; nothing in the turn
  * depends on it.
+ *
+ * TIMINGS (store/turns.ts `markTurn`): when the driver is called (`query`), its first output, token or tool
+ * (`firstOutput`), and when it returns (`returned`); the first row queued is marked where every row is queued
+ * (store/events.ts). Best effort, like the transcript.
  */
 
 export interface TurnDeps {
@@ -572,8 +576,15 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const opening: InputOptions = { ...withNote(!chat.backendSessionId), ...(isRetryAfterDrain(db, turn, chat.backendSessionId) ? { retry: true } : {}) };
   const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive, opening) : renderTurnInput(input, deps.timeZone, perceive, opening);
   let lastThinking = false;
+  let output = false;
+  const outputSeen = () => {
+    if (output) return;
+    output = true;
+    markTurn(db, turnId, { firstOutput: Date.now() });
+  };
   const opts = {
     onToken: (text: string, thinking?: boolean) => {
+      outputSeen();
       // Thinking between two text blocks ends the first block: each text block is its own message, and
       // the runtime joins the prose of one stretch without marking where a block ended.
       if (thinking) lastThinking = true;
@@ -585,6 +596,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
       rec.token(text, !!thinking);
     },
     onTool: () => {
+      outputSeen();
       lastThinking = false;
       flush();
       rec.toolAnnounced();
@@ -609,6 +621,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   setTurnConversation(db, turnId, { opening: switched ? "switched" : chat.backendSessionId ? "resumed" : hadEarlierTurn(db, chat.id, turnId) ? "new" : "first" });
   const fresh = (p: Prompt) => {
     rec.input(p, false);
+    markTurn(db, turnId, { query: Date.now() });
     return adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
   };
   try {
@@ -617,6 +630,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     else {
       try {
         rec.input(prompt, true);
+        markTurn(db, turnId, { query: Date.now() });
         result = await adapter.continueRun(
           { backendSessionId: chat.backendSessionId, prompt, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}), ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
           opts,
@@ -640,6 +654,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         result = await fresh(lastSeen.length ? renderWithHistory(lastSeen, input, deps.timeZone, perceive, restart) : renderTurnInput(input, deps.timeZone, perceive, restart));
       }
     }
+    markTurn(db, turnId, { returned: Date.now() });
     flush();
     const u = result.usage;
     rec.end(u.model);

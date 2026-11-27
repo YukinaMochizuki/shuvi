@@ -11,7 +11,6 @@ import { fetchPass, getSet, requestMissingSets, requestSet, setStickers, waitFor
 import { findStickers, getSticker, LIST_PAGE, listStickers, RECENT_DAYS, vocabulary, type Candidate, type LibrarySticker } from "./find.ts";
 import { fileOfPack, libraryPacks, logicalOfKey, PACK_NAME, packFileName, packSkeleton, parsePack, ROLES, scopeKeys, syncLibrary, type PackFile, type Role, type SyncResult, type Tier } from "./library.ts";
 import { refusal } from "./rules.ts";
-import { renderContactSheet } from "./sheet.ts";
 
 /**
  * Stickers: the sticker library (docs/design.md §12) and the tools that use it.
@@ -230,6 +229,8 @@ export const stickers = defineCapability<StickersConfig>({
         if (got.state === "failed") return err(`Telegram could not give the pack ${name}: ${got.error ?? "unknown error"}. Check the name.`);
 
         const metas = setStickers(db, name);
+        // Jimp (sheet.ts) is loaded here, by the one tool that draws, not by every runner child at its start.
+        const { renderContactSheet } = await import("./sheet.ts");
         const pages = await renderContactSheet(metas.map((m) => ({ n: m.position, path: m.path })), dataDir);
         const logical = `stickers/${packFileName(name)}`;
         const current = layers.read(logical);

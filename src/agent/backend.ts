@@ -1,5 +1,5 @@
-import { ClaudeBackend } from "agent-runtime/claude";
-import { OpenAICompatBackend } from "agent-runtime/openai-compat";
+import type { ClaudeBackend } from "agent-runtime/claude";
+import type { OpenAICompatBackend } from "agent-runtime/openai-compat";
 import type { BackendAdapter, ToolBoundary } from "agent-runtime";
 import { allProfiles, type SecretSource } from "../secrets/source.ts";
 import { conversationStore } from "../store/conversations.ts";
@@ -19,6 +19,10 @@ import { CLI_DEFAULT_MODEL, unknownKind, type CatalogModel } from "../store/mode
  * A conversation id names a conversation, not the model it runs on: a switch within a lane keeps it
  * (agent/switch.ts). Only a missing history is a lost session; provider failures keep the conversation.
  * Compaction failures become fixed transcript notes, never a provider's raw error or the rejected history.
+ *
+ * Each driver's module (and its SDK: the Claude Agent SDK, or `ai` and its providers) is loaded only for a
+ * turn on that kind of provider: `loadDriver` before `makeDriver`, which builds synchronously from what was
+ * loaded. A runner child runs one turn on one model, so it never loads the other driver.
  */
 
 export interface DriverOptions {
@@ -44,6 +48,21 @@ export function driverModel(m: CatalogModel): string | undefined {
   }
 }
 
+const drivers: { claude?: typeof ClaudeBackend; "openai-compat"?: typeof OpenAICompatBackend } = {};
+
+/** Load the driver module for `kind` (a no-op once loaded, and for a kind no driver serves: `makeDriver` refuses it). */
+export async function loadDriver(kind: string): Promise<void> {
+  if (kind === "claude") drivers.claude ??= (await import("agent-runtime/claude")).ClaudeBackend;
+  else if (kind === "openai-compat") drivers["openai-compat"] ??= (await import("agent-runtime/openai-compat")).OpenAICompatBackend;
+}
+
+function loaded<K extends keyof typeof drivers>(kind: K): NonNullable<(typeof drivers)[K]> {
+  const d = drivers[kind];
+  if (!d) throw new Error(`the ${kind} driver was not loaded (loadDriver)`);
+  return d as NonNullable<(typeof drivers)[K]>;
+}
+
+/** The turn's driver. Its kind's module must have been loaded first (`loadDriver`). */
 export function makeDriver(o: DriverOptions): BackendAdapter {
   switch (o.model.provider.kind) {
     case "claude":
@@ -57,6 +76,7 @@ export function makeDriver(o: DriverOptions): BackendAdapter {
 
 function claudeDriver(o: DriverOptions): BackendAdapter {
   const { provider } = o.model;
+  const ClaudeBackend = loaded("claude");
   return new ClaudeBackend({ boundary: o.boundary, liveSystemPrompt: true, ...(provider.configDir ? { configDir: provider.configDir } : {}) });
 }
 
@@ -64,6 +84,7 @@ function openAICompatDriver(o: DriverOptions): BackendAdapter {
   const { provider, model } = o.model;
   if (!provider.baseUrl) throw new Error(`the provider "${provider.name}" has no base URL`);
   const apiKey = provider.apiKey ? providerKey(o.db, provider.apiKey, o.secrets) : undefined;
+  const OpenAICompatBackend = loaded("openai-compat");
   return new OpenAICompatBackend({
     provider: { name: provider.name, baseURL: provider.baseUrl, ...(apiKey ? { apiKey } : {}) },
     defaultModel: model.model,
