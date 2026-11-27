@@ -318,8 +318,12 @@ describe("1Password", () => {
     // The page was marked unread: the next act asks for the whole page text.
     await t.browser_scroll!({ direction: "down" });
     expect(p.of(path).at(-1)!.body.whole).toBe(true);
-    expect(describeBrowse(new PorchkitError(409, "picture_withheld", "x", { acted: false }))).toStartWith("No picture was taken: it would have shown 1Password's menu over a password field");
-    expect(describeBrowse(new PorchkitError(409, "picture_withheld", "x", { acted: true }))).toContain("The action was done, but its picture");
+    const withheld = describeBrowse(new PorchkitError(409, "picture_withheld", "whether 1Password's menu is open on a password field could not be read (its menu's place did not answer)", { acted: false }));
+    expect(withheld).toStartWith("No picture was taken: it was held back by the browser's 1Password check");
+    // porchkit's own detail is passed on: it says which case this is.
+    expect(withheld).toContain("could not be read (its menu's place did not answer)");
+    expect(withheld).toContain("If the same holds after Escape");
+    expect(describeBrowse(new PorchkitError(409, "picture_withheld", "x", { acted: true }))).toContain("The action was done, but its picture was held back");
     const offer = renderAnswer({ url: SIGN_IN, title: "Sign in", snapshot: "x", situation: { hints: ["password-manager: sign-in offer open (only in a screenshot; it closes when the page is used, or with its ×, which is the owner's)"] } });
     expect(offer).toContain("otherwise leave it and use the page: it closes once the page is used");
   });
