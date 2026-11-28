@@ -126,10 +126,11 @@ const runnerIdentity: RunnerIdentity = { codeVersion: codeVersion(), configHash:
 }
 
 // The poller's own long poll is its wait; it loops straight back. The capabilities' inbound hooks run first
-// (a prewarm starts before the turn), then the waker is kicked to start the turn now.
+// (a prewarm starts before the turn), then the waker is kicked to start the turn now. A hook's background work
+// kicks it again when what a hold waits on is ready (`wake`: a prewarm finished).
 const onRecorded = (events: ChatEvent[]) => {
   try {
-    capabilityInbound(capabilities, events, policies.current(), { db, ownerId: cfg.ownerId });
+    capabilityInbound(capabilities, events, policies.current(), { db, ownerId: cfg.ownerId, wake: () => wakeWaker.kick() });
   } finally {
     wakeWaker.kick();
   }

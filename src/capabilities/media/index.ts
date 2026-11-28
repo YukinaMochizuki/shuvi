@@ -340,8 +340,8 @@ export const media = defineCapability<MediaConfig>({
   },
   section: (ctx, cfg) => mediaSection(!!cfg.computer && policyEnables(ctx.chatPolicy, "computer"), policyDelegates(ctx.chatPolicy, "media"), !!cfg.autoread),
   jobKinds: (cfg) => [fetchJobKind(porchkitOf(cfg), cfg.computer)],
-  inbound(event, { db, chatPolicy }, cfg) {
-    void startPrewarms(db, porchkitOf(cfg), event, chatPolicy);
+  inbound(event, { db, chatPolicy, wake }, cfg) {
+    void startPrewarms(db, porchkitOf(cfg), event, chatPolicy, Date.now(), wake);
   },
   holds(event, now, cfg, ctx) {
     return !!cfg.autoread && autoreadHolds(ctx, event, now, cfg.autoread);

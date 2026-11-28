@@ -68,9 +68,10 @@ const iso = (ms: number) => new Date(ms).toISOString();
  * Start the prewarms of `event`, if it is a message that starts a turn in a chat with policy `chatPolicy`, and
  * has links. The rows are written now; the requests are left running (their promise is returned for tests).
  * The requests never throw; the synchronous insert can (a busy store), and the caller (capabilityInbound) logs
- * that.
+ * that. `wake` (the inbound context's) is called once a prewarm has finished, ok or not, so a turn held for it
+ * starts at once instead of at the waker's next poll.
  */
-export function startPrewarms(db: Db, porch: Porchkit, event: ChatEvent, chatPolicy: ChatPolicy, now = Date.now()): Promise<void> {
+export function startPrewarms(db: Db, porch: Porchkit, event: ChatEvent, chatPolicy: ChatPolicy, now = Date.now(), wake?: () => void): Promise<void> {
   if (event.kind !== "message") return Promise.resolve();
   const p = event.payload as unknown as MessagePayload;
   const links = prewarmLinks([p.text, p.replyTo?.text]);
@@ -92,7 +93,13 @@ export function startPrewarms(db: Db, porch: Porchkit, event: ChatEvent, chatPol
           finishPrewarm(db, row.id, code, null);
           console.log(`media: prewarm (read) of #${event.seq}'s link ${i + 1} (${link.host}) failed: ${code}${e instanceof PorchkitError ? "" : ` (${describeRead(e)})`}`);
         },
-      ),
+      ).then(() => {
+        try {
+          wake?.();
+        } catch {
+          // best effort: the waker polls anyway
+        }
+      }),
     );
   });
   return Promise.all(flights).then(() => undefined);

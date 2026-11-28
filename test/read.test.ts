@@ -358,6 +358,28 @@ describe("prewarm routing", () => {
     expect(row.result).toEqual({ kind: "post" });
   });
 
+  test("a finished prewarm wakes the waker, once per link, after its row is finished, whether it answered or failed", async () => {
+    const p = porch();
+    p.readDelayMs = 200;
+    const db = memDb();
+    const woke: Array<(string | null)[]> = [];
+    const caps = enabledCapabilities(ENV(p));
+    const wake = () => woke.push(prewarmsOf(db, lastSeq(db)).map((r) => r.outcome));
+    p.failNext("/read", 429, { error: "rate_limited", reason: "speculative", retry_after: 30, detail: "x: speculative" }, { "retry-after": "30" });
+    recordBatch(db, [dmUpdate(upd++, `${X_POST} ${REDDIT_POST}`)], OWNER, {
+      botUsername: "shuvi_test_bot",
+      policy: DM,
+      onRecorded: (events) => capabilityInbound(caps, events, DM, { db, ownerId: OWNER, wake }),
+    });
+    expect(woke).toHaveLength(0); // nothing is ready yet: no wake at recording time
+    await Bun.sleep(400);
+    expect(woke).toHaveLength(2);
+    // Each wake came after its own row was finished: the failed one (at once) and the answered one (200 ms).
+    expect(woke.at(-1)!.every((o) => o !== null)).toBe(true);
+    expect(woke.flat().filter((o) => o !== null).length).toBeGreaterThanOrEqual(3);
+    expect(prewarmsOf(db, lastSeq(db)).map((r) => r.outcome).sort()).toEqual(["ok", "rate_limited"]);
+  });
+
   test("a finished prewarm: the line says read_link returns at once; a refused one leaves no line", async () => {
     const p = porch();
     const db = memDb();
