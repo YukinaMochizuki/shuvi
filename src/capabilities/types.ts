@@ -1,4 +1,4 @@
-import type { ToolBundle, ToolContent } from "agent-runtime";
+import type { ToolBundle, ToolContent, ToolResult } from "agent-runtime";
 import type { TurnState } from "../agent/turn.ts";
 import { resolveChat, type ChatPolicy, type Policy, type ToolParams } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
@@ -131,9 +131,65 @@ export interface HookRoute {
   handle(req: Request, body: string, ctx: { db: Db }): Response | Promise<Response>;
 }
 
-/** What a capability's `perceive` may read besides the event: the store (read only). */
+/** What a capability's `perceive` (and `holds`) may read besides the event: the store (read only). */
 export interface PerceiveContext {
   db?: Db;
+  /**
+   * In a turn's input: what each capability's `prepare` returned for this turn, by capability id. A capability's
+   * `perceive` is handed its own (`prepared`), never another's.
+   */
+  prepared?: ReadonlyMap<string, unknown>;
+}
+
+/**
+ * What a capability's `holds` gets: what `perceive` may read, and where the event is being taken in.
+ */
+export interface HoldContext extends PerceiveContext {
+  /**
+   * The event would be APPENDED to a running turn (the boundary's `append`), not open a turn. A hold that only
+   * makes sense before a turn opens (media's auto-read: `prepare` runs only then) does not hold it here.
+   */
+  appending?: boolean;
+  /**
+   * Would a turn answering this event (up to it) be let call `tool` with `args`, by the boundary's own authority
+   * rule (agent/turn.ts `callRefusal`)? Decided without running anything. Absent: not known here (treat as yes;
+   * the runner's boundary still decides the call).
+   */
+  mayCall?(tool: string, args: Record<string, unknown>): boolean;
+}
+
+/**
+ * What a capability's `prepare` gets: the turn, and a way to call ITS OWN tools (those its `tools` gave this turn,
+ * and no other capability's: never `say`, `pass`, `react` or `sticker`, nor another capability's) THROUGH THE
+ * TURN'S BOUNDARY (agent/turn.ts `turnBoundary`), exactly as a model's call goes: refused after `pass` or without
+ * the authority it needs (`ownerOnly`, `ownerOnlyWhen`), run in its call's context, recorded in the transcript, but
+ * marked as made by the framework (`turn_steps.made_by`). Nothing is appended to its result. `capabilityPrepare`
+ * binds `call` and `refusal` to the calling capability's tools; a name outside them is answered null.
+ */
+export interface PrepareContext {
+  db: Db;
+  chat: Chat;
+  turnId: number;
+  chatPolicy?: ChatPolicy;
+  /** Call one of this capability's tools; null when it is not one of them (or the turn has no such tool). */
+  call(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> | null;
+  /**
+   * Would the boundary refuse that call now (`pass`, authority)? Its refusal text, or null when it would run;
+   * nothing is run or recorded. A tool that is not this capability's is always refused.
+   */
+  refusal(name: string, args: Record<string, unknown>): string | null;
+  /** Aborted when the turn is being stopped (`/stop`, the drain's deadline): a prepare gives up then. */
+  signal?: AbortSignal;
+  /** A note in the turn's transcript (what the framework did, and why). */
+  note(text: string): void;
+}
+
+/** What the turn hands `capabilityPrepare`: a PrepareContext for any tool, and which capability gave each tool. */
+export interface PrepareSeam extends Omit<PrepareContext, "call" | "refusal"> {
+  call(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult> | null;
+  refusal(name: string, args: Record<string, unknown>): string | null;
+  /** Tool name → the id of the capability that gave it this turn (`capabilityTools`' `owners`). */
+  owners: ReadonlyMap<string, string>;
 }
 
 /** What the server hands a capability's `inbound` hook. No Telegram API, as for a loop. */
@@ -217,12 +273,20 @@ export interface Capability<C = unknown> {
    * no turn opens on it yet and a running turn does not take it in yet. Must turn false on its own after
    * a short wait: a held event is then shown as it is.
    */
-  holds?(event: ChatEvent, now: number, config: C): boolean;
+  holds?(event: ChatEvent, now: number, config: C, ctx: HoldContext): boolean;
   /**
    * What the model is shown of `event` beyond its text line (an image, a note), in a turn's input or an
    * append. It only reads: `ctx.db` is there to read what the server recorded about the event.
    */
-  perceive?(event: ChatEvent, config: C, ctx: PerceiveContext): ToolContent[];
+  perceive?(event: ChatEvent, config: C, ctx: Omit<PerceiveContext, "prepared"> & { prepared?: unknown }): ToolContent[];
+  /**
+   * Work done in the runner child for a turn's input BEFORE the driver is called (media's auto-read: a short
+   * message's link read ahead). `events` are the events the turn answers (no context lines). It may call ITS OWN
+   * tools, and only those, through the turn's boundary (`PrepareContext.call`); what it returns is handed back to its own
+   * `perceive` (`ctx.prepared`) when the input is rendered. It must never speak (invariant 5) and should be
+   * quick: the model waits on it. A throw is logged and the turn goes on without it.
+   */
+  prepare?(events: readonly ChatEvent[], ctx: PrepareContext, config: C): Promise<unknown>;
   /**
    * The server's hook for each NEW inbound message or command, right after it is recorded and before any
    * turn for it can start, in chats whose policy enables this capability. It may write rows (synchronously,
@@ -318,9 +382,10 @@ export function enableCapabilities(registry: readonly Capability<any>[], env: En
  * Two tools with the same name are refused here (a throw: it is a programming error, found by the first
  * turn or test), whatever their servers: a tool's name is what `ownerOnly` and the model refer to it by.
  */
-export function capabilityTools(enabled: readonly EnabledCapability[], ctx: TurnContext): ToolBundle[] {
+export function capabilityTools(enabled: readonly EnabledCapability[], ctx: TurnContext, owners?: Map<string, string>): ToolBundle[] {
   const out: ToolBundle[] = [];
-  const seen = new Map<string, string>();
+  // `owners`, when given, is filled with which capability gave each tool (for `capabilityPrepare`).
+  const seen = owners ?? new Map<string, string>();
   for (const { capability, config } of enabled) {
     for (const b of capability.tools?.(ctx, config) ?? []) {
       for (const t of b.tools) {
@@ -415,13 +480,40 @@ export function policyEnables(chatPolicy: ChatPolicy | undefined, id: string): b
 }
 
 /** Whether any enabled capability holds `event` back for now (see `Capability.holds`). */
-export function capabilityHolds(enabled: readonly EnabledCapability[], event: ChatEvent, now: number): boolean {
-  return enabled.some(({ capability, config }) => capability.holds?.(event, now, config) ?? false);
+export function capabilityHolds(enabled: readonly EnabledCapability[], event: ChatEvent, now: number, ctx: HoldContext = {}): boolean {
+  return enabled.some(({ capability, config }) => capability.holds?.(event, now, config, ctx) ?? false);
 }
 
 /** Everything the enabled capabilities show of `event` beyond its text, in registry order. */
 export function capabilityPerception(enabled: readonly EnabledCapability[], event: ChatEvent, ctx: PerceiveContext = {}): ToolContent[] {
-  return enabled.flatMap(({ capability, config }) => capability.perceive?.(event, config, ctx) ?? []);
+  return enabled.flatMap(({ capability, config }) => capability.perceive?.(event, config, { ...ctx, prepared: ctx.prepared?.get(capability.id) }) ?? []);
+}
+
+/**
+ * Every enabled capability's `prepare` for a turn's `events`, at once; what each returned, by capability id. Each is
+ * handed `call` and `refusal` bound to ITS OWN tools (`seam.owners`): a capability's prepare cannot reach speech's
+ * `say` / `pass` / `react`, nor any other capability's tool. Never throws.
+ */
+export async function capabilityPrepare(enabled: readonly EnabledCapability[], events: readonly ChatEvent[], seam: PrepareSeam): Promise<Map<string, unknown>> {
+  const out = new Map<string, unknown>();
+  const { owners, call, refusal, ...rest } = seam;
+  await Promise.all(
+    enabled.map(async ({ capability, config }) => {
+      if (!capability.prepare) return;
+      const own = (name: string) => owners.get(name) === capability.id;
+      const ctx: PrepareContext = {
+        ...rest,
+        call: (name, args, signal) => (own(name) ? call(name, args, signal) : null),
+        refusal: (name, args) => (own(name) ? refusal(name, args) : `\`${name}\` is not one of ${capability.id}'s tools`),
+      };
+      try {
+        out.set(capability.id, await capability.prepare(events, ctx, config));
+      } catch (e) {
+        console.error(`${capability.id}: prepare failed for turn ${ctx.turnId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }),
+  );
+  return out;
 }
 
 export function capabilityJobKinds(enabled: readonly EnabledCapability[]): JobKind[] {

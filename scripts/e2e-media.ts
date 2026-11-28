@@ -5,7 +5,7 @@
  *   fake Telegram ⇄ shuvi server ⇄ runner child ⇄ real Claude Code CLI ⇄ fake Anthropic;  the media
  *   capability ⇄ a fake porchkit (test/fake-porchkit.ts);  the computer ⇄ a fake Hangar
  *
- *   1. the owner sends a YouTube link: the server reads it at once through porchkit's `/read` (speculative;
+ *   1. the owner sends a YouTube link (with more words than auto-read takes): the server reads it at once through porchkit's `/read` (speculative;
  *      porchkit probes a video site's video itself), while the turn starts; the turn's input says it is
  *      prepared, for read_link; the turn calls video_probe, which asks porchkit itself (a read prewarm is not
  *      a probe to join; porchkit answers from the cache the read filled), and video_sheet with the url (the
@@ -159,7 +159,9 @@ const turnsIdle = () => (db.$client.query("select count(*) as n from turns where
 await until("the server to start", () => serverOut.includes("shuvi server:"), 20_000);
 
 // ---- 1. a link from the owner: prewarm, probe, sheet --------------------------------------------------
-tg.updates.push(dmUpdate(1, `what is in this video? ${LINK}`));
+// Longer than auto-read's threshold (SHUVI_AUTOREAD_MAX_CHARS): this is about looking at a video, with the prewarm
+// left unused; a short message's link read ahead is e2e-read's.
+tg.updates.push(dmUpdate(1, `what is in this video? tell me before I sit through all of it ${LINK}`));
 await replied("It is a talk with two chapters; I looked at 2 sheet(s).", "the turn probed the link and looked at its sheets");
 const reads = porch.of("/read");
 check(reads.length === 1 && reads[0]!.body.speculative === true && reads[0]!.body.url === LINK, `the server's prewarm was a speculative /read of the link (${JSON.stringify(reads.map((c) => c.body))})`);

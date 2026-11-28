@@ -596,9 +596,9 @@ export class Porchkit {
   }
 
   /** A sheet's JPEG, by the path porchkit answered with (`/media/sheets/<id>/<n>.jpg`). */
-  async sheetImage(path: string): Promise<Uint8Array> {
+  async sheetImage(path: string, signal?: AbortSignal): Promise<Uint8Array> {
     if (!/^\/media\/sheets\/[0-9a-f]{32}\/\d+\.jpg$/.test(path)) throw new PorchkitError(0, "bad_answer", "a sheet path that is not porchkit's");
-    return new Uint8Array(await (await this.call("GET", path)).arrayBuffer());
+    return new Uint8Array(await (await this.call("GET", path, undefined, {}, signal)).arrayBuffer());
   }
 
   fetch(url: string, quality?: "low" | "best"): Promise<FetchStatus> {

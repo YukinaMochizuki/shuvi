@@ -5,13 +5,20 @@
  *   fake Telegram ⇄ shuvi server ⇄ runner child ⇄ real Claude Code CLI ⇄ fake Anthropic;  the media
  *   capability ⇄ a fake porchkit (test/fake-porchkit.ts, its `/read`);  the computer ⇄ a fake Hangar
  *
- *   1. the owner sends an X post's link: the server reads it at once (`/read`, speculative) while the turn
- *      starts; the turn's input says it is prepared; the turn calls read_link, which joins the prewarm and
- *      reads it again normally; what the model receives is text and FOUR images (2 pictures, the video's
- *      poster and its contact sheet), never a file key, a porchkit path or the token; web_fetch is not
- *      offered (porchkit is configured), read_link and save_link are
- *   2. the owner asks about a long article: the server prewarms it too (every link is read, not only posts);
- *      read_link gives the first part and how to read on; the model
+ *   1. the owner sends an X post's link in a LONG message (no auto-read): the server reads it at once (`/read`,
+ *      speculative) while the turn starts; the turn's input says it is prepared; the turn calls read_link, which
+ *      joins the prewarm and reads it again normally; what the model receives is text and FOUR images (2
+ *      pictures, the video's poster and its contact sheet), never a file key, a porchkit path or the token;
+ *      web_fetch is not offered (porchkit is configured), read_link and save_link are
+ *      1b. AUTO-READ: the same link with a few words: the turn is held for the prewarm, the framework reads it
+ *      through read_link before the model runs, and the model's FIRST request already carries the post (text
+ *      and its four images) as a framework part; no read_link call; the transcript's step is the framework's;
+ *      the time from the message to the model having the post is compared with 1's
+ *      1c. a prewarm past the cap (SHUVI_AUTOREAD_WAIT_SEC): as in 1, the "(Preparing: …)" line and the model's
+ *      own read_link
+ *   2. the owner asks about a long article (a short message: auto-read reads its first part): the server
+ *      prewarms it too (every link is read, not only posts); read_link gives the first part and how to read on;
+ *      the model
  *      reads on with offset, then saves the whole text and the page as received with save_link: both land
  *      in ~/inbox on the computer, byte for byte
  *   3. the owner asks her to open a shop: her own browser (porchkit's `/browse`, the fake's made-up shop):
@@ -76,6 +83,17 @@ let toolsOffered: string[] = [];
 let postResult = "";
 let pointerResult = "";
 let readsWhenFirstTool = -1;
+/** What the model says once it has the post (each scenario its own, so "exactly once" holds per scenario). */
+let postReply = (n: number) => `A post by Example Person; I looked at ${n} image(s).`;
+/** When the model was first sent the post's text, per scenario (a request whose newest user message holds it). */
+const postSeenAt: number[] = [];
+let firstRequestOfAutoread = "";
+let modelRequests = 0;
+/**
+ * How long the fake model takes per request, for 1 and 1b only: a model's time to its first tool call or answer
+ * (6 s at p50 in production for a read_link call), so the timing comparison shows the round trip auto-read saves.
+ */
+let modelDelayMs = 0;
 
 /** [what the newest user message contains, what the model does]: the first match wins (matched as JSON). */
 const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
@@ -91,8 +109,10 @@ const SCRIPT: Array<[RegExp, (text: string) => Response]> = [
   [/Saved on your computer: ~\/inbox\//, () => say("Saved it on your computer.")],
   [/\(from character 20,000 of/, () => use("save_link", { url: LONG_PAGE, what: "both" })],
   [/To read on, call read_link again with offset: 20000/, () => use("read_link", { url: LONG_PAGE, offset: 20000 })],
-  [/Post on X by Example Person/, (t) => ((postResult = t), say(`A post by Example Person; I looked at ${t.split('"type":"image"').length - 1} image(s).`))],
-  [/what does this post say/, () => ((readsWhenFirstTool = porch.of("/read").length), use("read_link", { url: X_POST }))],
+  [/any good\?/, (t) => ((firstRequestOfAutoread = t), postSeenAt.push(Date.now()), say(`Auto-read: ${/Post on X by Example Person/.test(t) ? "had it" : "did not have it"}, ${t.split('"type":"image"').length - 1} image(s).`))],
+  [/Post on X by Example Person/, (t) => ((postResult = t), postSeenAt.push(Date.now()), say(postReply(t.split('"type":"image"').length - 1)))],
+  [/and this one\?/, () => use("read_link", { url: X_POST })],
+  [/could you tell me what this post says/, () => ((readsWhenFirstTool = porch.of("/read").length), use("read_link", { url: X_POST }))],
   [/read me this article/, () => use("read_link", { url: LONG_PAGE })],
 ];
 
@@ -111,6 +131,8 @@ const anthropic = Bun.serve({
     const last = [...(body.messages ?? [])].reverse().find((m) => m.role === "user");
     const text = JSON.stringify(last?.content ?? "");
     seen.push(text);
+    modelRequests++;
+    if (modelDelayMs) await Bun.sleep(modelDelayMs);
     for (const [re, act] of SCRIPT) if (re.test(text)) return act(text);
     return say(`(no script for: ${text.slice(0, 160)})`);
   },
@@ -135,6 +157,7 @@ const env: Record<string, string | undefined> = {
   ...porch.env(),
   SHUVI_SECRETS_FILE: join(dataDir, "no-secrets.yaml"),
   SHUVI_COMPUTER_POLL_SEC: "1",
+  SHUVI_AUTOREAD_WAIT_SEC: "2", // 1c's prewarm (3 s) outlasts it; every other one (0.3 s) is well within it
   ANTHROPIC_BASE_URL: `http://localhost:${anthropic.port}`,
   ANTHROPIC_API_KEY: "sk-ant-fake",
 };
@@ -175,15 +198,23 @@ const db = openDb(join(dataDir, "shuvi.db"));
 const turnsIdle = () => (db.$client.query("select count(*) as n from turns where status = 'running'").get() as { n: number }).n === 0;
 await until("the server to start", () => serverOut.includes("shuvi server:"), 20_000);
 
-// ---- 1. a post's link from the owner: prewarm, read_link, its images -----------------------------------
-tg.updates.push(dmUpdate(1, `what does this post say? ${X_POST}`));
+const turnRow = (id: number) => db.$client.query("select id, timings from turns where id = ?").get(id) as { id: number; timings: string | null };
+const lastTurn = () => (db.$client.query("select max(id) as id from turns").get() as { id: number }).id;
+const marks = (id: number) => JSON.parse(turnRow(id).timings ?? "{}") as Record<string, number>;
+const eventAt = (text: string) => Date.parse((db.$client.query("select at from chat_events where json_extract(payload, '$.text') = ?").get(text) as { at: string }).at);
+
+// ---- 1. a post's link from the owner in a long message: prewarm, read_link, its images (no auto-read) -----
+const LONG_ASK = `could you tell me what this post says, and whether it is worth my time? ${X_POST}`;
+let requestsBefore = modelRequests;
+modelDelayMs = 2000;
+tg.updates.push(dmUpdate(1, LONG_ASK));
 await replied("A post by Example Person; I looked at 4 image(s).", "the turn read the post and saw its images");
 const reads = porch.of("/read");
 check(reads.length === 2, `porchkit saw two reads (${reads.length})`);
 check(reads[0]!.body.speculative === true && reads[0]!.body.url === X_POST, "the first was the server's prewarm, speculative");
 check(reads[1]!.body.speculative === undefined && reads[1]!.body.url === X_POST, "the second was read_link's own, normal (it adds the transcript and the sheet)");
 check(readsWhenFirstTool === 1, "the prewarm had gone out before the turn's first tool call");
-const first = seen.find((s) => s.includes("what does this post say"))!;
+const first = seen.find((s) => s.includes("could you tell me what this post says"))!;
 const line = first.match(/\((?:Prepared|Preparing): #\d+'s link — read_link (?:returns at once|joins it)\.\)/)?.[0];
 check(line, `the turn's input says the link is prepared: ${line}`);
 check(toolsOffered.includes("mcp__shuvi__read_link") && toolsOffered.includes("mcp__shuvi__save_link"), "read_link and save_link are offered");
@@ -197,11 +228,65 @@ const pre = db.$client.query("select endpoint, outcome, result, used_turn_id as 
 check(pre.length === 1 && pre[0]!.endpoint === "read" && pre[0]!.outcome === "ok" && pre[0]!.used !== null, `the prewarm is recorded as a read, used (${JSON.stringify(pre)})`);
 check(!/https?:|x\.com|1234567890/.test(pre[0]!.result), `what the prewarm keeps holds no URL: ${pre[0]!.result}`);
 await until("the turn to close", turnsIdle);
+const longTurn = lastTurn();
+const longRequests = modelRequests - requestsBefore;
+// When the request carrying the post reached the model (before its own delay).
+const longToPost = postSeenAt.at(-1)! - modelDelayMs - eventAt(LONG_ASK);
+check(!first.includes("read by the framework") && marks(longTurn).autoread === undefined, "a long message is not auto-read");
+
+// ---- 1b. auto-read: the same link with a few words --------------------------------------------------------
+const SHORT_ASK = `any good? ${X_POST}`;
+requestsBefore = modelRequests;
+tg.updates.push(dmUpdate(2, SHORT_ASK));
+await replied("Auto-read: had it, 4 image(s).", "the model's first request already carried the post and its 4 images");
+await until("the turn to close", turnsIdle);
+const autoTurn = lastTurn();
+const autoRequests = modelRequests - requestsBefore;
+const autoToPost = postSeenAt.at(-1)! - modelDelayMs - eventAt(SHORT_ASK);
+check(autoRequests === 1, `one model request in the turn (${autoRequests}), against ${longRequests} for the long message`);
+check(/\[⚙ #\d+'s link, read by the framework before you, as read_link answers it/.test(firstRequestOfAutoread) && /\[⚙ end of #\d+'s link\]/.test(firstRequestOfAutoread), "the content came as the framework's part");
+check(!firstRequestOfAutoread.includes("(Prepared:"), "no Prepared line for a link read ahead");
+const autoReads = porch.of("/read").slice(-2).map((c) => c.body);
+check(JSON.stringify(autoReads) === JSON.stringify([{ url: X_POST, speculative: true }, { url: X_POST }]), `the prewarm, then read_link's own read (${JSON.stringify(autoReads)})`);
+const autoSteps = db.$client.query("select name, status, made_by as by from turn_steps where turn_id = ? and kind = 'tool'").all(autoTurn) as { name: string; status: string; by: string | null }[];
+check(JSON.stringify(autoSteps) === JSON.stringify([{ name: "read_link", status: "ok", by: "framework" }]), `the transcript's one tool step is the framework's read_link (${JSON.stringify(autoSteps)})`);
+const autoNote = db.$client.query("select text from turn_steps where turn_id = ? and kind = 'note' and text like 'Auto-read:%'").get(autoTurn) as { text: string } | null;
+check(autoNote?.text.startsWith("Auto-read: the turn was held "), `the transcript shows the hold the waker made: ${autoNote?.text}`);
+check(!/\[⚙[^\]\n]*x\.com\/example/.test(firstRequestOfAutoread), "no URL in a ⚙ label");
+const am = marks(autoTurn);
+const lm = marks(longTurn);
+check(am.autoread && am.query && am.autoread <= am.query, "timings: autoread is marked, before the driver was called");
+check(am.held && am.claimed && am.held <= am.claimed && lm.held === undefined, `timings: the waker's held mark on the auto-read turn only (${am.held ? am.claimed! - am.held : "none"} ms)`);
+const rel = (m: Record<string, number>, at: number) => Object.entries(m).sort((a, b) => a[1] - b[1]).map(([k, v]) => `${k} +${v - at}`).join(", ");
+log(`TIMING long message (today): message → model has the post ${longToPost} ms, ${longRequests} model requests; turn: ${rel(lm, eventAt(LONG_ASK))}`);
+log(`TIMING auto-read:             message → model has the post ${autoToPost} ms, ${autoRequests} model request;  turn: ${rel(am, eventAt(SHORT_ASK))}`);
+log(`TIMING (the fake model takes ${modelDelayMs} ms per request in both; "has the post" is when the request carrying it reached the model)`);
+modelDelayMs = 0;
+
+// ---- 1c. a prewarm past the cap: as without auto-read -------------------------------------------------------
+porch.readDelayMs = 3000; // past SHUVI_AUTOREAD_WAIT_SEC (2 s)
+postReply = (n) => `Past the cap: read it myself, ${n} image(s).`;
+const CAP_ASK = `and this one? ${X_POST}`;
+requestsBefore = modelRequests;
+tg.updates.push(dmUpdate(3, CAP_ASK));
+await replied("Past the cap: read it myself, 4 image(s).", "past the cap, the model read the post itself");
+await until("the turn to close", turnsIdle);
+porch.readDelayMs = 300;
+const capTurn = lastTurn();
+const capFirst = seen.find((x) => x.includes("and this one?"))!;
+check(/\(Preparing: #\d+'s link — read_link joins it\.\)/.test(capFirst) && !capFirst.includes("read by the framework"), "the turn opened with the Preparing line, nothing read ahead");
+const capSteps = db.$client.query("select name, made_by as by from turn_steps where turn_id = ? and kind = 'tool'").all(capTurn) as { name: string; by: string | null }[];
+check(JSON.stringify(capSteps) === JSON.stringify([{ name: "read_link", by: null }]), `the read_link was the model's own (${JSON.stringify(capSteps)})`);
+const capWait = marks(capTurn).claimed! - eventAt(CAP_ASK);
+check(capWait >= 1900 && capWait < 3000, `the turn was held about the cap, then opened (${capWait} ms)`);
+check(marks(capTurn).autoread === undefined, "no autoread mark");
+const capNote = db.$client.query("select text from turn_steps where turn_id = ? and kind = 'note' and text like 'Auto-read:%'").get(capTurn) as { text: string } | null;
+check(capNote?.text.startsWith("Auto-read: the turn was held ") && capNote.text.includes("still running when it opened"), `the transcript says it was held to the cap: ${capNote?.text}`);
 
 // ---- 2. a long article: read on, then save it -----------------------------------------------------------
-tg.updates.push(dmUpdate(2, `read me this article ${LONG_PAGE}`));
+tg.updates.push(dmUpdate(4, `read me this article ${LONG_PAGE}`));
 await replied("Saved it on your computer.", "the turn read the article, read on, and saved it");
-const pageReads = porch.of("/read").slice(2).map((c) => c.body);
+const pageReads = porch.of("/read").slice(6).map((c) => c.body);
 check(JSON.stringify(pageReads) === JSON.stringify([{ url: LONG_PAGE, speculative: true }, { url: LONG_PAGE }, { url: LONG_PAGE, offset: 20000 }, { url: LONG_PAGE }]), `the prewarm (a page is read too), then read, read on, and save_link's read (${JSON.stringify(pageReads)})`);
 const inbox = join(hangar.home("shuvi-1001"), "inbox");
 const saved = readdirSync(inbox);
@@ -214,7 +299,7 @@ await until("the turn to close", turnsIdle);
 
 // ---- 3. her own browser: open a page, click a ref from its text ----------------------------------------
 
-tg.updates.push(dmUpdate(3, "open the example shop and look at the teapot"));
+tg.updates.push(dmUpdate(5, "open the example shop and look at the teapot"));
 await replied("The teapot page is open.", "the turn opened the shop and clicked through");
 const acts = porch.of("/browse/sessions/").map((c) => ({ path: c.path, ...c.body }));
 const dmChat = (db.$client.query("select id from chats where tg_chat_id = ?").get(OWNER) as { id: number }).id;
@@ -228,13 +313,13 @@ check(toolsOffered.includes("mcp__shuvi__browser_open") && toolsOffered.includes
 check(bodies.some((b) => b.includes("## Your browser")), "the browser's section is in the system prompt");
 await until("the turn to close", turnsIdle);
 
-tg.updates.push(dmUpdate(4, "send me a screenshot of it"));
+tg.updates.push(dmUpdate(6, "send me a screenshot of it"));
 await replied("There it is.", "the turn sent a screenshot");
 const photos = tg.sent("sendPhoto");
 check(photos.length === 1 && Number(photos[0]!.chat_id) === OWNER && photos[0]!.caption === "the teapot", `the screenshot reached the DM as a photo, once (${JSON.stringify(photos.map((p) => ({ chat: p.chat_id, caption: p.caption })))})`);
 await until("the turn to close", turnsIdle);
 
-tg.updates.push(dmUpdate(5, "start the canvas game"));
+tg.updates.push(dmUpdate(7, "start the canvas game"));
 await replied("Started the game.", "the turn opened the game, looked with a grid and clicked its Start button");
 const pointers = porch.browse.pointers;
 check(pointers.length === 1 && pointers[0]!.x === 150 && pointers[0]!.y === 125 && pointers[0]!.image_width === 1280, `one pointer act, in the screenshot's pixels (${JSON.stringify(pointers)})`);

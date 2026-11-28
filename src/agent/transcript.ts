@@ -22,7 +22,8 @@ import { SECTION_JOIN, type PromptSection } from "./prompt.ts";
  *                 Its number is taken when its first token arrives, and the row is written when turn.ts
  *                 queues the message (`textFlushed`), with whether it was sent and the outbound seq;
  *       tool      from the tool boundary's record hooks: a `running` row at the start, completed in place
- *                 by call id at the end (result, error, or the throw); a refusal is a row of its own;
+ *                 by call id at the end (result, error, or the throw); a refusal is a row of its own; a call
+ *                 the framework made itself before the driver ran (media's auto-read) is marked `made_by`;
  *       append    from the boundary's `append`: which events (from_seq, to_seq] were appended, after which
  *                 call, and the text and images the model was given;
  *       note      what the framework did to the turn (a lost conversation started over, a model switch since
@@ -229,32 +230,33 @@ export class TurnRecorder {
     });
   }
 
-  toolStart(call: ToolCall): void {
+  /** `by`: "framework" for a call the framework made itself (`turn_steps.made_by`); absent: the model's. */
+  toolStart(call: ToolCall, by?: "framework"): void {
     this.safe(`the start of ${call.name}`, () => {
       this.closeThinking();
-      this.step(this.n++, { kind: "tool", name: call.name, args: this.args(call.args), status: "running", callId: call.callId ?? null });
+      this.step(this.n++, { kind: "tool", name: call.name, args: this.args(call.args), status: "running", callId: call.callId ?? null, ...(by ? { madeBy: by } : {}) });
     });
   }
 
-  toolEnd(call: ToolCall, res: ToolResult): void {
+  toolEnd(call: ToolCall, res: ToolResult, by?: "framework"): void {
     this.safe(`the result of ${call.name}`, () => {
       const done = { result: cap(this.redact(textOf(res))), images: this.images(res.content), status: res.isError ? ("error" as const) : ("ok" as const), endedAt: new Date().toISOString() };
-      if (!call.callId || !completeStep(this.db, this.turnId, call.callId, done)) this.step(this.n++, { kind: "tool", name: call.name, args: this.args(call.args), callId: call.callId ?? null, ...done });
+      if (!call.callId || !completeStep(this.db, this.turnId, call.callId, done)) this.step(this.n++, { kind: "tool", name: call.name, args: this.args(call.args), callId: call.callId ?? null, ...done, ...(by ? { madeBy: by } : {}) });
     });
   }
 
-  toolThrew(call: ToolCall, e: unknown): void {
+  toolThrew(call: ToolCall, e: unknown, by?: "framework"): void {
     this.safe(`the failure of ${call.name}`, () => {
       const done = { status: "threw" as const, error: cap(this.redact(e instanceof Error ? e.message : String(e))), endedAt: new Date().toISOString() };
-      if (!call.callId || !completeStep(this.db, this.turnId, call.callId, done)) this.step(this.n++, { kind: "tool", name: call.name, args: this.args(call.args), callId: call.callId ?? null, ...done });
+      if (!call.callId || !completeStep(this.db, this.turnId, call.callId, done)) this.step(this.n++, { kind: "tool", name: call.name, args: this.args(call.args), callId: call.callId ?? null, ...done, ...(by ? { madeBy: by } : {}) });
     });
   }
 
-  toolRefused(call: ToolCall, why: string): void {
+  toolRefused(call: ToolCall, why: string, by?: "framework"): void {
     this.safe(`the refusal of ${call.name}`, () => {
       this.closeThinking();
       const at = new Date().toISOString();
-      this.step(this.n++, { kind: "tool", name: call.name, args: this.args(call.args), status: "refused", error: this.redact(why), at, endedAt: at });
+      this.step(this.n++, { kind: "tool", name: call.name, args: this.args(call.args), status: "refused", error: this.redact(why), at, endedAt: at, ...(by ? { madeBy: by } : {}) });
     });
   }
 
@@ -312,14 +314,22 @@ export class TurnRecorder {
  * `append` recorded: which events it appended and after which call. `shown()` is the turn's `to_seq`, read
  * before and after; `firstAfter(seq)` is the first event past `seq` the turn takes in (its own outbound rows,
  * which sit between, were not appended). The boundary's own behaviour is unchanged.
+ *
+ * `by: "framework"`: the boundary of the calls the FRAMEWORK makes (capabilities/types.ts `PrepareContext.call`):
+ * the same refusals and context, its steps marked as the framework's, and nothing appended.
  */
-export function recordingBoundary(inner: ToolBoundary, rec: TurnRecorder, shown: () => number, firstAfter: (seq: number) => number | undefined): ToolBoundary {
+export function recordingBoundary(inner: ToolBoundary, rec: TurnRecorder, shown: () => number, firstAfter: (seq: number) => number | undefined, by?: "framework"): ToolBoundary {
+  const { append: _inner, ...rest } = inner;
+  const recording: ToolBoundary = {
+    ...rest,
+    recordRefusal: (call, text) => rec.toolRefused(call, text, by),
+    recordStart: (call) => rec.toolStart(call, by),
+    recordEnd: (call, res: ToolResult) => rec.toolEnd(call, res, by),
+    recordThrow: (call, e) => rec.toolThrew(call, e, by),
+  };
+  if (by) return recording;
   return {
-    ...inner,
-    recordRefusal: (call, text) => rec.toolRefused(call, text),
-    recordStart: (call) => rec.toolStart(call),
-    recordEnd: (call, res: ToolResult) => rec.toolEnd(call, res),
-    recordThrow: (call, e) => rec.toolThrew(call, e),
+    ...recording,
     async append(call, res) {
       const from = shown();
       const out = inner.append ? await inner.append(call, res) : null;

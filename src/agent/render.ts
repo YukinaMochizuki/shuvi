@@ -43,7 +43,35 @@ import type { ApprovalPayload, ChatEvent, ExternalPayload, JobDonePayload, Messa
  *   - only the first line of an event starts at the margin: every later line of anyone's message, and
  *     every line of a framework event's body (a job's result, an inbound text, a note's later lines), is
  *     indented, so no text can start a line that looks like a new event.
+ *
+ * What the framework itself did for a message goes after the message's line as a FRAMEWORK PART
+ * (`frameworkPart`): media's auto-read of a short message's link (capabilities/media/autoread.ts) hands over
+ * what the link holds that way. It opens and closes with a `⚙` line, and everything inside (fetched, untrusted
+ * material) is indented and stripped of the mark, the same rules as above: neither the fetched page nor a
+ * person typing `[⚙ …]` can open, close or fake one. Its head and foot are the framework's own words: a
+ * caller puts nothing a person or a page wrote there (no URL, no title), and `frameworkPart` itself turns any
+ * `[`, `]` or mark in them into plain parentheses, so a label always ends where the framework ended it.
  */
+
+/**
+ * A framework part: `[⚙ <head>]`, then `content` (text and images, in order) with every text line indented and
+ * the mark stripped from it, then `[⚙ <foot>]`. `head` and `foot` must be the framework's own words, never text
+ * a person or a page wrote; and whatever a caller passes, they are made safe here: one line, no mark, and `[` /
+ * `]` turned into `(` / `)`, so nothing can end a label early or open another inside it.
+ */
+export function frameworkPart(head: string, content: readonly ToolContent[], foot: string): ToolContent[] {
+  const label = (s: string) => `[${FRAMEWORK_MARK} ${labelText(s)}]`;
+  return [
+    { type: "text", text: label(head) },
+    ...content.map((c): ToolContent => (c.type === "text" ? { type: "text", text: body(plain(c.text)) } : c)),
+    { type: "text", text: label(foot) },
+  ];
+}
+
+/** A framework part's head or foot, made safe: one line, no mark, no brackets. */
+export function labelText(s: string): string {
+  return plain(s).replace(/[\r\n]+/g, " ").replaceAll("[", "(").replaceAll("]", ")").trim();
+}
 
 /** The images to show after an event's line (capabilities/types.ts `capabilityPerception`). */
 export type Perceive = (e: ChatEvent) => ToolContent[];

@@ -433,7 +433,8 @@ describe("video_fetch", () => {
 // ---- prewarm ------------------------------------------------------------------------------------------
 
 describe("prewarm", () => {
-  const ENV = (p: FakePorchkit) => p.env({ SHUVI_WEB: "off" });
+  // Today's path, without auto-read (its own tests: test/autoread.test.ts).
+  const ENV = (p: FakePorchkit) => p.env({ SHUVI_WEB: "off", SHUVI_AUTOREAD: "off" });
 
   function inbound(db: Db, p: FakePorchkit, policy: Policy, ...updates: Parameters<typeof recordBatch>[1]) {
     saveBotIdentity(db, BOT);

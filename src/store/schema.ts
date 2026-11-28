@@ -473,6 +473,7 @@ export const deletedTurnSteps = sqliteTable(
     tokensAfter: integer("tokens_after"),
     at: text("at").notNull(),
     endedAt: text("ended_at"),
+    madeBy: text("made_by"),
   },
   (t) => [index("deleted_turn_steps_deletion").on(t.deletionId)],
 );
@@ -689,6 +690,11 @@ export const turnSteps = sqliteTable(
     tokensAfter: integer("tokens_after"),
     at: text("at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
+    /**
+     * tool: who made the call. Null: the model. `framework`: the framework itself, through the same boundary,
+     * before the driver ran (media's auto-read of a short message's link: capabilities/media/autoread.ts).
+     */
+    madeBy: text("made_by", { enum: ["framework"] }),
   },
   (t) => [uniqueIndex("turn_steps_turn_n").on(t.turnId, t.n), index("turn_steps_name").on(t.name, t.turnId)],
 );
