@@ -196,6 +196,12 @@ export interface PrepareSeam extends Omit<PrepareContext, "call" | "refusal"> {
 export interface InboundHookContext {
   db: Db;
   ownerId: number;
+  /**
+   * Ask the waker for a pass now. Work an inbound hook started in the background calls it when something a
+   * hold (`holds`) waits on has become ready (a prewarm finished), so the held turn starts at once rather than
+   * at the waker's next poll. Optional and best effort: the waker polls anyway.
+   */
+  wake?: () => void;
 }
 
 /** What a capability's `inbound` hook gets for one event: the server's context, and the event's chat policy. */
