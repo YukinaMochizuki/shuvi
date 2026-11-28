@@ -18,7 +18,7 @@ bun scripts/e2e-jobs.ts     # the same, for schedules, jobs, inbound sources and
 bun scripts/e2e-computer.ts # each chat's computer against a fake Hangar (test/fake-hangar.ts), and personal info
 bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, an unknown group approved
 bun scripts/e2e-media.ts    # videos from links against a fake porchkit (test/fake-porchkit.ts) and a fake Hangar
-bun scripts/e2e-read.ts     # reading links (read_link, save_link, the prewarm) against the same fakes, and her browser (/browse): open, click
+bun scripts/e2e-read.ts     # reading links (read_link, save_link, the prewarm, auto-read) against the same fakes, and her browser (/browse): open, click
 bun scripts/e2e-drain.ts    # SIGTERM drains: a running turn finishes and is delivered; the deadline stops and retries
 bun scripts/e2e-warm.ts     # SHUVI_WARM_RUNNERS=on: turns handed to a warm runner on one CLI, re-warm on a home/ edit, /stop, a server SIGKILLed and SIGTERMed; the timings
 bun scripts/e2e-effort.ts   # effort on the wire (output_config.effort): the chat's and the model's, cold and on a warm runner's CLI
@@ -35,7 +35,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | what is stored, and the exactly-once keys | `src/store/schema.ts` |
 | videos from links (porchkit): who may look, who may fetch, the prewarm (which messages: `isTrigger`; which links: all, through `/read`) and its accounting | `src/capabilities/media/index.ts`, then `prewarm.ts`, `fetch.ts`; the client and its error texts: `src/porchkit/client.ts` |
 | her own browser (porchkit `/browse`): the tools, the session per chat, a page's dialogs, the error texts, who may use it; a purchase's card and its one-use approval; sending a screenshot, a download or a PDF to the chat, giving a page a file (saving one onto the computer, or uploading one from it, is the computer's: `browser_save`, `browser_upload_from_computer`) | `src/capabilities/browser/index.ts`, `purchase.ts`, `files.ts`, `keys.ts`, `upload.ts`, `attachments.ts`, `pointer.ts` (beyond the page text), `look.ts` (the situation, images) (the outbox: `src/store/outbox.ts`; `src/capabilities/computer/browser-save.ts`); the client: `src/porchkit/client.ts` |
-| reading links (porchkit `/read`): read_link's rendering and images, save_link, which links a prewarm reads, web_fetch's removal | `src/capabilities/media/read.ts`, `links.ts` (`prewarmLinks`), `prewarm.ts`; `src/capabilities/web/index.ts` |
+| reading links (porchkit `/read`): read_link's rendering and images, save_link, which links a prewarm reads, web_fetch's removal; auto-read (a short message's link read by the framework before the model runs: which messages, the hold, the read through the turn's boundary, the framework part) | `src/capabilities/media/read.ts`, `links.ts` (`prewarmLinks`), `prewarm.ts`, `autoread.ts`; `src/capabilities/web/index.ts`; the hook it uses: `src/capabilities/types.ts` (`prepare`), `src/agent/turn.ts`; the part: `src/agent/render.ts` (`frameworkPart`) |
 | a capability's hook on each new inbound message (with the chat's policy), a tool owner-only in some calls, a capability's own credential | `src/capabilities/types.ts` (`inbound`, `InboundEventContext`, `ownerOnlyWhen` / `ownerOnlyNote`, `secrets`) |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
 | which models exist, which one a chat runs on, the driver a turn runs on; a turn's effort (the model's default, the chat's override, the levels a model supports) | `src/store/models.ts` (EFFORT, `resolveEffort`), `src/agent/backend.ts` |
@@ -100,7 +100,8 @@ A capability (speech, web, …) is one folder plus one line:
    them in the module header; return `null` when off), and any of `tools`, `section`, `loops`, `jobKinds`,
    `ownerOnly`, and for what a message shows, `holds` (perception gating: hold a turn for a few seconds
    while it is not ready) and `perceive` (image or note parts after the message's line; it may read the
-   store). A loop gets a read-only file downloader (`ServerContext.files`), never the bot API. `inbound` is
+   store), and `prepare` (in the runner child before the driver, calling ITS OWN tools only through the
+   turn's boundary, recorded as the framework's; what it returns reaches its `perceive`: media's auto-read). A loop gets a read-only file downloader (`ServerContext.files`), never the bot API. `inbound` is
    the server's hook on each new message (start work, never wait on it); `secrets` names a credential the
    capability holds, redacted from transcripts.
 2. Append it to `CAPABILITIES` in `src/capabilities/index.ts`. Append, do not insert: registry order is

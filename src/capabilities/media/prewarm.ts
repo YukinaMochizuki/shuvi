@@ -37,6 +37,13 @@ import { prewarmLinks, urlKey, type PrewarmEndpoint } from "./links.ts";
  * (`joinedRead`) of the same link joins it instead of asking porchkit while it is still on its way: the
  * server and the runner child are different processes, so they meet in the store. Each tool joins only the
  * rows of its own endpoint.
+ *
+ * AUTO-READ (autoread.ts) builds on this: a short message with one or two links is held (`holds`) while its
+ * prewarm is in flight, at most `SHUVI_AUTOREAD_WAIT_SEC`; then, in the runner child before the driver, each link
+ * whose prewarm answered `ok` is read through read_link itself (`joinedRead`, which marks the prewarm used), and
+ * its "(Prepared: …)" line gives way to the content. A prewarm still in flight, failed or refused leaves the
+ * message as it is without auto-read. So a prewarm's "used" (`used_turn_id`, the console's "prewarmed: used",
+ * /metrics' `shuvi_prewarm_hits_total`) now counts a framework read too, not only the model's own read_link.
  */
 
 export type Prewarm = typeof mediaPrewarms.$inferSelect;
@@ -107,11 +114,12 @@ const inFlight = (r: Prewarm, now: number) => r.finishedAt === null && now - Dat
 
 /**
  * The lines shown after a message's line for its prewarmed links: what is ready or in flight, never what it
- * found. None for a link whose prewarm failed, or that is older than `PREWARM_FRESH_MS`.
+ * found. None for a link whose prewarm failed, that is older than `PREWARM_FRESH_MS`, or whose key is in `skip`
+ * (a link auto-read handled: autoread.ts shows it instead).
  */
-export function preparedLines(db: Db, event: ChatEvent, now = Date.now()): string[] {
+export function preparedLines(db: Db, event: ChatEvent, now = Date.now(), skip: ReadonlySet<string> = new Set()): string[] {
   const every = prewarmsOf(db, event.seq);
-  const rows = every.filter((r) => now - Date.parse(r.startedAt) < PREWARM_FRESH_MS);
+  const rows = every.filter((r) => now - Date.parse(r.startedAt) < PREWARM_FRESH_MS && !skip.has(r.urlHash));
   const all = every.length;
   const name = (r: Prewarm) => (all > 1 ? `#${event.seq}'s link ${r.n} (${r.host})` : `#${event.seq}'s link`);
   return rows.flatMap((r) => {
@@ -181,10 +189,19 @@ const readFlights = new Map<string, Promise<ReadAnswer>>();
  * porchkit is asked (normally, never speculative), once per link and request however many calls ask at
  * once. The prewarm, if any, is marked used by `turnId`.
  */
-export async function joinedRead(db: Db, porch: Porchkit, chatId: number, turnId: number, req: ReadRequest, opts: { pollMs?: number; waitMs?: number } = {}): Promise<{ answer: ReadAnswer; joined: "prewarm" | "flight" | null }> {
+export async function joinedRead(
+  db: Db,
+  porch: Porchkit,
+  chatId: number,
+  turnId: number,
+  req: ReadRequest,
+  opts: { pollMs?: number; waitMs?: number; signal?: AbortSignal } = {},
+): Promise<{ answer: ReadAnswer; joined: "prewarm" | "flight" | null }> {
   const hash = urlKey(req.url);
   markUsed(db, chatId, hash, turnId, Date.now(), "read");
   const row = await waitInFlight(db, chatId, hash, "read", opts);
+  // A read that may be given up on (`signal`) asks on its own: its abort must not fail another call sharing it.
+  if (opts.signal) return { answer: await porch.read(req, opts.signal), joined: row?.outcome === "ok" ? "prewarm" : null };
   const key = `${hash}|${req.comments ?? 0}|${req.video ?? "auto"}|${req.offset ?? 0}`;
   const shared = readFlights.get(key);
   if (shared) return { answer: await shared, joined: "flight" };

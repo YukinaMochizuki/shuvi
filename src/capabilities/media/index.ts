@@ -6,6 +6,7 @@ import { computersFor, localSheet, SHEET_DESCRIPTION, SHEET_FILE_NOTE, sheetSche
 import { sheetActsForOwner, sheetOptions, type SheetArgs } from "../computer/media.ts";
 import { actingFor, authorisation } from "../../agent/acting.ts";
 import { defineCapability, policyDelegates, policyEnables } from "../types.ts";
+import { AUTOREAD_HOLD_MS, AUTOREAD_MAX_CHARS, AUTOREAD_READ_MS, autoread, autoreadHolds, autoreadParts, type Autoread, type AutoreadConfig } from "./autoread.ts";
 import { FETCH_JOB_KIND, fetchJobKind, startFetch } from "./fetch.ts";
 import { JOIN_WAIT_MS, joinedProbe, preparedLines, pruneResults, startPrewarms } from "./prewarm.ts";
 import { readTools, SAVE_NOTE } from "./read.ts";
@@ -45,17 +46,35 @@ import { probeText, subsText } from "./text.ts";
  *             asking twice (single-flight, across the server and the runner child, through the store).
  *             video_probe asks porchkit itself, whose probe cache the read filled. Each is recorded with
  *             whether a turn then used it: the console's turn view shows "prewarmed: used / unused".
+ *   auto-read a message that opens a turn with one or two links and at most SHUVI_AUTOREAD_MAX_CHARS of its own
+ *             text, from a sender the boundary lets call read_link, opens with its links already read
+ *             (autoread.ts): `holds` keeps its turn from opening while its prewarm is in flight (at most
+ *             SHUVI_AUTOREAD_WAIT_SEC; never a message a running turn would append); then, in the runner child
+ *             before the driver (`prepare`), each link whose prewarm answered is read by read_link's own handler,
+ *             through the turn's boundary (authority, redaction, the prewarm's join and accounting), recorded as
+ *             the framework's call, for at most SHUVI_AUTOREAD_READ_SEC and given up on at a stop; `perceive`
+ *             shows what it gave as an unforgeable framework part after the message, instead of the
+ *             "(Prepared: …)" line. A prewarm past the cap, failed or refused: as without it. A read that fails,
+ *             runs past its cap or is stopped: not retried, a note says so. The framework still never speaks.
+ *   section   reading links, then videos; with auto-read on, one sentence says a link may arrive already read.
  *   jobs      `video_fetch`: porchkit's download, then a resumable copy onto the computer (fetch.ts).
  *   loops     `media-prune`: drop prewarm answers older than an hour (the accounting stays).
  *   secrets   the porchkit token is redacted from turn transcripts (`[REDACTED:porchkit]`), and never logged.
  *
- * Fetched content never goes into a turn's input by itself: the framework only says what is ready.
+ * Fetched content goes into a turn's input only through auto-read, as read_link's own answer, marked as the
+ * framework's and as untrusted; otherwise the framework only says what is ready.
  *
  *   SHUVI_PORCHKIT_URL / SHUVI_PORCHKIT_TOKEN   porchkit and shuvi's token there (both set: on; src/porchkit/)
  *   SHUVI_MEDIA_SHEET_WAIT_SEC  how long video_sheet(url) waits for a download porchkit started for it (409
  *                               `needs_file`) before saying to ask again (default 60)
  *   SHUVI_MEDIA_JOIN_WAIT_SEC   how long video_probe waits on a prewarm of its link still in flight before
  *                               asking porchkit itself (default 15: a prewarm lost to a restart never ends)
+ *   SHUVI_AUTOREAD              "off" turns auto-read off (default on)
+ *   SHUVI_AUTOREAD_MAX_CHARS    the most characters of a message's own text, links removed and trimmed, for it to
+ *                               be auto-read (default 40)
+ *   SHUVI_AUTOREAD_WAIT_SEC     the longest a qualifying message's turn is held for its prewarm (default 8)
+ *   SHUVI_AUTOREAD_READ_SEC     the longest the framework's read of one link may take before the turn goes on
+ *                               without it (default 10)
  */
 
 export interface MediaConfig {
@@ -65,27 +84,33 @@ export interface MediaConfig {
   sheetWaitMs: number;
   /** How long video_probe waits on a prewarm of its link still in flight (prewarm.ts `JOIN_WAIT_MS`). */
   joinWaitMs: number;
+  /** Auto-read (autoread.ts); null: off. */
+  autoread: AutoreadConfig | null;
 }
 
 /** What a refusal of video_fetch adds (the boundary's, agent/turn.ts): why only the owner, and what instead. */
 export const FETCH_NOTE =
   "Tell them plainly that you can't download a video for them without the owner's say-so: it puts the whole file on the owner's computer and uses the home connection's download budget. Offer what you can do instead: look at it (video_probe, video_subs, video_sheet with the link) and tell them what is in it.";
 
-/** The reading part of the section; `computer`: save_link is there. */
-export function readSection(computer: boolean, delegated = false): string {
+/** The sentence the reading section adds where auto-read is on. */
+export const AUTOREAD_SENTENCE =
+  'A link in a short message may arrive already read: its content follows the message between "[⚙ #N\'s link, read by the framework …]" and "[⚙ end of #N\'s link]", and you then need not call read_link for it.';
+
+/** The reading part of the section; `computer`: save_link is there; `autoread`: links may arrive already read. */
+export function readSection(computer: boolean, delegated = false, autoread = false): string {
   const who = delegated ? "the owner or this group's operators" : "the owner";
   return `## Reading links
 
 To read any link, use \`read_link\`: a social post comes whole (its full text, who posted it and when, the post it quotes, and its pictures shown to you), an article or other page as markdown, JSON and plain text as they are. A post's video comes with what it is, what is said in it and a few frames when it is short; the video tools below go further with its link. \`comments\` adds a post's replies. A long page is cut: call read_link again with the \`offset\` it gives to read on${
     computer ? `, or have the whole text put on your computer with \`save_link\` (only ${who} can ask for that)` : ""
-  }. When a message is followed by "(Prepared: … read_link …)", its link was read already and read_link answers at once.
+  }. When a message is followed by "(Prepared: … read_link …)", its link was read already and read_link answers at once.${autoread ? ` ${AUTOREAD_SENTENCE}` : ""}
 
 Links are read through the owner's home connection, anonymously: nothing behind a login is ever read. Say so when that is what stops a link, rather than guessing at what it says.`;
 }
 
 /** The capability's prompt section; `computer`: the chat has a computer (video_fetch, save_link, sheets of files). */
-export function mediaSection(computer: boolean, delegated = false): string {
-  return `${readSection(computer, computer && delegated)}\n\n${videoSection(computer, delegated)}`;
+export function mediaSection(computer: boolean, delegated = false, autoread = false): string {
+  return `${readSection(computer, computer && delegated, autoread)}\n\n${videoSection(computer, delegated)}`;
 }
 
 function videoSection(computer: boolean, delegated = false): string {
@@ -134,7 +159,15 @@ const positive = (v: string | undefined, fallback: number) => (v && Number(v) > 
 export function mediaConfig(env: Record<string, string | undefined>): MediaConfig | null {
   const porchkit = porchkitConfig(env);
   if (!porchkit) return null;
-  return { porchkit, computer: computerConfig(env), sheetWaitMs: positive(env.SHUVI_MEDIA_SHEET_WAIT_SEC, 60) * 1000, joinWaitMs: positive(env.SHUVI_MEDIA_JOIN_WAIT_SEC, JOIN_WAIT_MS / 1000) * 1000 };
+  const autoread: AutoreadConfig | null =
+    env.SHUVI_AUTOREAD === "off"
+      ? null
+      : {
+          maxChars: positive(env.SHUVI_AUTOREAD_MAX_CHARS, AUTOREAD_MAX_CHARS),
+          holdMs: positive(env.SHUVI_AUTOREAD_WAIT_SEC, AUTOREAD_HOLD_MS / 1000) * 1000,
+          readMs: positive(env.SHUVI_AUTOREAD_READ_SEC, AUTOREAD_READ_MS / 1000) * 1000,
+        };
+  return { porchkit, computer: computerConfig(env), sheetWaitMs: positive(env.SHUVI_MEDIA_SHEET_WAIT_SEC, 60) * 1000, joinWaitMs: positive(env.SHUVI_MEDIA_JOIN_WAIT_SEC, JOIN_WAIT_MS / 1000) * 1000, autoread };
 }
 
 const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
@@ -305,15 +338,22 @@ export const media = defineCapability<MediaConfig>({
     const reading = readTools({ db, chat, turnId, porch, computer, joinWaitMs: cfg.joinWaitMs });
     return [{ serverName: "shuvi", tools: [...reading, probe, subs, sheet, ...(computer ? [fetchTool] : [])] as ToolDef[] }];
   },
-  section: (ctx, cfg) => mediaSection(!!cfg.computer && policyEnables(ctx.chatPolicy, "computer"), policyDelegates(ctx.chatPolicy, "media")),
+  section: (ctx, cfg) => mediaSection(!!cfg.computer && policyEnables(ctx.chatPolicy, "computer"), policyDelegates(ctx.chatPolicy, "media"), !!cfg.autoread),
   jobKinds: (cfg) => [fetchJobKind(porchkitOf(cfg), cfg.computer)],
   inbound(event, { db, chatPolicy }, cfg) {
     void startPrewarms(db, porchkitOf(cfg), event, chatPolicy);
   },
-  perceive(event, _cfg, { db }): ToolContent[] {
+  holds(event, now, cfg, ctx) {
+    return !!cfg.autoread && autoreadHolds(ctx, event, now, cfg.autoread);
+  },
+  async prepare(events, ctx, cfg) {
+    return cfg.autoread ? autoread(events, ctx, cfg.autoread) : undefined;
+  },
+  perceive(event, _cfg, { db, prepared }): ToolContent[] {
     if (!db || event.kind !== "message") return [];
-    const lines = preparedLines(db, event);
-    return lines.length ? [{ type: "text", text: lines.join("\n") }] : [];
+    const read = (prepared as Autoread | undefined)?.get(event.seq);
+    const lines = preparedLines(db, event, Date.now(), new Set(read?.keys() ?? []));
+    return [...(lines.length ? [{ type: "text" as const, text: lines.join("\n") }] : []), ...(read?.size ? autoreadParts(event, read) : [])];
   },
   loops: ({ db }) => [{ name: "media-prune", everyMs: 10 * 60_000, run: async () => void pruneResults(db) }],
   secrets: (cfg) => ({ porchkit: cfg.porchkit.token }),

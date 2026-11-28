@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import type { Acting } from "./acting.ts";
-import { LostSessionError, type BackendAdapter, type Prompt, type ToolBoundary, type TurnUsage } from "agent-runtime";
+import { LostSessionError, runAtBoundary, type BackendAdapter, type Prompt, type ToolBoundary, type TurnUsage } from "agent-runtime";
 import {
   capabilityDelegated,
   capabilityHolds,
@@ -8,10 +8,12 @@ import {
   capabilityOwnerOnlyNotes,
   capabilityOwnerOnlyWhen,
   capabilityPerception,
+  capabilityPrepare,
   capabilityTools,
   looksBack,
   turnCapabilities,
   type EnabledCapability,
+  type HoldContext,
   type OwnerInfo,
 } from "../capabilities/types.ts";
 import { defaultPolicy, isOperator, resolveChat, type ChatPolicy, type Operators, type Policy } from "../policy/policy.ts";
@@ -125,7 +127,10 @@ export function isLostSession(e: unknown): boolean {
  * PERCEPTION GATING: a message a capability still holds (a picture still downloading, `Capability.holds`)
  * is not taken in yet, nor anything after it, so the chat stays in order; the next tool call or the next
  * turn takes it, once ready or once the short wait is over. What a message shows (an image) follows its line
- * (`Capability.perceive`), in the turn's input and in what is appended.
+ * (`Capability.perceive`), in the turn's input and in what is appended. Before the driver is called, a
+ * capability may prepare the input (`Capability.prepare`: media's auto-read of a short message's link), calling
+ * the turn's own tools through this same boundary, recorded as the framework's calls; what it got is shown
+ * through its `perceive`.
  *
  * The turn's tools and the capability sections of its system prompt come from the enabled capabilities
  * (src/capabilities/), in registry order; this module does not know which capabilities exist.
@@ -260,8 +265,8 @@ export function queueReaction(db: Db, s: TurnState, targetSeq: number, emoji: st
  * The events up to (not including) the first one a capability still holds. Events at or before `always`
  * are kept regardless: the turn was claimed for them.
  */
-export function untilHeld(events: ChatEvent[], capabilities: readonly EnabledCapability[], now: number, always = 0): ChatEvent[] {
-  const i = events.findIndex((e) => e.seq > always && capabilityHolds(capabilities, e, now));
+export function untilHeld(events: ChatEvent[], capabilities: readonly EnabledCapability[], now: number, always = 0, ctx: HoldContext = {}): ChatEvent[] {
+  const i = events.findIndex((e) => e.seq > always && capabilityHolds(capabilities, e, now, ctx));
   return i < 0 ? events : events.slice(0, i);
 }
 
@@ -390,7 +395,7 @@ export function operatorAuthority(db: Db, chatId: number, fromSeq: number, toSeq
  * (`ownerAuthority`); else, for a tool this chat delegates (`TurnAuthority.delegated`), an operator in it
  * (`operatorAuthority`); else refused, in words the model can pass on.
  */
-export function callAuthority(db: Db, s: TurnState, authority: TurnAuthority, tool: string): Acting | { refused: string } {
+export function callAuthority(db: Db, s: TurnSpan, authority: TurnAuthority, tool: string): Acting | { refused: string } {
   const why = ownerAuthority(db, s.chat.id, s.fromSeq, s.toSeq, authority.ownerId);
   if (!why) return { by: "owner" };
   const delegated = !!authority.operators && !!authority.delegated?.has(tool);
@@ -400,6 +405,26 @@ export function callAuthority(db: Db, s: TurnState, authority: TurnAuthority, to
     return { refused: `\`${tool}\` acts for the owner, and here only the owner or one of this group's operators may ask for it; ${why}, nor from an operator` };
   }
   return { refused: `\`${tool}\` acts for the owner, and only the owner may ask for it; ${why}` };
+}
+
+/** What a turn's authority is judged over: its chat and the events it answers, (fromSeq, toSeq]; whether it passed. */
+export type TurnSpan = { chat: Pick<Chat, "id">; fromSeq: number; toSeq: number; passed?: boolean };
+
+/**
+ * The boundary's refusal of a call of `tool` with `args` over `s`, or null when it may run: after `pass`, and an
+ * owner-only call (`ownerOnly`, `ownerOnlyWhen`) without the authority for it (`callAuthority`). The one rule:
+ * the boundary's `refuse`, a framework call's pre-check (capabilities/types.ts `PrepareContext.refusal`) and the
+ * waker's hold (`HoldContext.mayCall`) all ask it.
+ */
+export function callRefusal(db: Db, s: TurnSpan, authority: TurnAuthority, tool: string, args: Record<string, unknown>): string | null {
+  if (s.passed && tool !== "pass") return "This turn has already passed. End it now; call no more tools.";
+  if (authority.ownerOnly.has(tool) || authority.ownerOnlyWhen?.get(tool)?.(args)) {
+    const r = callAuthority(db, s, authority, tool);
+    const delegated = !!authority.operators && !!authority.delegated?.has(tool);
+    const note = authority.notes?.get(tool) ?? (delegated ? "If someone asked for this, tell them only the owner or this group's operators can." : "If someone asked for this, tell them only the owner can.");
+    if ("refused" in r) return `Refused: ${r.refused}. Nothing was done. ${note}`;
+  }
+  return null;
 }
 
 /**
@@ -424,24 +449,17 @@ export function turnBoundary(
   };
   return {
     refuse(call) {
-      if (s.passed && call.name !== "pass") return "This turn has already passed. End it now; call no more tools.";
-      const args = (call.args ?? {}) as Record<string, unknown>;
-      if (authority.ownerOnly.has(call.name) || authority.ownerOnlyWhen?.get(call.name)?.(args)) {
-        const r = callAuthority(db, s, authority, call.name);
-        const delegated = !!authority.operators && !!authority.delegated?.has(call.name);
-        const note = authority.notes?.get(call.name) ?? (delegated ? "If someone asked for this, tell them only the owner or this group's operators can." : "If someone asked for this, tell them only the owner can.");
-        if ("refused" in r) return `Refused: ${r.refused}. Nothing was done. ${note}`;
-      }
-      return null;
+      return callRefusal(db, s, authority, call.name, (call.args ?? {}) as Record<string, unknown>);
     },
     around(call, fn) {
-      return call.callId ? withCall({ turnId: s.turnId, chatId: s.chat.id, callId: call.callId, tool: call.name }, fn) : fn();
+      return call.callId ? withCall({ turnId: s.turnId, chatId: s.chat.id, callId: call.callId, tool: call.name, ...(call.signal ? { signal: call.signal } : {}) }, fn) : fn();
     },
     append() {
       // After `pass` (the turn is over) or a stop (it is being abandoned), a message that arrives is not
       // this turn's to answer: leave it past to_seq, and the next turn answers it.
       if (s.passed || s.stopping) return null;
-      const fresh = untilHeld(triggersAfter(db, s.chat.id, s.toSeq), capabilities, Date.now());
+      // Appending, not opening a turn: a hold for what only a turn's opening does (auto-read) does not apply.
+      const fresh = untilHeld(triggersAfter(db, s.chat.id, s.toSeq), capabilities, Date.now(), 0, { db, appending: true });
       if (!fresh.length) return null;
       s.toSeq = fresh.at(-1)!.seq;
       extendTurn(db, s.turnId, s.toSeq);
@@ -494,8 +512,10 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const group = chat.kind === "group";
 
   // A clean conversation sees nothing said before it began (the header): those count as seen.
-  const unseen = untilHeld(triggersAfter(db, chat.id, turn.fromSeq), deps.capabilities, Date.now(), turn.toSeq).filter((e) => chat.cleanSince == null || e.seq > chat.cleanSince);
-  const perceive: Perceive = (e) => capabilityPerception(capabilities, e, { db });
+  const unseen = untilHeld(triggersAfter(db, chat.id, turn.fromSeq), deps.capabilities, Date.now(), turn.toSeq, { db }).filter((e) => chat.cleanSince == null || e.seq > chat.cleanSince);
+  // What the capabilities prepared before the driver ran (`capabilityPrepare`, below), shown through their `perceive`.
+  const prepared = new Map<string, unknown>();
+  const perceive: Perceive = (e) => capabilityPerception(capabilities, e, { db, prepared });
   // A fresh conversation (the first turn, or after `/new`) opens with the chat's last few exchanges, so
   // starting over forgets the model's context, not what was just being talked about.
   if (!unseen.length) {
@@ -561,12 +581,11 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   };
 
   const authority = turnAuthority(capabilities, deps.ownerId, chatPolicy);
+  const inner = turnBoundary(db, s, deps.timeZone, capabilities, authority);
+  const firstAfter = (seq: number) => triggersAfter(db, chat.id, seq)[0]?.seq;
   let adapter: BackendAdapter;
   try {
-    adapter = deps.makeAdapter(
-      recordingBoundary(turnBoundary(db, s, deps.timeZone, capabilities, authority), rec, () => s.toSeq, (seq) => triggersAfter(db, chat.id, seq)[0]?.seq),
-      (text) => rec.note(text),
-    );
+    adapter = deps.makeAdapter(recordingBoundary(inner, rec, () => s.toSeq, firstAfter), (text) => rec.note(text));
   } catch (e) {
     // A driver that cannot be built (a provider's key missing from the secrets file) fails the turn, saying why.
     rec.end();
@@ -580,6 +599,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     deps.ownerName ??
     (deps.ownerId !== undefined ? turnOwnerName(db, chat.id, deps.ownerId, input) : anyone ? (anyone.payload as unknown as MessagePayload).from.name : undefined);
   const owner: OwnerInfo = { ...(ownerName ? { name: ownerName } : {}), ...(deps.ownerLanguage ? { language: deps.ownerLanguage } : {}) };
+  const owners = new Map<string, string>();
   const tools = capabilityTools(capabilities, {
     db,
     home: deps.home,
@@ -592,7 +612,18 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
     policy,
     chatPolicy,
     ...(deps.ownerId !== undefined ? { ownerId: deps.ownerId } : {}),
-  });
+  }, owners);
+  // The framework's own calls (`Capability.prepare`), before the driver: through the same boundary, marked as its own.
+  const framework = recordingBoundary(inner, rec, () => s.toSeq, firstAfter, "framework");
+  // Each capability reaches only its own tools (capabilityPrepare binds them by `owners`).
+  const call = (name: string, args: Record<string, unknown>, signal?: AbortSignal) => {
+    const def = tools.flatMap((b) => b.tools).find((t) => t.name === name);
+    return def ? runAtBoundary(framework, { name, recordedName: name, args, ...(signal ? { signal } : {}) }, () => def.handler(args)) : null;
+  };
+  const refusal = (name: string, args: Record<string, unknown>) => callRefusal(db, s, authority, name, args);
+  if (!s.stopping)
+    for (const [id, v] of await capabilityPrepare(capabilities, input.slice(context), { db, chat, turnId, chatPolicy, call, refusal, owners, ...(deps.signal ? { signal: deps.signal } : {}), note: (t) => rec.note(t) }))
+      prepared.set(id, v);
   const opening: InputOptions = { ...withNote(!chat.backendSessionId), ...(isRetryAfterDrain(db, turn, chat.backendSessionId) ? { retry: true } : {}) };
   const prompt = history.length ? renderWithHistory(history, input, deps.timeZone, perceive, opening) : renderTurnInput(input, deps.timeZone, perceive, opening);
   let lastThinking = false;

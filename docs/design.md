@@ -437,7 +437,8 @@ An **inbound source** carries external events the assistant did not start (a mon
 ## 11. Media
 
 The framework does not filter noise on the assistant's behalf, and does not prefetch links, with one
-exception the owner decided (the prewarm, below); otherwise the assistant calls a tool when it needs to.
+exception the owner decided (the prewarm, and auto-read on top of it, below); otherwise the assistant calls
+a tool when it needs to.
 Where a forward came from and the text being replied to are recorded as event fields.
 
 - **Videos from links** go through porchkit, a separate service on the owner's home connection
@@ -452,10 +453,24 @@ Where a forward came from and the text being replied to are recorded as event fi
   most 3, is read through porchkit's `/read` as soon as the message is recorded, alongside spawning the
   turn. There is no host list: `/read` reads any link, and for a video site probes the video itself. A
   speculative read, never a download; best effort (a failure is logged and ignored; porchkit refuses it
-  when the site's budget is half used); it never delays the turn, and a chat whose policy leaves media out
-  gets none. The framework never puts what was fetched into the turn's input: it only says what is ready
-  ("(Prepared: #53's link — read_link returns at once.)"), and the assistant asks when it wants it. Each
-  prewarm is recorded with whether the turn then used it.
+  when the site's budget is half used). It does not delay the turn, except that a message auto-read
+  qualifies for (below) may make its turn wait for it, up to auto-read's cap; a chat whose policy leaves
+  media out gets none. The framework only says what is ready ("(Prepared: #53's link — read_link returns at once.)"),
+  and the assistant asks when it wants it, except under auto-read. Each prewarm is recorded with whether the
+  turn then used it.
+- **Auto-read** (`src/capabilities/media/autoread.ts`): a message that opens a turn with one or two links
+  and little else (at most `SHUVI_AUTOREAD_MAX_CHARS` characters of its own, default 40), from a sender the
+  boundary would let call `read_link`, opens with its links already read, which saves the model's first
+  round trip. While its prewarm is in flight its turn waits, up to `SHUVI_AUTOREAD_WAIT_SEC` (default 8 s):
+  this is perception gating, so like any hold it holds the chat's turn, and a message after it waits too. A
+  message a running turn would take in is not held, and is appended as before. Then, before the model runs,
+  the runner child reads each link the prewarm answered through `read_link`'s own handler and the turn's
+  tool boundary (the same authority, redaction and accounting as her own call, recorded as the
+  framework's), for at most `SHUVI_AUTOREAD_READ_SEC` (default 10 s) and never past a stop. The answer
+  follows the message as a framework part that nobody can forge, its page text marked as untrusted fetched
+  material. A prewarm past the cap, failed or refused leaves the message as above; a read that fails or does
+  not finish leaves a note saying `read_link` is there. It only changes what the model is given: the
+  framework still never speaks (§1, 5).
 - **Her own browser** goes through porchkit too (`src/capabilities/browser/`): a real Chrome on the
   owner's home machine, signed in to accounts made for her, driven step by step through `/browse` with
   generic tools (no per-site scripts), one window per chat. Unlike reading, it is not anonymous and not

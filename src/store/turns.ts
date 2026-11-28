@@ -145,6 +145,9 @@ export function setTurnPid(db: Db, id: number, pid: number, pidStart: string | n
 /**
  * Where a turn's time went (`turns.timings`), as epoch-ms marks, each written by the process that saw it:
  *
+ *   held         the waker first held the turn back for an event a capability held (perception gating: a
+ *                picture downloading, a short message's link prewarming for auto-read); claimed - held is the
+ *                wait. Absent when nothing was held (or the server that held it restarted)
  *   claimed      the waker claimed the turn                    (server/waker.ts)
  *   spawned      the waker's spawn of the runner child returned
  *   handed       instead of `spawned`: the waker handed the turn to the chat's warm runner and signalled it
@@ -154,13 +157,15 @@ export function setTurnPid(db: Db, id: number, pid: number, pidStart: string | n
  *   ready        the runner is about to call `runTurn`: its modules, config, store and driver loaded
  *   cli          the turn (re)started a Claude Code CLI: a warm runner's CLI did not fit the turn, or the first
  *                turn of a runner (runner/warm-session.ts); absent when the turn ran on a CLI already running
+ *   autoread     the framework's read of a short message's link finished, before the driver was called
+ *                (capabilities/media/autoread.ts); absent when nothing was read ahead
  *   query        the driver was called                          (agent/turn.ts)
  *   firstOutput  the driver's first token (thinking included) or tool call
  *   result       the driver reported the turn's result (`onResult`): its reply is queued here
  *   queuedFirst  the turn's first outbound row was queued       (store/events.ts `enqueueOutbound`)
  *   returned     the driver returned (not on a throw or a stop)
  */
-export type TurnMark = "claimed" | "spawned" | "handed" | "child" | "acked" | "ready" | "cli" | "query" | "firstOutput" | "result" | "queuedFirst" | "returned";
+export type TurnMark = "held" | "claimed" | "spawned" | "handed" | "child" | "acked" | "ready" | "cli" | "autoread" | "query" | "firstOutput" | "result" | "queuedFirst" | "returned";
 export type TurnTimings = Partial<Record<TurnMark, number>>;
 
 /**

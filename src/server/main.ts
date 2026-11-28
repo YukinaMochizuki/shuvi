@@ -94,6 +94,8 @@ const bot = { id: me.id, ...(me.username ? { username: me.username } : {}) };
 saveBotIdentity(db, bot);
 const policies = new PolicyWatch(db, cfg.home, cfg.ownerId);
 const triggers = new TriggerScan();
+// When the waker first held each chat's turn for perception gating (waker.ts `held`), from pass to pass.
+const held = new Map<number, number>();
 // The owner's `/` menu. Best effort and not awaited: a failure is logged and the server carries on.
 void registerCommands(api, cfg.ownerId, MAIN_COMMANDS, "main bot");
 // The same menu, for the owner only, in each group policy lists; synced by the policy loop below.
@@ -154,7 +156,7 @@ void loop(
     switchRequestPass(db);
     switchCardPass(db);
     // Draining: still reap and enforce the limit, start nothing.
-    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers, runnerIdentity, wake: !vitals.draining });
+    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers, held, runnerIdentity, wake: !vitals.draining });
   },
   300,
   wakeWaker,

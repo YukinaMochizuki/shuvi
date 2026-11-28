@@ -11,6 +11,7 @@ import { shq } from "../computer/exec.ts";
 import { getComputer } from "../computer/state.ts";
 import { COPY_SLICE_MS, copyInto, homeRun } from "./fetch.ts";
 import { urlKey } from "./links.ts";
+import { currentCall } from "../../agent/call-context.ts";
 import { joinedRead } from "./prewarm.ts";
 import { probeText } from "./text.ts";
 
@@ -27,6 +28,10 @@ import { probeText } from "./text.ts";
  *   page   title, byline, date, the markdown; when cut, how to read on (`offset`, free: from porchkit's
  *          cache) and, where the chat has a computer, that save_link puts the whole text there.
  *   raw    the text, with the same read-on line when cut.
+ *
+ * AUTO-READ (autoread.ts) calls this same read_link, its handler through the turn's boundary, before the driver
+ * runs, for a short message's link; what it returns here is what the model then finds after the message, inside a
+ * framework part (render.ts `frameworkPart`). One read path: anything read_link renders, auto-read shows the same.
  *
  * `save_link` puts a page's (or raw answer's) whole text and/or the page as received into ~/inbox/ on the
  * chat's computer: porchkit's file keys (`full`, `original`) copied by video_fetch's resumable copy
@@ -239,12 +244,12 @@ const imageType = (t: string | null) => {
 };
 
 /** The tool's content: the text, then each image (fetched with the token) after a line naming it. */
-export async function readContent(porch: Porchkit, r: Rendered): Promise<ToolContent[]> {
+export async function readContent(porch: Porchkit, r: Rendered, signal?: AbortSignal): Promise<ToolContent[]> {
   const got = await Promise.all(
     r.images.map(async (img) => {
       try {
-        if ("sheet" in img.source) return { bytes: await porch.sheetImage(img.source.sheet), type: "image/jpeg" };
-        const f = await porch.file(img.source.file);
+        if ("sheet" in img.source) return { bytes: await porch.sheetImage(img.source.sheet, signal), type: "image/jpeg" };
+        const f = await porch.file(img.source.file, signal);
         return { bytes: f.bytes, type: imageType(f.type) };
       } catch (e) {
         return { error: describeRead(e) };
@@ -353,14 +358,17 @@ export function readTools(x: ReadToolsContext): ToolDef[] {
       video: z.enum(["auto", "summary"]).optional().describe('Posts: "auto" (default) or "summary"'),
     },
     async handler(a): Promise<ToolResult> {
+      // A call that can be given up on (auto-read's cap, the turn's stop: capabilities/types.ts `PrepareContext.call`)
+      // carries its signal in the call's context; porchkit's requests are aborted with it.
+      const signal = currentCall()?.signal;
       let answer: ReadAnswer;
       try {
-        ({ answer } = await joinedRead(db, porch, chat.id, turnId, { url: a.url, ...(a.comments ? { comments: a.comments } : {}), ...(a.offset ? { offset: a.offset } : {}), ...(a.video ? { video: a.video } : {}) }, { waitMs: x.joinWaitMs }));
+        ({ answer } = await joinedRead(db, porch, chat.id, turnId, { url: a.url, ...(a.comments ? { comments: a.comments } : {}), ...(a.offset ? { offset: a.offset } : {}), ...(a.video ? { video: a.video } : {}) }, { waitMs: x.joinWaitMs, ...(signal ? { signal } : {}) }));
       } catch (e) {
         return err(describeRead(e));
       }
       if (!answer || !["post", "page", "raw"].includes(answer.kind)) return err("The media service answered with something it should not have (no kind of answer read_link knows); nothing to show.");
-      return { content: await readContent(porch, renderRead(answer, { saveable: !!computer })) };
+      return { content: await readContent(porch, renderRead(answer, { saveable: !!computer }), signal) };
     },
   };
 

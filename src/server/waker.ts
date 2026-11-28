@@ -1,10 +1,11 @@
 import { hasPendingSwitch } from "../agent/switch.ts";
 import { TriggerScan, type BotIdentity } from "../agent/triggers.ts";
-import { capabilityHolds, type EnabledCapability } from "../capabilities/types.ts";
-import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
+import { callRefusal, turnAuthority } from "../agent/turn.ts";
+import { capabilityHolds, chatCapabilities, type EnabledCapability, type HoldContext } from "../capabilities/types.ts";
+import { defaultPolicy, resolveChat, type ChatPolicy, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
-import { allChats, getChat, lastTriggerSeq, triggersAfter } from "../store/events.ts";
+import { allChats, getChat, lastTriggerSeq, triggersAfter, type Chat, type ChatEvent } from "../store/events.ts";
 import { chatLabel, claimTurn, closeNeverStarted, finishTurn, IMMEDIATE, markTerm, markTurn, retryDelayMs, runningTurns, setTurnPid, type WarmClaim } from "../store/turns.ts";
 import type { RunnerIdentity } from "../store/warm.ts";
 import { isAlive, processStart, signalTurn, signalWarm, type SignalTurn, type SignalWarm, type SpawnTurn } from "./spawn.ts";
@@ -90,10 +91,33 @@ export interface WakerDeps {
   /** Kept by the caller from pass to pass (see the header). */
   triggers?: TriggerScan;
   /**
+   * Kept by the caller from pass to pass, like `triggers`: when the waker first held each chat's turn back for an
+   * event a capability holds (perception gating). The turn it then claims gets that as its `held` mark
+   * (store/turns.ts `markTurn`), which is how its transcript can say it was held. Lost on a restart: a turn
+   * claimed by the next server just has no `held` mark.
+   */
+  held?: Map<number, number>;
+  /**
    * false: reap and enforce the limit (1 and 2), but start nothing (3). A draining server (server/drain.ts)
    * still closes the turns that die and stops the ones that hang, and starts no new one.
    */
   wake?: boolean;
+}
+
+/**
+ * The hold context for each event of `chat` a turn would open with: the store, and `mayCall`, the boundary's own
+ * rule (agent/turn.ts `callRefusal`) over the events such a turn would answer, with the chat's capabilities and
+ * policy. In the owner's DM that is everything past the cursor up to the event; in a group, the event itself
+ * (the turn's real span starts at the first message that woke it: judging only the event can leave unheld a
+ * message an earlier one would have given authority, never the other way round). Cheap: a few reads of the store,
+ * and only for an event a capability is considering holding.
+ */
+export function holdContext(db: Db, chat: Chat, cp: ChatPolicy, caps: readonly EnabledCapability[], ownerId: number | undefined): (e: ChatEvent) => HoldContext {
+  const authority = turnAuthority(chatCapabilities(caps, cp.tools), ownerId, cp);
+  return (e) => ({
+    db,
+    mayCall: (tool, args) => callRefusal(db, { chat, fromSeq: cp.trigger === "all" ? chat.cursorSeq : e.seq - 1, toSeq: e.seq }, authority, tool, args) === null,
+  });
 }
 
 export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[]; limited: number[] } {
@@ -190,7 +214,15 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
     if (retryDelayMs(db, chat.id, now()) > 0) continue;
     if (hasPendingSwitch(db, chat.id)) continue;
     const caps = deps.capabilities ?? [];
-    if (caps.length && triggersAfter(db, chat.id, chat.cursorSeq).some((e) => capabilityHolds(caps, e, now()))) continue;
+    if (caps.length) {
+      const ctx = holdContext(db, chat, cp, caps, deps.ownerId);
+      if (triggersAfter(db, chat.id, chat.cursorSeq).some((e) => capabilityHolds(caps, e, now(), ctx(e)))) {
+        if (!deps.held?.has(chat.id)) deps.held?.set(chat.id, now());
+        continue;
+      }
+    }
+    const heldSince = deps.held?.get(chat.id);
+    deps.held?.delete(chat.id);
     // Whether the chat's warm runner takes the turn is decided inside the claim's transaction (store/turns.ts
     // `claimTurn`), against its row as it is then: alive and on this server's code and configuration.
     const warm: WarmClaim = { alive, ...(deps.runnerIdentity ? { identity: deps.runnerIdentity } : {}), retired: [] };
@@ -202,9 +234,10 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
     if (!turn) continue;
     // Wall-clock marks (store/turns.ts `markTurn`), written once the child is on its way.
     const claimed = Date.now();
+    const held = heldSince !== undefined ? { held: heldSince } : {};
     if (turn.handoff === "pending" && turn.pid != null) {
       (deps.signalWarm ?? signalWarm)(turn.pid, turn.pidStart, "SIGUSR1");
-      markTurn(db, turn.id, { claimed, handed: Date.now() });
+      markTurn(db, turn.id, { ...held, claimed, handed: Date.now() });
       started.push(turn.id);
       continue;
     }
@@ -224,7 +257,7 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
     } catch (e) {
       console.error(`waker: could not record pid ${pid} for turn ${turn.id}:`, e);
     }
-    markTurn(db, turn.id, { claimed, spawned });
+    markTurn(db, turn.id, { ...held, claimed, spawned });
     started.push(turn.id);
   }
   return { reaped, started, limited };

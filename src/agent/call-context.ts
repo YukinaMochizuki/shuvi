@@ -7,7 +7,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * which is how the console's Home page tells which turn and which call changed a file.
  *
  * Outside a tool call (a server loop, a test, the console) there is none, and nothing may depend on there being
- * one: it only labels.
+ * one: it labels, and it carries the call's abort signal when the call has one (a framework call's cap or the
+ * turn's stop, capabilities/types.ts `PrepareContext.call`), which a handler may pass on to what it waits for.
  */
 export interface CallContext {
   turnId: number;
@@ -17,6 +18,8 @@ export interface CallContext {
   callId: string;
   /** The tool's bare name. */
   tool: string;
+  /** Aborts when the caller gives up on the call (agent-runtime's `ToolCall.signal`), when it has one. */
+  signal?: AbortSignal;
 }
 
 const store = new AsyncLocalStorage<CallContext>();

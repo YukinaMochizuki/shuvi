@@ -303,7 +303,8 @@ describe("web_fetch where porchkit reads links", () => {
 
 describe("prewarm routing", () => {
   const DM = policyOf("");
-  const ENV = (p: FakePorchkit) => p.env({ SHUVI_WEB: "off" });
+  // Today's path, without auto-read (its own tests: test/autoread.test.ts).
+  const ENV = (p: FakePorchkit) => p.env({ SHUVI_WEB: "off", SHUVI_AUTOREAD: "off" });
   function inbound(db: Db, p: FakePorchkit, ...updates: Parameters<typeof recordBatch>[1]) {
     const caps = enabledCapabilities(ENV(p));
     recordBatch(db, updates, OWNER, { botUsername: "shuvi_test_bot", policy: DM, onRecorded: (events) => capabilityInbound(caps, events, DM, { db, ownerId: OWNER }) });
