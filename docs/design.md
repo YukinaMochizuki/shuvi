@@ -230,11 +230,11 @@ anything worth saying mid-turn is said through an explicit tool.
 
   | tool | purpose |
   |---|---|
-  | `say(text)` | say something partway through a turn |
+  | `say(text, reply_to?)` | say something partway through a turn; with `reply_to`, as a reply to that message |
   | `react(event, emoji)` | react to a message |
   | `sticker(id)` | send a sticker |
   | `send_photo` / `send_file` / `send_voice` | images, files, voice messages |
-  | `reply_to(event)` | make the next text a reply to that message |
+  | `reply_to(event)` | make the next message (usually the final text) a reply to that message |
   | `edit` / `delete` | change or remove one of its own messages |
   | `send(chat, …)` | send to another chat (owner's DM only) |
   | `pass(reaction?)` | say nothing, and end the turn |
@@ -246,7 +246,9 @@ anything worth saying mid-turn is said through an explicit tool.
   - sends "typing…" while a turn runs;
   - converts the assistant's markdown to Telegram HTML in the sender;
   - in a group, if someone else has spoken since the message that triggered the turn, makes the first
-    text a reply to that message; otherwise sends it plainly. In a DM, no reply by default.
+    text a reply to that message; otherwise sends it plainly. In a DM, no reply by default. A message
+    the assistant named a reply target for (`say`'s `reply_to`, or `reply_to` before it) replies to that
+    instead, the first one included.
 - **Idempotency keys** are `(turn, block number)` or the tool call id. When a turn is picked up after a
   restart, what was already sent is skipped.
 

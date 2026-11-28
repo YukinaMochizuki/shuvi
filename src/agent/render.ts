@@ -5,8 +5,11 @@ import type { ApprovalPayload, ChatEvent, ExternalPayload, JobDonePayload, Messa
  * How chat events read to the model. One line per message, led by its `#seq` (the handle `react` takes),
  * the time, and who said it, so the model reads the chat roughly the way a person scrolls it:
  *
- *   [#12 · Wed 11/11 21:03 · Alice] long day today
+ *   [#12 · Wed 11/11 21:03 · Alice (@alice)] long day today
  *     ↳ replying to Alice: "that bug from yesterday..."
+ *
+ * After the name, their Telegram @username when they have one: how she mentions them (a display name is only
+ * text). Only Telegram sets it, and only `\w` characters of it are kept, so it can carry no mark or bracket.
  *
  * The time matters more than it looks: a reply hours later is a different conversation from one a few
  * seconds later, and without it the model cannot tell. The stamp carries the weekday (`Thu 11/12 00:36`),
@@ -214,7 +217,10 @@ export function renderMessage(e: ChatEvent, timeZone: string, opts: RenderOption
   const owner = isOwner ? ` · ${FRAMEWORK_MARK} owner` : "";
   const operator = !isOwner && !p.from.isBot && opts.operators?.includes(p.from.id) ? ` · ${FRAMEWORK_MARK} operator` : "";
   const bot = p.from.isBot ? ` · ${FRAMEWORK_MARK} bot` : "";
-  const head = `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${plainName(p.from.name)}${owner}${operator}${bot}]`;
+  // Their @username, when they have one, is how she mentions them: the display name is only text.
+  const username = p.from.username?.replace(/\W/g, "");
+  const handle = username ? ` (@${username})` : "";
+  const head = `[#${e.seq} · ${formatTime(e.at, timeZone)} · ${plainName(p.from.name)}${handle}${owner}${operator}${bot}]`;
   const lines = [`${head} ${p.forwardedFrom ? `(forwarded from ${plainName(p.forwardedFrom)}) ` : ""}${inline(plain(p.text))}`];
   if (p.replyTo) lines.push(replyLine(p.replyTo));
   return lines.join("\n");

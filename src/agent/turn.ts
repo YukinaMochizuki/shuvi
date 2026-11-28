@@ -112,9 +112,10 @@ export function isLostSession(e: unknown): boolean {
  *     `done`, with the result's usage and a transcript note; failing it would answer the same messages again. A
  *     stop is still a stop. Thinking is never sent: on Opus 5.5 it carries reasoning summaries that cannot be
  *     told apart from progress notes.
- *   - `say` queues a message mid-turn, for progress the model wants the person to see. The `say`, `react`
- *     and `pass` tools live in src/capabilities/speech/; the rules they rely on (queueMessage, the
- *     boundary) stay here.
+ *   - `say` queues a message mid-turn, for progress the model wants the person to see, or one answer of
+ *     several, each a reply to the message it answers (`reply_to`); the `reply_to` tool names what the next
+ *     text replies to. The `say`, `reply_to`, `react` and `pass` tools live in src/capabilities/speech/;
+ *     the rules they rely on (queueMessage, the boundary) stay here.
  *   - `pass` ends the turn's speech: nothing written after it is sent, and every later tool call is
  *     refused with a note to stop.
  * Each queued message carries the idempotency key `turn:<id>:<n>`, numbered in the order the turn
@@ -148,7 +149,8 @@ export function isLostSession(e: unknown): boolean {
  * finds many unseen ones past the cursor. It opens with the messages that woke it, preceded by up to
  * `GROUP_CONTEXT` earlier unseen ones, and a line saying how many older ones it does not show; all of
  * them count as seen when it ends. The owner's lines are marked (render.ts). Its first message is sent as
- * a reply to the message that woke it when anyone has spoken since (design §4); that message is recorded
+ * a reply to the message that woke it when anyone has spoken since, unless she named what it replies to
+ * (`queueMessage`, design §4); that message is recorded
  * on the turn (`turns.trigger_seq`), which is how a follow-up is recognised. The earlier
  * unseen lines it opens with are CONTEXT: rendered under their own heading, and outside the turn's
  * authority (`ownerAuthority`).
@@ -226,6 +228,11 @@ export interface TurnState {
   wokenBy?: number;
   /** Whether the turn's first message has been queued. */
   spoke?: boolean;
+  /**
+   * What the next text message replies to, as `reply_to` set it; used once, by the next `queueMessage` that
+   * queues one (an empty flush does not). Stickers, files and reactions queue their own rows and leave it.
+   */
+  replyTo?: number;
   /** In a group: the owner's id, whose lines are marked. */
   markOwner?: number;
   /** In a group whose policy lists its operators by id: theirs, whose lines are marked `⚙ operator`. */
@@ -246,14 +253,22 @@ function spokeAfter(db: Db, chatId: number, seq: number): boolean {
 /**
  * Queue one message of the turn. After `pass` nothing is queued: that is where `pass` closes speech.
  * Returns the outbound event's seq, or null when nothing was queued.
+ *
+ * What it replies to, the first that applies: `replyTo` (say's `reply_to`), then what `reply_to` set for the
+ * next message (`s.replyTo`, used up by this message whichever applied), then, for the turn's first message
+ * in a group, the message that woke it if anyone has spoken since. The caller has checked the target is a
+ * message of this chat (capabilities/speech `messageIn`).
  */
-export function queueMessage(db: Db, s: TurnState, text: string): number | null {
+export function queueMessage(db: Db, s: TurnState, text: string, replyTo?: number): number | null {
   const body = text.trim();
   if (!body || s.passed) return null;
   const first = !s.spoke;
   s.spoke = true;
+  const named = replyTo ?? s.replyTo;
+  delete s.replyTo;
   const payload: BotMessagePayload = { text: body };
-  if (s.wokenBy !== undefined && first && spokeAfter(db, s.chat.id, s.wokenBy)) payload.replyToSeq = s.wokenBy;
+  if (named !== undefined) payload.replyToSeq = named;
+  else if (s.wokenBy !== undefined && first && spokeAfter(db, s.chat.id, s.wokenBy)) payload.replyToSeq = s.wokenBy;
   return enqueueOutbound(db, { chatId: s.chat.id, kind: "bot_message", payload, idemKey: `turn:${s.turnId}:${s.n++}`, turnId: s.turnId });
 }
 

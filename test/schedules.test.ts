@@ -183,7 +183,7 @@ describe("the tools", () => {
     ownerSays(db, "hi");
     // The message's sender is not the configured owner.
     const { adapter } = await turnWith(db, [{ tool: "schedule", args: { at: "+1h", note: "n" } }, { tool: "list_schedules", args: {} }, { tool: "cancel_schedule", args: { id: 1 } }], 4242);
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "reply_to", "react", "pass", "schedule", "list_schedules", "cancel_schedule"]);
     expect(adapter.toolResults.map((r) => r.result.isError)).toEqual([true, true, true]);
     expect(resultText(adapter, 0)).toStartWith("Refused: `schedule` acts for the owner");
     expect(activeSchedules(db, ownerChatId(db))).toHaveLength(0);

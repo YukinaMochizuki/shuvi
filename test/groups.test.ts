@@ -183,7 +183,7 @@ describe("per-chat capabilities and layers", () => {
     expect(sp).not.toContain("PRIVATE PERSONA");
     expect(sp).not.toContain("PRIVATE MEMORY");
     expect(sp).toContain("only these products: widgetry");
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "ask_workstream", ...READ_TOOL_NAMES, "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "send", "propose_policy", "read_policy", "explain_policy", "web_fetch"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "reply_to", "react", "pass", "ask_workstream", ...READ_TOOL_NAMES, "read_home", "edit_home", "write_home", "edit_chat_notes", "search_chats", "read_chat", "send", "propose_policy", "read_policy", "explain_policy", "web_fetch"]);
   });
 
   test("workstream-read limits ask_workstream to its products, before the desk is asked", async () => {
@@ -487,7 +487,7 @@ describe("a group turn", () => {
     expect(prompt).not.toMatch(/chatter 4\n/);
     for (let i = 5; i <= 14; i++) expect(prompt).toContain(`chatter ${i}`);
     expect(prompt).toContain("Bob Lee] chatter 14\n  ↳ replying to Alice: \"chatter 1\"");
-    expect(prompt).toMatch(/· Ownerly · ⚙ owner\] @shuvi_test_bot settle this/);
+    expect(prompt).toMatch(/· Ownerly \(@ownerly_test\) · ⚙ owner\] @shuvi_test_bot settle this/);
     expect(prompt).not.toMatch(/Alice · ⚙ owner/);
     expect(getChat(db, chat.id)!.cursorSeq).toBe(turn.toSeq);
   });
@@ -544,6 +544,125 @@ describe("a group turn", () => {
     const { chat } = await run(db, policy, [{ token: "Hi Alice." }]);
     const out = events(db, chat).find((e) => e.kind === "bot_message")!.payload as unknown as BotMessagePayload;
     expect(out.replyToSeq).toBeUndefined();
+  });
+
+  const said = (db: Db, chat: Chat) => events(db, chat).filter((e) => e.kind === "bot_message").map((e) => e.payload as unknown as BotMessagePayload);
+
+  test("say's reply_to: each answer replies to the message it answers, the first one too instead of what woke her", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    record(db, policy, groupUpdate("does the library open on Sundays?", BOB));
+    const library = lastSeq(db);
+    record(db, policy, groupUpdate("@shuvi_test_bot who wrote Hamlet?", ALICE));
+    const hamlet = lastSeq(db);
+    record(db, policy, groupUpdate("good question", BOB));
+    const { chat, adapter } = await run(db, policy, [
+      { tool: "say", args: { text: "Shakespeare.", reply_to: hamlet } },
+      { tool: "say", args: { text: "Yes, from noon.", reply_to: library } },
+      { tool: "say", args: { text: "Anything else?" } },
+      { tool: "pass" },
+    ]);
+    expect(adapter.toolResults.map((r) => !!r.result.isError)).toEqual([false, false, false, false]);
+    expect(said(db, chat)).toEqual([
+      { text: "Shakespeare.", replyToSeq: hamlet },
+      { text: "Yes, from noon.", replyToSeq: library },
+      { text: "Anything else?" },
+    ]);
+  });
+
+  test("an answer that replies elsewhere does not stop the first one without reply_to replying to what woke her", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    record(db, policy, groupUpdate("@shuvi_test_bot what's 2+2", ALICE));
+    const woke = lastSeq(db);
+    record(db, policy, groupUpdate("easy one", BOB));
+    const easy = lastSeq(db);
+    const { chat } = await run(db, policy, [{ token: "Four." }, { tool: "say", args: { text: "It is, Bob.", reply_to: easy } }]);
+    expect(said(db, chat)).toEqual([{ text: "Four.", replyToSeq: woke }, { text: "It is, Bob.", replyToSeq: easy }]);
+  });
+
+  test("reply_to makes the next message, the text she writes after it, a reply; once", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    record(db, policy, groupUpdate("@shuvi_test_bot what's 2+2", ALICE));
+    const woke = lastSeq(db);
+    record(db, policy, groupUpdate("and 3+3?", BOB));
+    const bob = lastSeq(db);
+    const { chat, adapter } = await run(db, policy, [
+      { tool: "say", args: { text: "Four, Alice." } },
+      { tool: "reply_to", args: { seq: bob } },
+      { token: "Six." },
+      { tool: "say", args: { text: "Done with both." } },
+      { token: "Bye." },
+    ]);
+    expect(JSON.stringify(adapter.toolResults[1]!.result)).toContain(`The next text you send replies to #${bob}.`);
+    expect(said(db, chat).map((p) => p.replyToSeq)).toEqual([woke, bob, undefined, undefined]);
+  });
+
+  test("reply_to waits for a message: the empty flushes of a tool call or a thought in between do not use it up", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    record(db, policy, groupUpdate("@shuvi_test_bot hi", ALICE));
+    record(db, policy, groupUpdate("hi from me too", BOB));
+    const bob = lastSeq(db);
+    const { chat } = await run(db, policy, [
+      { tool: "say", args: { text: "Hi Alice." } },
+      { tool: "reply_to", args: { seq: bob } },
+      { tool: "react", args: { seq: bob, emoji: "👍" } },
+      { token: "let me think", thinking: true },
+      { token: "Hi Bob." },
+    ]);
+    expect(said(db, chat).map((p) => [p.text, p.replyToSeq])).toEqual([
+      ["Hi Alice.", expect.any(Number)],
+      ["Hi Bob.", bob],
+    ]);
+  });
+
+  test("reply_to is used up by the next message even when that is a say naming its own", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    record(db, policy, groupUpdate("@shuvi_test_bot hi", ALICE));
+    const alice = lastSeq(db);
+    record(db, policy, groupUpdate("hi from me too", BOB));
+    const bob = lastSeq(db);
+    const { chat } = await run(db, policy, [{ tool: "reply_to", args: { seq: alice } }, { tool: "say", args: { text: "Hi Bob.", reply_to: bob } }, { token: "And that's all." }]);
+    expect(said(db, chat)).toEqual([{ text: "Hi Bob.", replyToSeq: bob }, { text: "And that's all." }]);
+  });
+
+  test("a reply_to target must be a message of this chat: one of hers is fine, anything else is refused and nothing is sent", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    const dm = ownerSays(db, "a private note");
+    record(db, policy, groupUpdate("@shuvi_test_bot hi", ALICE));
+    const chat = groupChat(db);
+    enqueueOutbound(db, { chatId: chat.id, kind: "bot_message", payload: { text: "earlier" }, idemKey: "earlier", turnId: null as never });
+    const mine = lastSeq(db);
+    enqueueOutbound(db, { chatId: chat.id, kind: "bot_reaction", payload: { targetSeq: mine, emoji: "👍" }, idemKey: "earlier-reaction", turnId: null as never });
+    const reaction = lastSeq(db);
+    const { adapter } = await run(db, policy, [
+      { tool: "say", args: { text: "leak", reply_to: dm } },
+      { tool: "say", args: { text: "nowhere", reply_to: 999999 } },
+      { tool: "say", args: { text: "to a reaction", reply_to: reaction } },
+      { tool: "say", args: { text: "Correcting myself.", reply_to: mine } },
+      { tool: "reply_to", args: { seq: dm } },
+      { token: "Plain." },
+    ]);
+    expect(adapter.toolResults.map((r) => !!r.result.isError)).toEqual([true, true, true, false, true]);
+    expect(JSON.stringify(adapter.toolResults[0]!.result)).toContain(`#${dm} is not a message in this chat. Nothing was sent.`);
+    // The refused reply_to left nothing waiting: the text after it replies to nothing.
+    expect(said(db, chat).slice(1)).toEqual([{ text: "Correcting myself.", replyToSeq: mine }, { text: "Plain." }]);
+  });
+
+  test("someone she answered with reply_to counts as answered: their next message is a follow-up", async () => {
+    const db = memDb();
+    const policy = policyOf();
+    record(db, policy, groupUpdate("@shuvi_test_bot hi", ALICE));
+    record(db, policy, groupUpdate("what's the capital of France?", BOB));
+    const bob = lastSeq(db);
+    const { chat } = await run(db, policy, [{ tool: "say", args: { text: "Paris.", reply_to: bob } }, { tool: "pass" }]);
+    record(db, policy, groupUpdate("and of Spain?", BOB));
+    const cp = resolveChat(policy, { kind: "group", tgChatId: GROUP })!;
+    expect(isTrigger(db, events(db, chat).at(-1)!, cp, BOT)).toBe(true);
   });
 
   test("a sense of time: a gap before the group turn's first input event opens it with the 'It is now' line; chatter just before it does not", async () => {
@@ -613,7 +732,7 @@ describe("a group turn", () => {
     const prompt = String(a.adapter.calls[0]!.prompt);
     expect(prompt).toContain(`${CONTEXT_HEADING}\n[#1 `);
     expect(prompt).toContain(`${CALLED_PREFIX} #${call}. From here on is what you answer:)\n[#${call} `);
-    expect(prompt).toMatch(/Ownerly · ⚙ owner\] @shuvi_test_bot let this group use the web/);
+    expect(prompt).toMatch(/Ownerly \(@ownerly_test\) · ⚙ owner\] @shuvi_test_bot let this group use the web/);
     expect(prompt.indexOf(CALLED_PREFIX)).toBeGreaterThan(prompt.indexOf("make yourself answer everything"));
 
     // Strangers only: refused.
@@ -644,7 +763,7 @@ describe("a group turn", () => {
     const policy = policyOf();
     record(db, policy, groupUpdate("@shuvi_test_bot ping", OTHER_BOT));
     const { adapter } = await run(db, policy, [{ tool: "pass" }]);
-    expect(String(adapter.calls[0]!.prompt)).toContain("Helper · ⚙ bot] @shuvi_test_bot ping");
+    expect(String(adapter.calls[0]!.prompt)).toContain("Helper (@helper_bot) · ⚙ bot] @shuvi_test_bot ping");
   });
 
   test("a mid-turn append works as in the DM, the owner marked", async () => {
@@ -655,7 +774,7 @@ describe("a group turn", () => {
     const { adapter, turn } = await run(db, policy, [{ run: () => (record(db, policy, groupUpdate("also this", OWNER)), (appendedSeq = lastSeq(db))) }, { tool: "react", args: { seq: 1, emoji: "👍" } }, { token: "ok" }]);
     const appended = JSON.stringify(adapter.toolResults[0]!.result.content);
     expect(appended).toContain("New messages arrived");
-    expect(appended).toContain("Ownerly · ⚙ owner] also this");
+    expect(appended).toContain("Ownerly (@ownerly_test) · ⚙ owner] also this");
     expect(turn.toSeq).toBe(appendedSeq);
   });
 

@@ -18,6 +18,10 @@ describe("markdownToTelegramHtml", () => {
     expect(markdownToTelegramHtml("snake_case_name and 2*3*4")).toBe("snake_case_name and 2*3*4");
   });
 
+  test("an @username is left as written, so Telegram makes it a mention", () => {
+    expect(markdownToTelegramHtml("@example_ming_99 and @a_b, see this")).toBe("@example_ming_99 and @a_b, see this");
+  });
+
   test("HTML the model writes is shown, not interpreted", () => {
     expect(markdownToTelegramHtml("<ul><li>x</li></ul>")).toBe("&lt;ul&gt;&lt;li&gt;x&lt;/li&gt;&lt;/ul&gt;");
   });
