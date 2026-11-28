@@ -1,4 +1,5 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import type { EffortLevel } from "agent-runtime";
 import type { Db } from "./db.ts";
 import { type Chat } from "./events.ts";
 import { chats, modelProviders, models } from "./schema.ts";
@@ -32,6 +33,21 @@ import { IMMEDIATE } from "./turns.ts";
  *               so (`chatModel`), until they get another model; their callers name them first (`chatsOn`).
  *   PROBES      an OpenAI-compatible model's last probe is on its row (schema.ts `models`); `markProbing`
  *               asks for one, which the server runs (server/probes.ts) and records (`recordProbe`).
+ *
+ * EFFORT (how much a Claude turn reasons; agent-runtime's levels `low medium high xhigh max`, EFFORT_LEVELS):
+ *
+ *   LEVELS      what a Claude model supports is what Claude Code's listing reports (`effort_levels`), recorded when
+ *               the login's models are listed or added from a listing (`recordEffortLevels`), and filled in the
+ *               background for a model that has none (server/probes.ts `fillEffortLevels`). Null = NOT RECORDED, and
+ *               then nothing is offered or sent: a level is never guessed. An OpenAI-compatible model takes none.
+ *   TWO LAYERS  a model's default (`models.effort`, `setModelEffort`) and a chat's override (`chats.effort`,
+ *               `setChatEffort`); each setter refuses a level the model is not known to support.
+ *   RESOLUTION  `resolveEffort`, the one rule, at each turn's start (runner/run.ts): the chat's override, else its
+ *               model's default, else none, which sends nothing: the model's own default, exactly as before effort
+ *               existed. A value the model is known not to support is skipped with a transcript note (and the next
+ *               layer tried); with the levels not recorded, nothing is sent, with a note. The turn records the level
+ *               and where it came from (`turns.effort`, `turns.effort_source`).
+ *   A SWITCH    keeps a chat's override only if the new model supports it (agent/switch.ts `keepEffortAcross`).
  */
 
 export type Provider = typeof modelProviders.$inferSelect;
@@ -52,6 +68,15 @@ export interface CatalogModel {
   model: Model;
   provider: Provider;
 }
+
+/** agent-runtime's effort levels, low → high (its src/effort.ts; kept here so the store loads none of it). */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const satisfies readonly EffortLevel[];
+// Both ways: a level added to agent-runtime and not here fails to compile.
+type _AllLevels = EffortLevel extends (typeof EFFORT_LEVELS)[number] ? true : never;
+const _allLevels: _AllLevels = true;
+void _allLevels;
+
+export const isEffortLevel = (s: unknown): s is EffortLevel => typeof s === "string" && (EFFORT_LEVELS as readonly string[]).includes(s);
 
 /** The model id a Claude provider's CLI default is listed under. */
 export const CLI_DEFAULT_MODEL = "default";
@@ -165,8 +190,11 @@ function checkLabel(label: string | null | undefined): string | null {
   return l || null;
 }
 
-/** Add a model of `provider` (its name). The first model of an empty catalog is its default. */
-export function addModel(db: Db, m: { provider: string; model: string; label?: string; contextWindow?: number; vision?: boolean; isDefault?: boolean }): CatalogModel {
+/**
+ * Add a model of `provider` (its name). The first model of an empty catalog is its default. `effortLevels`: what a
+ * Claude login's listing reported for it (kept only for a Claude model).
+ */
+export function addModel(db: Db, m: { provider: string; model: string; label?: string; contextWindow?: number; vision?: boolean; isDefault?: boolean; effortLevels?: readonly string[] }): CatalogModel {
   const provider = getProvider(db, m.provider);
   if (!provider) throw new Error(`there is no provider named "${m.provider}"`);
   const model = m.model.trim();
@@ -178,7 +206,15 @@ export function addModel(db: Db, m: { provider: string; model: string; label?: s
     if (isDefault) tx.update(models).set({ isDefault: false }).where(eq(models.isDefault, true)).run();
     const row = tx
       .insert(models)
-      .values({ providerId: provider.id, model, label: checkLabel(m.label), contextWindow: m.contextWindow ?? null, vision: m.vision ?? false, isDefault })
+      .values({
+        providerId: provider.id,
+        model,
+        label: checkLabel(m.label),
+        contextWindow: m.contextWindow ?? null,
+        vision: m.vision ?? false,
+        isDefault,
+        effortLevels: provider.kind === "claude" && m.effortLevels ? orderedLevels(m.effortLevels) : null,
+      })
       .returning()
       .get();
     return { id: modelId(provider, row), model: row, provider };
@@ -373,6 +409,147 @@ export function recordProbe(db: Db, rowId: number, r: ProbeRecord, now = Date.no
     })
     .where(eq(models.id, rowId))
     .run();
+}
+
+// ---- effort ------------------------------------------------------------------------------------------------
+
+/** Levels as stored: the known ones, in EFFORT_LEVELS order. */
+function orderedLevels(levels: readonly string[]): EffortLevel[] {
+  return EFFORT_LEVELS.filter((l) => levels.includes(l));
+}
+
+/**
+ * The effort levels model `m` supports: null when NOT KNOWN (a Claude model whose listing has not recorded them),
+ * `[]` when it takes none (every OpenAI-compatible model, here: shuvi offers it no effort).
+ */
+export function effortLevelsOf(m: CatalogModel): EffortLevel[] | null {
+  switch (m.provider.kind) {
+    case "claude":
+      return m.model.effortLevels ? orderedLevels(m.model.effortLevels) : null;
+    case "openai-compat":
+      return [];
+    default:
+      return unknownKind(m.provider.kind);
+  }
+}
+
+/** Model `m`'s default effort, if one is set (null: the model's own). */
+export const modelEffort = (m: CatalogModel): EffortLevel | null => (isEffortLevel(m.model.effort) ? m.model.effort : null);
+
+/** Why `level` cannot be set on model `m`, or null when it can (null clears, and always can). */
+function effortRefusal(m: CatalogModel, level: EffortLevel | null): string | null {
+  if (level === null) return null;
+  const levels = effortLevelsOf(m);
+  if (m.provider.kind !== "claude") return `${m.id} is not on a Claude login: it takes no effort`;
+  if (levels === null) return `the effort levels ${m.id} supports are not known yet: list its login's models again`;
+  if (!levels.includes(level)) return levels.length ? `${m.id} does not support effort ${level} (it supports ${levels.join(", ")})` : `${m.id} takes no effort`;
+  return null;
+}
+
+/** Set model `id`'s default effort (null: the model's own). Refused for a level it is not known to support. */
+export function setModelEffort(db: Db, id: string, level: EffortLevel | null): CatalogModel {
+  const m = findModel(db, id);
+  if (!m) throw new Error(`there is no model "${id}"`);
+  const why = effortRefusal(m, level);
+  if (why) throw new Error(why);
+  db.update(models).set({ effort: level }).where(eq(models.id, m.model.id)).run();
+  return findModel(db, id)!;
+}
+
+/**
+ * Set chat `chatId`'s effort override (null: its model's setting), from its next turn. Refused for a level the
+ * chat's model (`chatModel`) is not known to support. The console's Effort picker and the control bot's `/effort`
+ * both come here. A running turn keeps the effort it began with.
+ */
+export function setChatEffort(db: Db, chatId: number, level: EffortLevel | null): void {
+  const chat = db.select().from(chats).where(eq(chats.id, chatId)).get();
+  if (!chat) throw new Error(`there is no chat ${chatId}`);
+  if (level !== null) {
+    const why = effortRefusal(chatModel(db, chat), level);
+    if (why) throw new Error(why);
+  }
+  db.update(chats).set({ effort: level }).where(eq(chats.id, chatId)).run();
+}
+
+export type EffortSource = "chat" | "model" | "none";
+
+/** A turn's effort: the level sent (null: none, the model's own default), where it came from, and what was skipped. */
+export interface ResolvedEffort {
+  level: EffortLevel | null;
+  source: EffortSource;
+  /** Lines for the turn's transcript: a set value that was not sent, and why. */
+  notes: string[];
+}
+
+/**
+ * THE rule for a turn's effort (the header's RESOLUTION): the chat's override, else model `m`'s default, else none.
+ * A layer whose value `m` is known not to support is skipped, with a note; with `m`'s levels not recorded, nothing
+ * is sent, with a note; an OpenAI-compatible model takes none. Reads nothing but its arguments.
+ */
+export function resolveEffort(chat: Pick<Chat, "effort">, m: CatalogModel): ResolvedEffort {
+  const notes: string[] = [];
+  const layers: { source: "chat" | "model"; value: string | null; name: string }[] = [
+    { source: "chat", value: chat.effort, name: "this chat's effort" },
+    { source: "model", value: m.model.effort, name: `${m.id}'s default effort` },
+  ];
+  const set = layers.filter((l) => l.value !== null);
+  if (!set.length) return { level: null, source: "none", notes };
+  const levels = effortLevelsOf(m);
+  if (m.provider.kind !== "claude") {
+    for (const l of set) notes.push(`Effort: ${l.name} (${l.value}) was not sent: ${m.id} is not on a Claude login and takes no effort.`);
+    return { level: null, source: "none", notes };
+  }
+  if (levels === null) {
+    const l = set[0]!;
+    notes.push(`Effort: ${l.name} (${l.value}) was not sent: the levels ${m.id} supports are not known yet, so it ran at the model's own default.`);
+    return { level: null, source: "none", notes };
+  }
+  for (const l of set) {
+    if (isEffortLevel(l.value) && levels.includes(l.value)) return { level: l.value, source: l.source, notes };
+    notes.push(`Effort: ${l.name} (${l.value}) was not sent: ${m.id} does not support it${levels.length ? ` (it supports ${levels.join(", ")})` : ""}.`);
+  }
+  return { level: null, source: "none", notes };
+}
+
+/**
+ * Record what a listing of Claude login `provider` reported (agent-runtime `ModelChoice`s): each catalog model of it
+ * whose id the listing names, as an alias or as the fixed version one stands for (`canonicalId`), gets that entry's
+ * levels. Returns how many models it changed. A model the listing does not name keeps what it had.
+ */
+export function recordEffortLevels(db: Db, provider: string, listed: readonly { id: string; canonicalId?: string; effortLevels?: readonly string[] }[]): number {
+  const p = getProvider(db, provider);
+  if (!p || p.kind !== "claude") return 0;
+  const byId = new Map<string, EffortLevel[]>();
+  for (const l of listed) {
+    const levels = orderedLevels(l.effortLevels ?? []);
+    if (!byId.has(l.id)) byId.set(l.id, levels);
+    if (l.canonicalId && !byId.has(l.canonicalId)) byId.set(l.canonicalId, levels);
+  }
+  let changed = 0;
+  for (const m of providerModels(db, provider)) {
+    const levels = byId.get(m.model.model);
+    if (!levels || JSON.stringify(levels) === JSON.stringify(m.model.effortLevels)) continue;
+    db.update(models).set({ effortLevels: levels }).where(eq(models.id, m.model.id)).run();
+    changed++;
+  }
+  return changed;
+}
+
+/** The Claude models whose effort levels are not recorded, by their provider's name (server/probes.ts fills them). */
+export function modelsMissingLevels(db: Db): Map<string, CatalogModel[]> {
+  const out = new Map<string, CatalogModel[]>();
+  const rows = db
+    .select()
+    .from(models)
+    .innerJoin(modelProviders, eq(models.providerId, modelProviders.id))
+    .where(and(eq(modelProviders.kind, "claude"), isNull(models.effortLevels)))
+    .orderBy(asc(models.id))
+    .all();
+  for (const r of rows) {
+    const m = { id: modelId(r.model_providers, r.models), model: r.models, provider: r.model_providers };
+    out.set(m.provider.name, [...(out.get(m.provider.name) ?? []), m]);
+  }
+  return out;
 }
 
 /**

@@ -72,6 +72,12 @@ export const chats = sqliteTable("chats", {
    * has none (server/warm.ts `PinKeeper`), so even the first message after a quiet stretch is handed to a runner.
    */
   warmPinned: integer("warm_pinned", { mode: "boolean" }).notNull().default(false),
+  /**
+   * This chat's EFFORT OVERRIDE (`low` … `max`, agent-runtime's levels), from its next turn; null = its model's default
+   * (`models.effort`), else the model's own. Resolved per turn by store/models.ts `resolveEffort`. A model switch keeps it
+   * only when the new model supports it (agent/switch.ts).
+   */
+  effort: text("effort"),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
 
@@ -126,6 +132,14 @@ export const models = sqliteTable(
     probeLatencyMs: integer("probe_latency_ms"),
     probedAt: text("probed_at"),
     probeVision: integer("probe_vision", { mode: "boolean" }),
+    /** This model's DEFAULT EFFORT (a Claude model only, one of `effort_levels`); null = the model's own default. */
+    effort: text("effort"),
+    /**
+     * The effort levels this Claude model supports, as Claude Code's model listing reports them (agent-runtime
+     * `listClaudeModels` → `effortLevels`), low → high; `[]`: it takes none. Null = NOT RECORDED: no effort is offered
+     * or sent for it until a listing records them (server/probes.ts fills them in the background).
+     */
+    effortLevels: text("effort_levels", { mode: "json" }).$type<string[]>(),
     createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
   (t) => [uniqueIndex("models_provider_model").on(t.providerId, t.model), uniqueIndex("models_one_default").on(t.isDefault).where(sql`is_default = 1`)],
@@ -424,6 +438,8 @@ export const deletedTurns = sqliteTable(
     profile: text("profile"),
     timings: text("timings"),
     handoff: text("handoff"),
+    effort: text("effort"),
+    effortSource: text("effort_source"),
     startedAt: text("started_at").notNull(),
     endedAt: text("ended_at"),
   },
@@ -554,6 +570,13 @@ export const turns = sqliteTable(
      * take fails), then its runner killed and the turn closed the same way. Null for a turn a child was spawned for.
      */
     handoff: text("handoff", { enum: ["pending", "acked", "abandoned"] }),
+    /**
+     * The effort the turn ran at (store/models.ts `resolveEffort`), recorded at its start; null = none was sent (the
+     * model's own default). `effort_source` says where it came from: `chat` (the chat's override), `model` (its model's
+     * default) or `none`. Both null for a turn from before they were recorded, or one that never reached its driver.
+     */
+    effort: text("effort"),
+    effortSource: text("effort_source", { enum: ["chat", "model", "none"] }),
     startedAt: text("started_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },
@@ -754,9 +777,9 @@ export const approvals = sqliteTable("approvals", {
  */
 export const controlCards = sqliteTable("control_cards", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  kind: text("kind", { enum: ["switch", "models", "provider_add", "provider_remove", "profile"] }).notNull(),
+  kind: text("kind", { enum: ["switch", "models", "provider_add", "provider_remove", "profile", "effort"] }).notNull(),
   status: text("status", { enum: ["open", "waiting", "closed"] }).notNull().default("open"),
-  /** For `switch`: the chat whose model it switches; for `profile`: the chat whose profile it switches. */
+  /** For `switch`: the chat whose model it switches; for `profile`: its profile; for `effort`: its effort. */
   chatId: integer("chat_id").references(() => chats.id),
   /** What opened it (`command:<seq>`, `update:<id>`), so the same command never opens two. */
   idemKey: text("idem_key").unique(),

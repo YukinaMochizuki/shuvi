@@ -68,7 +68,7 @@ import { drain } from "./drain.ts";
 import { newVitals, startHealth } from "./health.ts";
 import { Kick, loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
-import { backgroundPass } from "./probes.ts";
+import { backgroundPass, fillEffortLevels } from "./probes.ts";
 import { sendPass } from "./sender.ts";
 import { childEnv, signalTurn, spawnTurn } from "./spawn.ts";
 import { onWake, recordServerProcess } from "./wake.ts";
@@ -174,8 +174,16 @@ void loop(
   const keeper = new PinKeeper({ db, enabled: cfg.warm.enabled, max: cfg.warm.max, draining: () => vitals.draining, policy: () => policies.current(), ownerId: cfg.ownerId, identity: runnerIdentity });
   void loop("warm", async () => void keeper.pass(), 1000);
 }
-// Started in the background; the rows say what is asked, so a restart's interrupted ones start again here.
-void loop("catalog", async () => void backgroundPass(db, { secrets: cfg.secrets }), 1000);
+// Started in the background; the rows say what is asked, so a restart's interrupted ones start again here. A Claude
+// model with no recorded effort levels gets its login listed here too (probes.ts `fillEffortLevels`).
+void loop(
+  "catalog",
+  async () => {
+    backgroundPass(db, { secrets: cfg.secrets });
+    fillEffortLevels(db, {});
+  },
+  1000,
+);
 // Awaited at exit (`shutdown`), so the server never exits in the middle of a send.
 const senders: Promise<void>[] = [loop("sender", async () => (await sendPass(db, api)).backoffMs, 300, wakeSender)];
 void loop(

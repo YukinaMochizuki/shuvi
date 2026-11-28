@@ -10,6 +10,7 @@ import { LiveRedaction } from "../secrets/source.ts";
 import { raiseAlert } from "../store/control.ts";
 import { openDb, type Db } from "../store/db.ts";
 import { getChat, onTurnRowQueued } from "../store/events.ts";
+import { resolveEffort } from "../store/models.ts";
 import { wakeServer } from "../server/wake.ts";
 import { childEnv } from "../server/spawn.ts";
 import { runnerConfigHash } from "../version.ts";
@@ -54,7 +55,9 @@ export interface TurnRun {
  * child logs.
  *
  * The turn runs on the chat's model in the catalog (store/models.ts), on the driver its provider names
- * (agent/backend.ts), in that model's own conversation (agent/switch.ts `enterChatModel`).
+ * (agent/backend.ts), in that model's own conversation (agent/switch.ts `enterChatModel`), at the effort
+ * store/models.ts `resolveEffort` gives it (the chat's override, else the model's default, else none), read here at
+ * the turn's start, so a change applies from the next turn, on a warm runner's CLI as on a cold one.
  * A model no longer in the catalog fails the turn, saying so. Only that provider's driver is loaded
  * (backend.ts `loadDriver`).
  *
@@ -148,6 +151,7 @@ export async function runOne(runner: RunnerContext, turnId: number, signal: Abor
   // only up to here (agent/switch.ts).
   if (model && chat) setTurnConversation(db, turnId, { conversationStart: conversationPosition(db, chat) });
   const turnModel = model ? driverModel(model) : undefined;
+  const effort = model && chat ? resolveEffort(chat, model) : undefined;
   if (model) {
     try {
       await loadDriver(model.provider.kind);
@@ -173,6 +177,7 @@ export async function runOne(runner: RunnerContext, turnId: number, signal: Abor
     timeZone: cfg.timeZone,
     ownerId: cfg.ownerId,
     ...(turnModel ? { model: turnModel } : {}),
+    ...(effort ? { effort } : {}),
     ...(cfg.ownerLanguage ? { ownerLanguage: cfg.ownerLanguage } : {}),
     capabilities,
     policy,

@@ -5,7 +5,7 @@ import { appendToClaudeSession, claudeSessionMessages, findClaudeSession, forkCl
 import { conversationEnd, conversationExists, conversationSince, insertMessages } from "../store/conversations.ts";
 import type { Db } from "../store/db.ts";
 import { getChat, lastChatSeq, type Chat } from "../store/events.ts";
-import { chatModel, defaultModel, findModel, getProvider, laneOf, listModels, listProviders, parseLane, SEEDED_PROVIDER, unknownLane, type CatalogModel } from "../store/models.ts";
+import { chatModel, defaultModel, effortLevelsOf, findModel, getProvider, isEffortLevel, laneOf, listModels, listProviders, parseLane, SEEDED_PROVIDER, unknownLane, type CatalogModel } from "../store/models.ts";
 import { chatConversations, chats, modelSwitches, modelSwitchRequests, turns, warmRunners } from "../store/schema.ts";
 import { getTurn, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
 
@@ -119,6 +119,8 @@ export interface SwitchResult {
   compacted: boolean;
   /** The target's own conversation was taken up (it had one); false: it starts on a new one, or none moved. */
   resumed: boolean;
+  /** The chat's effort override that was dropped, because `to` is not known to support it (`keepEffortAcross`). */
+  effortDropped?: string;
 }
 
 export interface SwitchOptions {
@@ -128,8 +130,36 @@ export interface SwitchOptions {
   stoppedTurnId?: number | null;
 }
 
-/** Switch chat `chatId` to model `to` (`<provider>/<model>`). Refuses while a turn is running there. */
+/**
+ * Switch chat `chatId` to model `to` (`<provider>/<model>`). Refuses while a turn is running there. The chat's effort
+ * override stays only if `to` supports it (`keepEffortAcross`).
+ */
 export function switchModel(db: Db, chatId: number, to: string, mode: SwitchMode, opts: SwitchOptions = {}): SwitchResult {
+  const r = moveToModel(db, chatId, to, mode, opts);
+  if (!r.changed) return r;
+  const dropped = keepEffortAcross(db, chatId);
+  return dropped ? { ...r, effortDropped: dropped } : r;
+}
+
+/**
+ * A chat's model changed: its effort override (`chats.effort`) is kept only if the model it runs on now is known to
+ * support that level; otherwise it is cleared. Returns the level dropped, or null when nothing was.
+ */
+export function keepEffortAcross(db: Db, chatId: number): string | null {
+  const chat = getChat(db, chatId);
+  if (!chat?.effort) return null;
+  let levels: string[] | null = null;
+  try {
+    levels = effortLevelsOf(chatModel(db, chat));
+  } catch {
+    levels = null; // a model gone from the catalog supports nothing known
+  }
+  if (isEffortLevel(chat.effort) && levels?.includes(chat.effort)) return null;
+  db.update(chats).set({ effort: null }).where(eq(chats.id, chatId)).run();
+  return chat.effort;
+}
+
+function moveToModel(db: Db, chatId: number, to: string, mode: SwitchMode, opts: SwitchOptions): SwitchResult {
   const chat = getChat(db, chatId);
   if (!chat) throw new Error(`there is no chat ${chatId}`);
   if (runningTurnFor(db, chatId)) throw new Error("a turn is running in this chat: stop it first, then switch");

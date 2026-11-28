@@ -11,7 +11,7 @@ export const TURN_COLUMNS = `t.id, t.chat_id as chatId, t.status, t.pid, t.pid_s
   t.to_seq as toSeq, t.trigger_seq as triggerSeq, t.stop_seq as stopSeq, t.error, t.cost_micro_usd as costMicroUsd,
   t.input_tokens as inputTokens, t.output_tokens as outputTokens, t.cache_read_tokens as cacheReadTokens,
   t.cache_creation_tokens as cacheCreationTokens, t.backend_session_id as backendSessionId, t.opening,
-  t.profile, t.started_at as startedAt, t.ended_at as endedAt`;
+  t.profile, t.effort, t.effort_source as effortSource, t.started_at as startedAt, t.ended_at as endedAt`;
 
 export const CHAT_COLUMNS = `c.id, c.tg_chat_id as tgChatId, c.kind, c.title, c.cursor_seq as cursorSeq, c.backend_session_id as backendSessionId,
   c.context_tokens as contextTokens, c.clean_since as cleanSince, c.profile, c.created_at as createdAt,

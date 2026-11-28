@@ -3,7 +3,7 @@
 A private web view of what the assistant did: every turn as the model saw it, every chat, and each chat's
 timeline. It is for the owner, to debug and tune her. It is read-only, except for five things: **Settings**,
 which manages the model catalog, **Secrets & personal info**, her credentials and what she reads about you, **Home**, where her files are edited, **a
-chat's settings** (its model, profile, conversation, permissions, schedules and secret grants), and **deleting
+chat's settings** (its model, effort, profile, conversation, permissions, schedules and secret grants), and **deleting
 chat messages and whole turns** (all below). Nothing else in it can change anything.
 
 ## What it shows
@@ -27,7 +27,9 @@ A conversation trace viewer (the design is in `src/console/DESIGN.md`):
   - *Conversation*: what opened it (the trigger marked), then the turn in order: thinking (collapsed),
     tool calls as one-line chips that open onto their arguments and results, her messages with their
     Telegram status, what arrived mid-turn, refusals and errors, and the outcome. A header line holds the
-    duration, tokens, cache, cost and model.
+    duration, tokens, cache, cost, model and the effort it ran at, with where that came from ("effort high (this
+    chat)", "(the model's setting)", or "effort model default" when none was sent). A setting that was not sent
+    (a level the model does not support, or one whose levels are not known) is a note in the turn.
   - *System prompt*: by section (persona, directives, this chat, each capability's section, the playbook
     index, memory), each with its size, and a diff against the previous turn's prompt in the chat.
   - *Raw input*: the exact text and images the model received.
@@ -136,6 +138,18 @@ The same operations as the control bot's `/models` and `/provider`, through the 
 - **Models**: the default (★), each one's context window, vision (set by you, or from its probe), its last
   probe, and the chats whose own model it is. Make one the default, re-probe it, set vision on, off or auto
   (follow the probe), edit its label and context window, add one by its id, or remove it.
+- **Effort**, a Claude model's: its **default effort**, "model default" (nothing is sent: the model's own) or one of
+  the levels it supports, for every chat on it that has no effort of its own, from their next turn. The levels are
+  what Claude Code's listing of the login reports, recorded when its models are listed or added from a listing, and
+  listed by the server in the background for a model that has none (at its start, and when one is added). Until
+  they are known no level is offered, and the row says so: **List models** on its provider learns them. An
+  OpenAI-compatible model takes no effort.
+
+  **How a turn's effort is decided** (store/models.ts `resolveEffort`, at each turn's start): the chat's own effort
+  (its settings, below), else its model's default, else none, which sends nothing and leaves the model at its own
+  default, as before effort existed. A level the model is known not to support is skipped, with a note in the turn,
+  and the next of these used; with the model's levels not known, none is sent, with a note. It is applied on a warm
+  runner's Claude CLI as on a cold one, without starting another.
 - **Remove** asks first, naming the chats that would lose their model (their next turn fails until they get
   another). The default model, or a provider holding it, cannot be removed: make another model the default
   first.
@@ -283,7 +297,7 @@ profile, how old its conversation is, a link to its log), then three tabs, each 
 
 | Tab | Address | Sections |
 |---|---|---|
-| **Chat** (where every way in lands) | `/chats/<id>/settings` | Model, Profile, Conversation, Keep warm |
+| **Chat** (where every way in lands) | `/chats/<id>/settings` | Model, Effort, Profile, Conversation, Keep warm |
 | **Permissions** | `/chats/<id>/settings/permissions` | Permissions |
 | **Automation & machine** | `/chats/<id>/settings/automation` | Schedules, Secrets, Computer |
 
@@ -297,6 +311,15 @@ Every button comes back to the tab it is on, with its result shown once.
   turn, then switches, and the chat's open `/model` cards in the control bot are closed as superseded. The page
   says "Switching…" until it is done, then shows the result once, in the card's words. A switch already pending for the
   chat (asked in the control bot, or in another tab) shows the same way; a button pressed twice asks once.
+  A switch keeps the chat's effort only if the new model supports that level; otherwise it is dropped (the chat
+  then runs at the new model's setting) and the result says so.
+- **Effort**, under Model: "Model's setting (currently X)", X being what the model's default gives, or one of the
+  levels the chat's model supports; a press sets or clears this chat's effort from its next turn, through the same
+  store function as the control bot's `/effort` (`setChatEffort`), so a change in either shows in the other. Beside
+  it, the effort its turns run at now and where it comes from: this chat, the model's setting, or the model's own
+  default (how it is decided: Settings, above). A model whose levels are not known offers no level: the section says
+  so, with **List models again** (the login's listing, as in Settings), after which the picker appears. On an
+  OpenAI-compatible model it says that it takes none.
 - **Profile**: Base and every profile, with its label and how many files it has of its own; a press switches the
   chat, from its next turn. A link leads to Profiles in Home.
 - **Conversation**: when the current one began, its segments and its context. **Stop the turn** (only while one
@@ -345,8 +368,8 @@ Every button comes back to the tab it is on, with its result shown once.
 The console has four ways in for a write: Settings, Home, a chat's settings, and deleting messages.
 Every other page answers GET and HEAD only (and `/login` its POST); a POST to it is refused with 405. Settings'
 buttons POST to `/settings/<area>/<verb>`, Home's Save to `/home/save` and its profile actions to
-`/home/profile/<verb>`, a chat's settings to `/chats/<id>/settings/<verb>` (switch, profile, stop, new, policy,
-schedule-cancel, schedule-pause, schedule-resume, revoke), a delete to `/messages/delete` and its
+`/home/profile/<verb>`, a chat's settings to `/chats/<id>/settings/<verb>` (switch, effort, effort-list, profile, stop,
+new, clean, warm, policy, schedule-cancel, schedule-pause, schedule-resume, revoke), a delete to `/messages/delete` and its
 undo to `/messages/undo`, and a GET to any of them is refused too. A POST there is carried out only if it passes,
 on top of the sign-in and the Host check:
 

@@ -36,6 +36,7 @@ import {
 } from "../store/events.ts";
 import { getJob } from "../store/jobs.ts";
 import { getSchedule } from "../store/schedules.ts";
+import type { ResolvedEffort } from "../store/models.ts";
 import { chatLabel, DRAIN_STOP, extendTurn, finishTurn, getTurn, hadEarlierTurn, markTurn, saveSession, setTurnConversation, type Turn } from "../store/turns.ts";
 import { HomeLayers } from "../capabilities/memory/layers.ts";
 import { turns } from "../store/schema.ts";
@@ -183,6 +184,11 @@ export interface TurnDeps {
   /** The language the owner speaks (`SHUVI_OWNER_LANGUAGE`), named in the system prompt. */
   ownerLanguage?: string;
   model?: string;
+  /**
+   * The turn's effort (store/models.ts `resolveEffort`): its level goes to the driver as the input's `effort` (absent:
+   * none, the model's own default); the level and its source are recorded on the turn row, its notes in the transcript.
+   */
+  effort?: ResolvedEffort;
   /** The capabilities enabled in this process, in registry order (capabilities/index.ts). */
   capabilities: readonly EnabledCapability[];
   /** The policy in effect (default: the owner's DM, as it always was). */
@@ -541,10 +547,12 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   extendTurn(db, turnId, s.toSeq);
   // The chat's profile, read now: a switch made while this turn runs applies from the next one.
   const layers = chatLayers(db, deps.home, chat);
-  db.update(turns).set({ profile: layers.name }).where(eq(turns.id, turnId)).run();
+  db.update(turns).set({ profile: layers.name, ...(deps.effort ? { effort: deps.effort.level, effortSource: deps.effort.source } : {}) }).where(eq(turns.id, turnId)).run();
 
   const rec = new TurnRecorder(db, turnId, deps.record ?? { dataDir: dirname(deps.home) });
   for (const s of switches) rec.note(switchNote(s));
+  for (const n of deps.effort?.notes ?? []) rec.note(n);
+  const effort = deps.effort?.level ? { effort: deps.effort.level } : {};
   let buf = "";
   const flush = () => {
     const seq = queueMessage(db, s, buf);
@@ -644,7 +652,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
   const fresh = (p: Prompt) => {
     rec.input(p, false);
     markTurn(db, turnId, { query: Date.now() });
-    return adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}) }, opts);
+    return adapter.run({ prompt: p, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}), ...effort }, opts);
   };
   try {
     let result;
@@ -654,7 +662,7 @@ export async function runTurn(deps: TurnDeps): Promise<TurnOutcome> {
         rec.input(prompt, true);
         markTurn(db, turnId, { query: Date.now() });
         result = await adapter.continueRun(
-          { backendSessionId: chat.backendSessionId, prompt, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}), ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
+          { backendSessionId: chat.backendSessionId, prompt, tools, systemPrompt, ...(deps.model ? { model: deps.model } : {}), ...effort, ...(chat.contextTokens ? { contextTokens: chat.contextTokens } : {}) },
           opts,
         );
       } catch (e) {

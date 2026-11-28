@@ -266,7 +266,7 @@ describe("/models", () => {
       [
         "Models, ★ = default:",
         "1. claude/opus",
-        "   Claude login",
+        "   Claude login · effort levels not known yet",
         "2. vllm/qwen (Qwen 3) ★",
         "   32000 tokens · no vision · not probed",
         "3. vllm/llama",

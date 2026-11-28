@@ -971,6 +971,14 @@ function turnDetail(ctx: PageContext, turn: Turn, q: URLSearchParams, f: Filters
     ...(turn.costMicroUsd ? [html`<b>${usd(turn.costMicroUsd / 1e6)}</b>`] : []),
     html`${tools.length} tool call${tools.length === 1 ? "" : "s"}${refused ? html`, <span class="c-refused">${refused} refused</span>` : ""}${failedCalls ? html`, <span class="c-failed">${failedCalls} failed</span>` : ""}`,
     ...(transcript?.model ? [html`<span class="mono">${transcript.model}</span>`] : []),
+    // The effort it ran at (store/models.ts `resolveEffort`), recorded at its start; none for a turn from before.
+    ...(turn.effortSource
+      ? [
+          html`<span title="the effort the turn ran at, and where it came from">effort <b>${turn.effort ?? "model default"}</b>${
+            turn.effortSource === "chat" ? " (this chat)" : turn.effortSource === "model" ? " (the model's setting)" : ""
+          }</span>`,
+        ]
+      : []),
     ...(pre.used + pre.unused
       ? [html`<span class="prewarm" title="links in this turn's messages looked up ahead (media prewarm), and whether video_probe then used them">prewarmed: ${pre.used ? html`<b class="c-done">${pre.used} used</b>` : ""}${pre.used && pre.unused ? " / " : ""}${pre.unused ? html`<b class="c-stopped">${pre.unused} unused</b>` : ""}</span>`]
       : []),
