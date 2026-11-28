@@ -3,7 +3,7 @@ import { err, ok, type ToolDef } from "agent-runtime";
 import { actingFor, authorisation } from "../../agent/acting.ts";
 import { createJob, runningJobs, type JobKind } from "../../store/jobs.ts";
 import { defineCapability } from "../types.ts";
-import { callDesk, parseDeskReply, type DeskConfig, type DeskStatus } from "./desk.ts";
+import { callDesk, parseDeskReply, type DeskConfig, type DeskHandoff, type DeskStatus } from "./desk.ts";
 import { READ_TOOL_NAMES, readTools } from "./reads.ts";
 import { wakeRoute } from "./wake.ts";
 
@@ -27,6 +27,13 @@ import { wakeRoute } from "./wake.ts";
  * answer is only ever the result of our own `request_status`. The interval (SHUVI_WORKSTREAM_POLL_SEC)
  * is the fallback for a wake that never arrived. `waiting-approval` (a card on the owner's phone) keeps
  * the job running; the deadline then decides.
+ *
+ * HANDED OFF IS NOT DONE. `answered` is the desk's own turn ending. When the desk handed the work on (a
+ * message to a session, an answer to a session's question, a workstream it opened; desk.ts, the handoff
+ * lines), the job still ends there, and its result opens with a fixed paragraph (`handedOffNote`) saying
+ * where the work went and that it is not finished, so the chat is not told it is done. We hear nothing
+ * more about that work: the owner decided he follows it in workstream itself (its phone client), not
+ * through this channel.
  *
  * A FOLLOW-UP is refused while the desk is still working on the request (a running job here, or the desk
  * itself reading `running` / `waiting-approval`, which also covers a job that expired while it worked):
@@ -81,7 +88,7 @@ export const WORKSTREAM = `## Workstream
 The owner's software work runs in workstream. Two ways in:
 
 - **To look something up** (what is waiting on him, how a workstream or PR is going, what a session said or asked), use the \`workstream_*\` read tools: they answer right away, in this turn. Start with \`workstream_waiting\`, or \`workstream_list_products\` to resolve a name.
-- **To have something looked into or done** (research in the code, a message or answer to a session, opening a workstream), \`ask_workstream\` brings it to that product's desk (anything that would change something waits for the owner's approval on his phone). It returns a job id at once; the desk's answer arrives later in this chat as a job event. So after asking, tell the owner briefly that you asked, and end your turn: do not wait or check on it. To follow up on an answer (a clarification, the next question on the same thing), pass its request id as \`request\`.
+- **To have something looked into or done** (research in the code, a message or answer to a session, opening a workstream), \`ask_workstream\` brings it to that product's desk (anything that would change something waits for the owner's approval on his phone). It returns a job id at once; the desk's answer arrives later in this chat as a job event. So after asking, tell the owner briefly that you asked, and end your turn: do not wait or check on it. To follow up on an answer (a clarification, the next question on the same thing), pass its request id as \`request\`. An answer that says the desk handed the work on (a message to a session, a workstream it opened) means the work has started, not finished: tell the chat it was handed off, and that the owner follows it in workstream.
 - **When a group's operator asks** (in a group whose policy delegates workstream to its operators), both work for them too. But anything that would change something (a message or answer to a session, opening a workstream, anything the desk would do rather than look up) happens only once the owner approves it on his phone: say so when you ask the desk for them, and do not promise it is done until the answer says it was.`;
 
 function positive(v: string | undefined, fallback: number): number {
@@ -107,6 +114,27 @@ export function isStale(stale: Stale | undefined, r: { status: DeskStatus; turn:
   return r.turn === null && stale.status === r.status && stale.text === r.text;
 }
 
+/** One handoff, as the job's result names it. */
+function handoffLine(h: DeskHandoff): string {
+  const ws = `workstream "${h.title}" (${h.workstream})`;
+  if (h.kind === "message") return `- a message to session ${h.session ?? "?"} in ${ws}`;
+  if (h.kind === "answer") return `- an answer to a question of session ${h.session ?? "?"} in ${ws}`;
+  if (h.kind === "workstream") return `- a new ${ws}, ${h.session ? `its director session ${h.session} started` : "created without a director"}`;
+  return `- ${h.kind} in ${ws}`;
+}
+
+/**
+ * What opens a job's result when the desk handed the work on (see the header, HANDED OFF IS NOT DONE).
+ * Composed here from the handoff lines, not by a model.
+ */
+export function handedOffNote(handoffs: DeskHandoff[]): string {
+  return [
+    "The desk handed this on; the work itself is NOT done yet. It went to:",
+    ...handoffs.map(handoffLine),
+    "That work goes on in workstream, where the owner follows it; this job hears nothing more about it. Say it was handed off, not that it is done.",
+  ].join("\n");
+}
+
 /** How a desk request stands, as a job poll. */
 export function deskJobKind(cfg: WorkstreamConfig, call: typeof callDesk = callDesk): JobKind {
   return {
@@ -117,8 +145,9 @@ export function deskJobKind(cfg: WorkstreamConfig, call: typeof callDesk = callD
       if (!request) return { state: "failed", result: "This job has no workstream request id." };
       const r = parseDeskReply(await call(cfg, "request_status", { request }, signal));
       if (isStale(job.spec.stale as Stale | undefined, r)) return { state: "running", note: "the desk has not taken the follow-up yet" };
-      if (r.status === "answered") return { state: "done", result: r.text };
-      if (r.status === "failed") return { state: "failed", result: r.text };
+      const result = r.handoffs.length ? `${handedOffNote(r.handoffs)}\n\nThe desk's answer:\n${r.text}` : r.text;
+      if (r.status === "answered") return { state: "done", result };
+      if (r.status === "failed") return { state: "failed", result };
       return { state: "running", note: `${r.status}: ${r.text}`.slice(0, 500) };
     },
   };
