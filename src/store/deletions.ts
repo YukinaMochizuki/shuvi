@@ -111,7 +111,7 @@ interface Row {
   turn_id: number | null;
 }
 
-const COLUMNS = "seq, chat_id, kind, payload, tg_update_id, tg_message_id, idem_key, status, note, turn_id, at";
+const COLUMNS = "seq, chat_id, kind, payload, tg_update_id, tg_message_id, idem_key, status, note, turn_id, sent_at, at";
 const marks = (n: number) => Array(n).fill("?").join(", ");
 const parse = <T>(s: string): T => JSON.parse(s) as T;
 

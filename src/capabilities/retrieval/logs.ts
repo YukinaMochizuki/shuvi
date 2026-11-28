@@ -18,7 +18,7 @@ const SAID = `(e.kind = 'message' OR (e.kind = 'bot_message' AND e.status = 'sen
 type Row = { seq: number; chat_id: number; kind: string; payload: string; at: string; tg_message_id: number | null; status: string | null };
 
 function toEvent(r: Row): ChatEvent {
-  return { seq: r.seq, chatId: r.chat_id, kind: r.kind as ChatEvent["kind"], payload: JSON.parse(r.payload), at: r.at, tgMessageId: r.tg_message_id, status: r.status as ChatEvent["status"], tgUpdateId: null, idemKey: null, note: null, turnId: null };
+  return { seq: r.seq, chatId: r.chat_id, kind: r.kind as ChatEvent["kind"], payload: JSON.parse(r.payload), at: r.at, tgMessageId: r.tg_message_id, status: r.status as ChatEvent["status"], tgUpdateId: null, idemKey: null, note: null, turnId: null, sentAt: null };
 }
 
 // ---- time --------------------------------------------------------------------------------------------

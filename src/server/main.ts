@@ -5,11 +5,13 @@
  *
  *   poller    long-poll Telegram, record updates, advance the offset (poller.ts); then hand the new events
  *             to the capabilities' inbound hooks (a media prewarm), before any turn for them can start
- *   waker     reap dead turns, start a turn where one is due (waker.ts)
+ *   waker     reap dead turns, start a turn where one is due (waker.ts); kicked by the poller once it has
+ *             recorded new events, so a message starts its turn without waiting out the interval (loop.ts)
  *   commands  /stop, /new, /model (commands.ts); switch requests, and the control cards waiting on them
  *             (control/model-cards.ts `switchCardPass`)
  *   catalog   probes of OpenAI-compatible models, and the `/models` listings `/provider add` waits on (probes.ts)
- *   sender    deliver what turns queued (sender.ts)
+ *   sender    deliver what turns queued (sender.ts); kicked by a runner child's SIGUSR2 after it queues a row
+ *             (wake.ts), and after the waker's command pass reacts to a command
  *   typing    show "typing…" in chats with a running turn
  *   policy    reload home/policy.yaml when it changes; write the policy changes the owner approved
  *             (src/policy/); give the owner the command menu in each group it lists (commands.ts)
@@ -61,11 +63,12 @@ import { telegramFiles } from "../telegram/files.ts";
 import { commandPass, GroupMenus, MAIN_COMMANDS, registerCommands, switchRequestPass } from "./commands.ts";
 import { drain } from "./drain.ts";
 import { newVitals, startHealth } from "./health.ts";
-import { loop as runLoop, startLoops } from "./loop.ts";
+import { Kick, loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
 import { backgroundPass } from "./probes.ts";
 import { sendPass } from "./sender.ts";
 import { signalTurn, spawnTurn } from "./spawn.ts";
+import { onWake, recordServerProcess } from "./wake.ts";
 import { wakerPass } from "./waker.ts";
 
 const cfg = loadConfig();
@@ -94,12 +97,27 @@ const groupMenus = new GroupMenus(api, cfg.ownerId);
 // `stop` ends every loop; `intake` only the Telegram poller, which a drain stops first (drain.ts).
 const stop = new AbortController();
 const intake = new AbortController();
-const loop = (name: string, body: () => Promise<number | void>, everyMs: number) => runLoop(name, body, everyMs, stop.signal);
+const loop = (name: string, body: () => Promise<number | void>, everyMs: number, kick?: Kick) => runLoop(name, body, everyMs, stop.signal, kick);
 // What /healthz and /metrics report of this process (health.ts).
 const vitals = newVitals();
 
-// The poller's own long poll is its wait; it loops straight back.
-const onRecorded = (events: ChatEvent[]) => capabilityInbound(capabilities, events, policies.current(), { db, ownerId: cfg.ownerId });
+// The waker and the sender poll; these end their wait early when something is known to be there (loop.ts).
+const wakeWaker = new Kick();
+const wakeSender = new Kick();
+// A runner child signals SIGUSR2 once it has queued a row (wake.ts). The handler first, then the record a child
+// reads: SIGUSR2 unhandled would end this process.
+onWake(() => wakeSender.kick());
+recordServerProcess(db);
+
+// The poller's own long poll is its wait; it loops straight back. The capabilities' inbound hooks run first
+// (a prewarm starts before the turn), then the waker is kicked to start the turn now.
+const onRecorded = (events: ChatEvent[]) => {
+  try {
+    capabilityInbound(capabilities, events, policies.current(), { db, ownerId: cfg.ownerId });
+  } finally {
+    wakeWaker.kick();
+  }
+};
 void runLoop(
   "poller",
   async () => {
@@ -117,13 +135,15 @@ void runLoop(
 void loop(
   "waker",
   async () => {
-    commandPass(db, undefined, cfg.home);
+    // A command handled is acknowledged with a reaction the sender delivers: no need to wait for its poll.
+    if (commandPass(db, undefined, cfg.home)) wakeSender.kick();
     switchRequestPass(db);
     switchCardPass(db);
     // Draining: still reap and enforce the limit, start nothing.
     wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers, wake: !vitals.draining });
   },
   300,
+  wakeWaker,
 );
 void loop(
   "policy",
@@ -138,7 +158,7 @@ void loop(
 // Started in the background; the rows say what is asked, so a restart's interrupted ones start again here.
 void loop("catalog", async () => void backgroundPass(db, { secrets: cfg.secrets }), 1000);
 // Awaited at exit (`shutdown`), so the server never exits in the middle of a send.
-const senders: Promise<void>[] = [loop("sender", async () => (await sendPass(db, api)).backoffMs, 300)];
+const senders: Promise<void>[] = [loop("sender", async () => (await sendPass(db, api)).backoffMs, 300, wakeSender)];
 void loop(
   "typing",
   async () => {

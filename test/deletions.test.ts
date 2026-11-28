@@ -597,7 +597,8 @@ describe("deleting a turn (store/deletions.ts deleteTurns)", () => {
     finishTurn(db, turn.id, { status: "done" });
     expect(deleteTurns(db, [turn.id], T0)).toEqual({ ok: false, refused: `#${out}, which turn ${turn.id} wrote, has not been sent yet. Delete the turn once it has gone out (or failed).` });
     expect(deleteTurns(db, [999], T0)).toMatchObject({ ok: false, refused: expect.stringContaining("not here any more") });
-    expect(dumpAll(db).turns).toEqual(before.turns.map((t) => ({ ...(t as object), status: "done", ended_at: expect.any(String) })));
+    // The row it queued marked the turn's timings (`queuedFirst`, store/turns.ts `markTurn`).
+    expect(dumpAll(db).turns).toEqual(before.turns.map((t) => ({ ...(t as object), status: "done", ended_at: expect.any(String), timings: expect.stringContaining("queuedFirst") })));
     expect(db.$client.query("select count(*) as n from deletions").get()).toEqual({ n: 0 });
   });
 

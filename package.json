@@ -31,7 +31,7 @@
     "@jimp/wasm-webp": "1.6.1",
     "@lezer/highlight": "1.2.5",
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "agent-runtime": "github:YukinaMochizuki/agent-runtime#e5f3f19d281501d879b3b478418917cbb3397248",
+    "agent-runtime": "github:YukinaMochizuki/agent-runtime#436c9fafec8adcd909d3adbf399e0551003dc709",
     "croner": "^10",
     "drizzle-orm": "^0.45.2",
     "grammy": "^1.46.0",

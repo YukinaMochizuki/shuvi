@@ -1,4 +1,4 @@
-import { driverModel, makeDriver } from "../agent/backend.ts";
+import { driverModel, loadDriver, makeDriver } from "../agent/backend.ts";
 import { conversationPosition, enterChatModel } from "../agent/switch.ts";
 import { botIdentity } from "../agent/triggers.ts";
 import { runTurn } from "../agent/turn.ts";
@@ -10,7 +10,7 @@ import { LiveRedaction } from "../secrets/source.ts";
 import { raiseAlert } from "../store/control.ts";
 import { openDb } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
-import { finishTurn, getTurn, setTurnConversation } from "../store/turns.ts";
+import { finishTurn, getTurn, markTurn, setTurnConversation } from "../store/turns.ts";
 
 /**
  * The body of a runner child (runner/child.ts, which loads this module only once its SIGTERM handler is in
@@ -18,7 +18,11 @@ import { finishTurn, getTurn, setTurnConversation } from "../store/turns.ts";
  *
  * The turn runs on the chat's model in the catalog (store/models.ts), on the driver its provider names
  * (agent/backend.ts), in that model's own conversation (agent/switch.ts `enterChatModel`).
- * A model no longer in the catalog fails the turn, saying so.
+ * A model no longer in the catalog fails the turn, saying so. Only that provider's driver is loaded
+ * (backend.ts `loadDriver`).
+ *
+ * WHAT A CHILD LOADS before its turn starts is on every turn's path, so this module's imports are what a turn
+ * needs to start; a tool's heavy library (an image codec, an SDK client) is imported where the tool runs.
  */
 export async function runChild(turnId: number, signal: AbortSignal): Promise<string> {
   const cfg = loadConfig({ needToken: false });
@@ -67,7 +71,18 @@ export async function runChild(turnId: number, signal: AbortSignal): Promise<str
   // only up to here (agent/switch.ts).
   if (model && chat) setTurnConversation(db, turnId, { conversationStart: conversationPosition(db, chat) });
   const turnModel = model ? driverModel(model) : undefined;
+  if (model) {
+    try {
+      await loadDriver(model.provider.kind);
+    } catch (e) {
+      const error = `the ${model.provider.kind} driver could not be loaded: ${e instanceof Error ? e.message : String(e)}`;
+      finishTurn(db, turnId, { status: "failed", error });
+      return `turn ${turnId}: failed (${error})`;
+    }
+  }
 
+  // When this process began, and when the turn is about to run: what starting it cost (store/turns.ts `markTurn`).
+  markTurn(db, turnId, { child: performance.timeOrigin, ready: Date.now() });
   const outcome = await runTurn({
     db,
     turnId,

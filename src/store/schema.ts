@@ -286,6 +286,8 @@ export const chatEvents = sqliteTable(
     note: text("note"),
     /** The turn that wrote it (outbound). */
     turnId: integer("turn_id"),
+    /** Outbound: when the sender marked it sent (ISO). Null until then, and for rows sent before this column. */
+    sentAt: text("sent_at"),
     at: text("at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
   },
   (t) => [
@@ -341,6 +343,7 @@ export const deletedEvents = sqliteTable(
     status: text("status"),
     note: text("note"),
     turnId: integer("turn_id"),
+    sentAt: text("sent_at"),
     at: text("at").notNull(),
     /** The turn whose delete took this row (it answered or wrote it), null for a message deleted by itself. */
     byTurn: integer("by_turn"),
@@ -413,6 +416,7 @@ export const deletedTurns = sqliteTable(
     opening: text("opening"),
     conversationStart: text("conversation_start"),
     profile: text("profile"),
+    timings: text("timings"),
     startedAt: text("started_at").notNull(),
     endedAt: text("ended_at"),
   },
@@ -529,6 +533,12 @@ export const turns = sqliteTable(
     conversationStart: text("conversation_start", { mode: "json" }).$type<{ session: string | null; position: string | null }>(),
     /** The profile the turn ran under (layers.ts), recorded at its start; null = the base. */
     profile: text("profile"),
+    /**
+     * Where the turn's time went: epoch-ms marks (`TurnTimings`, store/turns.ts `markTurn`), each written by the
+     * process that saw it, best effort. A debugging record: nothing reads it to decide anything. Null for a
+     * turn that recorded none (one from before this column).
+     */
+    timings: text("timings", { mode: "json" }).$type<Record<string, number>>(),
     startedAt: text("started_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },

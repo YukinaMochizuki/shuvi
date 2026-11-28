@@ -5,11 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ok, type ToolBundle, type ToolBoundary } from "agent-runtime";
 import { z } from "zod";
-import { driverModel, makeDriver } from "../src/agent/backend.ts";
+import { driverModel, loadDriver, makeDriver } from "../src/agent/backend.ts";
 import { conversationStore } from "../src/store/conversations.ts";
 import { openDb, type Db } from "../src/store/db.ts";
 import { addModel, addProvider, findModel, seedModels } from "../src/store/models.ts";
 import { chats } from "../src/store/schema.ts";
+
+// As the runner does before it builds a driver (backend.ts `loadDriver`).
+await loadDriver("claude");
+await loadDriver("openai-compat");
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })));
