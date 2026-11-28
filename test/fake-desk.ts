@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
+import { HANDOFF_NOTE } from "../src/capabilities/workstream/desk.ts";
 
 /**
  * A stand-in for workstream's desk `/mcp` endpoint, built the way workstream builds it
@@ -16,8 +17,11 @@ import { z } from "zod";
  */
 export class FakeDesk {
   readonly calls: { tool: string; args: Record<string, unknown> }[] = [];
-  /** `turn`: the state's key, printed as `(turn <key>)` on the first line as workstream does; unset: none. */
-  readonly requests = new Map<string, { product: string; message: string; status: "running" | "waiting-approval" | "answered" | "failed"; text: string; turn?: string }>();
+  /**
+   * `turn`: the state's key, printed as `(turn <key>)` on the first line as workstream does; unset: none.
+   * `handoffs`: `handed off:` lines, printed under the first line and closed by `HANDOFF_NOTE`, as workstream does.
+   */
+  readonly requests = new Map<string, { product: string; message: string; status: "running" | "waiting-approval" | "answered" | "failed"; text: string; turn?: string; handoffs?: string[] }>();
   readonly products = new Set(["widgetry", "shuvi"]);
   listProducts = "Widgetry (product widgetry): Login [active] (workstream w1)\nShuvi (product shuvi): M6 [active] (workstream w2)";
   followUpLeavesAnswer = false;
@@ -35,7 +39,8 @@ export class FakeDesk {
   private describe(id: string): string {
     const r = this.requests.get(id)!;
     const next = r.status === "running" || r.status === "waiting-approval" ? `\n\nYou will be woken when it changes; request_status("${id}") reads it any time.` : "";
-    return `request ${id}: ${r.status}${r.turn && r.status !== "running" ? ` (turn ${r.turn})` : ""}\n\n${r.text}${next}`;
+    const handoffs = r.handoffs?.length ? `${r.handoffs.join("\n")}\n${HANDOFF_NOTE}\n` : "";
+    return `request ${id}: ${r.status}${r.turn && r.status !== "running" ? ` (turn ${r.turn})` : ""}\n${handoffs}\n${r.text}${next}`;
   }
 
   private mcp(): McpServer {

@@ -7,8 +7,8 @@ import { enabledCapabilities } from "../src/capabilities/index.ts";
 import { handleHook } from "../src/capabilities/jobs/hooks.ts";
 import { jobWatchPass } from "../src/capabilities/jobs/watch.ts";
 import { capabilityHookRoutes } from "../src/capabilities/types.ts";
-import { deskJobKind, isStale, workstream, type WorkstreamConfig } from "../src/capabilities/workstream/index.ts";
-import { callDesk, parseDeskReply } from "../src/capabilities/workstream/desk.ts";
+import { deskJobKind, handedOffNote, isStale, workstream, type WorkstreamConfig } from "../src/capabilities/workstream/index.ts";
+import { callDesk, HANDOFF_NOTE, parseDeskReply } from "../src/capabilities/workstream/desk.ts";
 import { filterProductLines, READ_TOOL_NAMES, readTools } from "../src/capabilities/workstream/reads.ts";
 import { WAKE_PATH } from "../src/capabilities/workstream/wake.ts";
 import type { Db } from "../src/store/db.ts";
@@ -39,12 +39,54 @@ describe("the desk client", () => {
       request: "r1",
       status: "running",
       turn: null,
+      handoffs: [],
       text: "The desk is still working on it.",
     });
-    expect(parseDeskReply("request r2: answered\n\nYes.\n\nTwo paragraphs.")).toEqual({ request: "r2", status: "answered", turn: null, text: "Yes.\n\nTwo paragraphs." });
-    expect(parseDeskReply("request r3: answered (turn answered:2026-11-27T11:21:53.402Z)\n\nYes.")).toEqual({ request: "r3", status: "answered", turn: "answered:2026-11-27T11:21:53.402Z", text: "Yes." });
+    expect(parseDeskReply("request r2: answered\n\nYes.\n\nTwo paragraphs.")).toEqual({ request: "r2", status: "answered", turn: null, handoffs: [], text: "Yes.\n\nTwo paragraphs." });
+    expect(parseDeskReply("request r3: answered (turn answered:2026-11-27T11:21:53.402Z)\n\nYes.")).toEqual({ request: "r3", status: "answered", turn: "answered:2026-11-27T11:21:53.402Z", handoffs: [], text: "Yes." });
     expect(parseDeskReply("request r4: waiting-approval (turn waiting:d1,d2)\n\nWaiting.").turn).toBe("waiting:d1,d2");
     expect(() => parseDeskReply("something else")).toThrow();
+  });
+
+  test("reads the handoff lines under the first line, in the exact shape workstream writes them", () => {
+    // The same text workstream's test/desk-session.test.ts pins its `describeDeskState` to.
+    expect(HANDOFF_NOTE).toBe("The work goes on where it was handed off; this request does not report on it.");
+    const reply =
+      "request r5: answered (turn answered:2026-11-28T10:00:00.000Z)\n" +
+      'handed off: message workstream ws-billing session s-dir "Billing"\n' +
+      'handed off: workstream workstream ws-new session - "Invoice "rounding""\n' +
+      `${HANDOFF_NOTE}\n\nSent it.`;
+    expect(parseDeskReply(reply)).toEqual({
+      request: "r5",
+      status: "answered",
+      turn: "answered:2026-11-28T10:00:00.000Z",
+      handoffs: [
+        { kind: "message", workstream: "ws-billing", session: "s-dir", title: "Billing" },
+        { kind: "workstream", workstream: "ws-new", session: null, title: 'Invoice "rounding"' },
+      ],
+      text: "Sent it.",
+    });
+    // After a blank line it is the desk's answer, whatever it says.
+    expect(parseDeskReply('request r6: answered\n\nhanded off: message workstream w session s "x"\nNot really.')).toMatchObject({ handoffs: [], text: 'handed off: message workstream w session s "x"\nNot really.' });
+  });
+
+  test("handedOffNote says where the work went and that it is not done", () => {
+    const note = handedOffNote([
+      { kind: "message", workstream: "w1", session: "s1", title: "Login" },
+      { kind: "answer", workstream: "w1", session: "s1", title: "Login" },
+      { kind: "workstream", workstream: "w9", session: "s9", title: "Rounding" },
+      { kind: "workstream", workstream: "w10", session: null, title: "Later" },
+    ]);
+    expect(note).toBe(
+      [
+        "The desk handed this on; the work itself is NOT done yet. It went to:",
+        '- a message to session s1 in workstream "Login" (w1)',
+        '- an answer to a question of session s1 in workstream "Login" (w1)',
+        '- a new workstream "Rounding" (w9), its director session s9 started',
+        '- a new workstream "Later" (w10), created without a director',
+        "That work goes on in workstream, where the owner follows it; this job hears nothing more about it. Say it was handed off, not that it is done.",
+      ].join("\n"),
+    );
   });
 
   test("a wrong token is refused by the desk", async () => {
@@ -86,6 +128,24 @@ describe("ask_workstream as a job", () => {
     expect(done).toHaveLength(1);
     expect(done[0]!.chatId).toBe(ownerChatId(db));
     expect(JSON.parse(done[0]!.payload) as JobDonePayload).toMatchObject({ state: "done", kind: "workstream", result: "Yes, merged an hour ago as #212." });
+  });
+
+  test("an answer that handed the work on ends the job with a result that says so, ahead of the desk's words", async () => {
+    const db = memDb();
+    ownerSays(db, "tell the login director to hold the PR");
+    await turnWith(db, [{ tool: "ask_workstream", args: { product: "widgetry", message: "tell the login director to hold the PR" } }]);
+    const job = runningJobs(db)[0]!;
+    Object.assign(desk.requests.get(String(job.spec.request))!, {
+      status: "answered",
+      text: "Sent it.",
+      handoffs: ['handed off: message workstream w1 session s1 "Login"'],
+    });
+    await jobWatchPass({ db, kinds: [deskJobKind(cfg)], now: () => Date.now() + 10_000 });
+    const done = jobDones(db);
+    expect(done).toHaveLength(1);
+    const payload = JSON.parse(done[0]!.payload) as JobDonePayload;
+    expect(payload.state).toBe("done");
+    expect(payload.result).toBe(`${handedOffNote([{ kind: "message", workstream: "w1", session: "s1", title: "Login" }])}\n\nThe desk's answer:\nSent it.`);
   });
 
   test("the answer starts a turn in the asking chat", async () => {
