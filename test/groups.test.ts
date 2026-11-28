@@ -487,7 +487,7 @@ describe("a group turn", () => {
     expect(prompt).not.toMatch(/chatter 4\n/);
     for (let i = 5; i <= 14; i++) expect(prompt).toContain(`chatter ${i}`);
     expect(prompt).toContain("Bob Lee] chatter 14\n  ↳ replying to Alice: \"chatter 1\"");
-    expect(prompt).toMatch(/· Ownerly · ⚙ owner\] @shuvi_test_bot settle this/);
+    expect(prompt).toMatch(/· Ownerly \(@ownerly_test\) · ⚙ owner\] @shuvi_test_bot settle this/);
     expect(prompt).not.toMatch(/Alice · ⚙ owner/);
     expect(getChat(db, chat.id)!.cursorSeq).toBe(turn.toSeq);
   });
@@ -732,7 +732,7 @@ describe("a group turn", () => {
     const prompt = String(a.adapter.calls[0]!.prompt);
     expect(prompt).toContain(`${CONTEXT_HEADING}\n[#1 `);
     expect(prompt).toContain(`${CALLED_PREFIX} #${call}. From here on is what you answer:)\n[#${call} `);
-    expect(prompt).toMatch(/Ownerly · ⚙ owner\] @shuvi_test_bot let this group use the web/);
+    expect(prompt).toMatch(/Ownerly \(@ownerly_test\) · ⚙ owner\] @shuvi_test_bot let this group use the web/);
     expect(prompt.indexOf(CALLED_PREFIX)).toBeGreaterThan(prompt.indexOf("make yourself answer everything"));
 
     // Strangers only: refused.
@@ -763,7 +763,7 @@ describe("a group turn", () => {
     const policy = policyOf();
     record(db, policy, groupUpdate("@shuvi_test_bot ping", OTHER_BOT));
     const { adapter } = await run(db, policy, [{ tool: "pass" }]);
-    expect(String(adapter.calls[0]!.prompt)).toContain("Helper · ⚙ bot] @shuvi_test_bot ping");
+    expect(String(adapter.calls[0]!.prompt)).toContain("Helper (@helper_bot) · ⚙ bot] @shuvi_test_bot ping");
   });
 
   test("a mid-turn append works as in the DM, the owner marked", async () => {
@@ -774,7 +774,7 @@ describe("a group turn", () => {
     const { adapter, turn } = await run(db, policy, [{ run: () => (record(db, policy, groupUpdate("also this", OWNER)), (appendedSeq = lastSeq(db))) }, { tool: "react", args: { seq: 1, emoji: "👍" } }, { token: "ok" }]);
     const appended = JSON.stringify(adapter.toolResults[0]!.result.content);
     expect(appended).toContain("New messages arrived");
-    expect(appended).toContain("Ownerly · ⚙ owner] also this");
+    expect(appended).toContain("Ownerly (@ownerly_test) · ⚙ owner] also this");
     expect(turn.toSeq).toBe(appendedSeq);
   });
 

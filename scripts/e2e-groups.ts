@@ -224,9 +224,9 @@ await until("the messages sent meanwhile to be recorded", () => recorded(GROUP.i
 releaseMention = true;
 await replied(GROUP.id, "Check the kitchen drawer.", "2. a mention starts a turn");
 const m = seen.mention!;
-check(m.text.includes("Alice] morning all") && m.text.includes("Bob] anyone seen my keys?"), "2. it sees the earlier unseen messages, with their senders");
+check(m.text.includes("Alice (@alice)] morning all") && m.text.includes("Bob] anyone seen my keys?"), "2. it sees the earlier unseen messages, with their senders");
 check(m.text.includes('↳ replying to Alice: \\"morning all\\"'), "2. and their reply targets");
-check(/\w{3} \d\d\/\d\d \d\d:\d\d · Alice\] @shuvi_test_bot where could my keys be/.test(m.text), "2. and their times");
+check(/\w{3} \d\d\/\d\d \d\d:\d\d · Alice \(@alice\)\] @shuvi_test_bot where could my keys be/.test(m.text), "2. and their times");
 check(m.system.includes("PUBLIC PERSONA") && !m.system.includes("PRIVATE PERSONA"), "2. the group's prompt has the public persona only");
 check(m.system.includes("## In a group"), "2. and the group section");
 const reply = sent(GROUP.id).find((b) => b.text === "Check the kitchen drawer.")!;
@@ -272,7 +272,7 @@ check(seen.owner!.text.includes("Earlier, before you were called") && seen.owner
 await until("the owner's card", () => control.sent().some((b) => String(b.text).includes(`Change the policy of "${GROUP.title}" (${GROUP.id})`)));
 const ownerCard = String(control.sent().find((b) => String(b.text).includes("Change the policy of"))!.text);
 check(ownerCard.includes("home/policy.yaml, as it would change:") && /^- +trigger:/m.test(ownerCard) && /^\+ +trigger: all$/m.test(ownerCard), "4. its card shows the diff of the file");
-check(seen.owner!.text.includes("Ownerly · ⚙ owner]"), "4. and the owner's line was marked as the owner's");
+check(seen.owner!.text.includes("Ownerly (@ownerly_test) · ⚙ owner]"), "4. and the owner's line was marked as the owner's");
 await until("the turn to close", idle);
 
 // ---- 5. a group nobody listed ----------------------------------------------------------------------------
