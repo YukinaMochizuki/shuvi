@@ -67,6 +67,7 @@ bun scripts/e2e-groups.ts    # a group: triggers, unseen messages, owner-only re
 bun scripts/e2e-media.ts     # videos from links on a fake porchkit: a prewarmed read, a probe, sheets of a link, a fetch into ~/inbox
 bun scripts/e2e-read.ts      # reading links on the same fakes (read_link, save_link, the prewarm), and her browser: open a page, click
 bun scripts/e2e-drain.ts     # SIGTERM drains: a running turn finishes and is delivered, exit 0; the deadline stops and retries
+bun scripts/e2e-warm.ts      # warm runners on: a chat's turns on one resident CLI, re-warm on a home/ edit, /stop, restarts; timings
 bun scripts/console-fixture.ts  # the console over made-up fixture data, on 127.0.0.1:8787, to look at
 ```
 
@@ -78,6 +79,18 @@ Configuration is environment variables only; `src/env.ts` lists the framework's,
 lists its own in the header of `src/capabilities/<id>/index.ts` (e.g. `SHUVI_WEB`). The code and its
 prompts are all English; `SHUVI_OWNER_LANGUAGE` is where the owner's own language is set, and the
 assistant replies in it.
+
+**Warm runners** (off by default). With `SHUVI_WARM_RUNNERS=on`, the runner of a turn on a Claude model
+stays after it, holding a resident Claude Code CLI for its chat, and runs the chat's next turn without
+either cold start (loading shuvi, about 0.6 s, and starting the CLI, about 0.85 s, in production). When the
+chat's system prompt changes (an edit to `home/`, the policy), it starts a new CLI for it at once, in the
+background. `SHUVI_WARM_IDLE_SEC` (default 600) is how long one waits for its chat's next turn before it
+exits; `SHUVI_WARM_MAX` (default 2) is the most that wait at once, each holding about 300 MB. `/new`,
+`/newclean`, a switch of model, provider or profile, and a shutdown retire them (`src/runner/warm.ts`). A chat can
+be pinned warm from the console (its settings page, Keep warm): its runner then never idles out, does not count
+toward `SHUVI_WARM_MAX`, and is started again by the server whenever it has none (after a restart, a `/new`, …),
+so even its first message after a quiet stretch is answered without a cold start. Pinning is saved with the switch
+off too, and has effect once it is on; only a chat on a Claude model can be warm.
 
 Which models turns run on is the model catalog in `shuvi.db` (`src/store/models.ts`): providers (a Claude
 login, or an OpenAI-compatible endpoint whose key is named in the secrets file) and their models, one of

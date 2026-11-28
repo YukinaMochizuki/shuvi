@@ -66,6 +66,12 @@ export const chats = sqliteTable("chats", {
    * none, the base. One that no longer exists is run on the base (agent/turn.ts `chatLayers`).
    */
   profile: text("profile"),
+  /**
+   * PINNED WARM (the owner's choice, from the console's chat settings): with `SHUVI_WARM_RUNNERS` on, the chat's warm
+   * runner never idles out and does not count toward `SHUVI_WARM_MAX`, and the server starts one whenever the chat
+   * has none (server/warm.ts `PinKeeper`), so even the first message after a quiet stretch is handed to a runner.
+   */
+  warmPinned: integer("warm_pinned", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
 });
 
@@ -417,6 +423,7 @@ export const deletedTurns = sqliteTable(
     conversationStart: text("conversation_start"),
     profile: text("profile"),
     timings: text("timings"),
+    handoff: text("handoff"),
     startedAt: text("started_at").notNull(),
     endedAt: text("ended_at"),
   },
@@ -539,6 +546,14 @@ export const turns = sqliteTable(
      * turn that recorded none (one from before this column).
      */
     timings: text("timings", { mode: "json" }).$type<Record<string, number>>(),
+    /**
+     * A turn the waker HANDED to a chat's warm runner (store/turns.ts `claimTurn`, store/warm.ts) instead of spawning a child:
+     * `pending` from the claim until the runner takes it (`acked`). A `pending` turn whose runner is gone never
+     * started: the waker closes it without counting a failed attempt, and its input is answered again
+     * (server/waker.ts). One whose runner is alive but has not taken it in time is `abandoned` first (so a late
+     * take fails), then its runner killed and the turn closed the same way. Null for a turn a child was spawned for.
+     */
+    handoff: text("handoff", { enum: ["pending", "acked", "abandoned"] }),
     startedAt: text("started_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
     endedAt: text("ended_at"),
   },
@@ -753,6 +768,34 @@ export const controlCards = sqliteTable("control_cards", {
   rev: integer("rev").notNull().default(0),
   switchRequestId: integer("switch_request_id"),
   createdAt: text("created_at").notNull().default(sql`(strftime('%Y-%m-%dT%H:%M:%fZ','now'))`),
+});
+
+/**
+ * The WARM RUNNERS (runner/warm.ts, store/warm.ts): a runner child that stayed after its turn, holding a
+ * resident Claude Code CLI for its chat, waiting to be handed the chat's next turn. One per chat at most; a row
+ * exists only while its runner is IDLE (a hand-off deletes it in the claim's transaction, and the runner puts
+ * it back when the turn is over). Deleting a row is how a runner is retired: it exits once it sees it gone.
+ */
+export const warmRunners = sqliteTable("warm_runners", {
+  chatId: integer("chat_id")
+    .primaryKey()
+    .references(() => chats.id),
+  /** The runner's pid and that process's start time (server/spawn.ts `isAlive`), as a turn's are. */
+  pid: integer("pid").notNull(),
+  pidStart: text("pid_start"),
+  /** What its CLI was opened for (runner/warm-session.ts `warmFingerprint`): prompt, tools, provider and login. */
+  fingerprint: text("fingerprint").notNull(),
+  /** The code the runner runs (version.ts `codeVersion`); a server running other code retires it, at start or at a hand-off. */
+  codeVersion: text("code_version").notNull(),
+  /**
+   * The configuration it runs with (version.ts `runnerConfigHash`: its whole environment, each value hashed, and the
+   * enabled capabilities); a server with another retires it, as for `code_version`. '' on a row from before this column.
+   */
+  configHash: text("config_hash").notNull().default(""),
+  /** Since when it waits (ISO): the idle limit and the cap's least recently idle (`SHUVI_WARM_*`). */
+  idleSince: text("idle_since").notNull(),
+  /** When its current CLI was started (ISO); null when it holds none. */
+  cliStartedAt: text("cli_started_at"),
 });
 
 export const kv = sqliteTable("kv", {

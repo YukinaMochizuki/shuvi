@@ -20,6 +20,7 @@ bun scripts/e2e-groups.ts   # the same, for a group: triggers, its turn input, a
 bun scripts/e2e-media.ts    # videos from links against a fake porchkit (test/fake-porchkit.ts) and a fake Hangar
 bun scripts/e2e-read.ts     # reading links (read_link, save_link, the prewarm) against the same fakes, and her browser (/browse): open, click
 bun scripts/e2e-drain.ts    # SIGTERM drains: a running turn finishes and is delivered; the deadline stops and retries
+bun scripts/e2e-warm.ts     # SHUVI_WARM_RUNNERS=on: turns handed to a warm runner on one CLI, re-warm on a home/ edit, /stop, a server SIGKILLed and SIGTERMed; the timings
 bun scripts/live-demo.ts series   # by hand, needs a local Chromium (CHROME_PATH): the console's live pages in a real browser, screenshots; `idle 10`: resources
 bun run db:generate         # after any change to src/store/schema.ts
 ```
@@ -53,6 +54,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | receiving updates and the Telegram offset | `src/server/poller.ts`, `src/telegram/inbound.ts` |
 | sending, 429s, long messages | `src/server/sender.ts`, `src/telegram/format.ts` |
 | turns outliving the server | `src/server/spawn.ts`, `src/runner/child.ts` (the entry point), `src/runner/run.ts` (the turn's body) |
+| warm runners (`SHUVI_WARM_RUNNERS`): staying after a turn, the hand-off, re-warm, retiring, the cap, the drain flag; the resident CLI and its fingerprint; a chat pinned warm from the console (the turnless start, `PinKeeper`) | `src/runner/warm.ts`, `src/runner/warm-session.ts`; the rows: `src/store/warm.ts`; the hand-off: `src/server/waker.ts`, `src/store/turns.ts` (`claimTurn`); the server's side: `src/server/warm.ts`; the console's Keep warm: `src/console/chat-settings.ts` |
 | waking the waker and the sender early (a loop's `Kick`, a runner child's SIGUSR2 to the recorded server; polling stays the guarantee), and what a runner child loads before its turn | `src/server/loop.ts`, `src/server/wake.ts`; `src/runner/run.ts`, `src/agent/backend.ts` (`loadDriver`) |
 | where a turn's time went (`turns.timings`), when a row went out (`chat_events.sent_at`) | `src/store/turns.ts` (`markTurn`), `src/store/events.ts` (`enqueueOutbound`, `markSent`) |
 | shutting down: the drain on SIGTERM, its deadline, what it keeps | `src/server/drain.ts`, `src/server/main.ts` (`shutdown`); docs/design.md §16 |

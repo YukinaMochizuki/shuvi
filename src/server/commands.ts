@@ -7,7 +7,9 @@ import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
 import { enqueueOutbound, forgetConversations, getChat, markCommandDone, pendingCommands, type CommandPayload } from "../store/events.ts";
 import { chatLabel, IMMEDIATE, markStop, runningTurnFor, type Turn } from "../store/turns.ts";
-import { signalTurn, type SignalTurn } from "./spawn.ts";
+import { signalTurn, signalWarm, type SignalTurn, type SignalWarm } from "./spawn.ts";
+import { warmRunnerFor } from "../store/warm.ts";
+import { retireChatRunner } from "./warm.ts";
 
 /**
  * Owner commands that act on the chat they are sent in (docs/design.md §13):
@@ -36,6 +38,9 @@ import { signalTurn, type SignalTurn } from "./spawn.ts";
  *
  * SWITCH REQUESTS (agent/switch.ts `requestSwitch`) are applied here too (`switchRequestPass`): a running turn
  * is stopped first, and the switch applied once none runs.
+ *
+ * `/new`, `/newclean` and an applied switch RETIRE the chat's warm runner, if one waits (server/warm.ts): its CLI
+ * served the conversation or model left behind. A runner in the turn they stop leaves after it anyway (SIGTERM).
  *
  * `MAIN_COMMANDS` is the one list of them: inbound.ts recognises exactly these, and the server registers
  * them with Telegram at startup (`registerCommands`) so the owner's `/` menu offers them, in his private
@@ -158,7 +163,7 @@ export function stopTurn(db: Db, chatId: number, stopSeq: number, signal: Signal
  * sent to Telegram is answered again: accepted, the owner asked to stop it. Once nothing runs the switch is
  * applied, and its result or error stored on the request. Returns the requests finished in this pass.
  */
-export function switchRequestPass(db: Db, signal: SignalTurn = signalTurn, opts: SwitchOptions = {}): SwitchRequest[] {
+export function switchRequestPass(db: Db, signal: SignalTurn = signalTurn, opts: SwitchOptions = {}, warm: SignalWarm = signalWarm): SwitchRequest[] {
   const finished: SwitchRequest[] = [];
   const waiting = new Set<number>();
   for (const req of pendingSwitchRequests(db)) {
@@ -172,12 +177,15 @@ export function switchRequestPass(db: Db, signal: SignalTurn = signalTurn, opts:
       waiting.add(req.chatId);
       continue;
     }
+    // A switch that changed something retires the chat's warm runner (agent/switch.ts deletes its row): signal it.
+    const runner = warmRunnerFor(db, req.chatId);
     finished.push(applySwitchRequest(db, req, opts));
+    if (runner && !warmRunnerFor(db, req.chatId)) warm(runner.pid, runner.pidStart, "SIGUSR2");
   }
   return finished;
 }
 
-export function commandPass(db: Db, signal: SignalTurn = signalTurn, home?: string): number {
+export function commandPass(db: Db, signal: SignalTurn = signalTurn, home?: string, warm: SignalWarm = signalWarm): number {
   let handled = 0;
   for (const cmd of pendingCommands(db)) {
     const p = cmd.payload as unknown as CommandPayload;
@@ -188,6 +196,7 @@ export function commandPass(db: Db, signal: SignalTurn = signalTurn, home?: stri
       case "newclean": {
         const running = stopTurn(db, cmd.chatId, cmd.seq, signal);
         note = running ? `stopped turn ${running.id}` : "no turn running";
+        if (p.command !== "stop" && retireChatRunner(db, cmd.chatId, warm)) note += "; warm runner retired";
         if (p.command === "new") {
           forgetConversations(db, cmd.chatId);
           note += "; conversation reset";

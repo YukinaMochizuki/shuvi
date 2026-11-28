@@ -16,6 +16,8 @@ import { ensureChat, getChat } from "../src/store/events.ts";
 import { addModel, addProvider } from "../src/store/models.ts";
 import { claimTurn, getTurn, saveSession, setTurnPid } from "../src/store/turns.ts";
 import { memDb, OWNER, ownerChatId, ownerSays } from "./helpers.ts";
+import { isPinned, registerWarm } from "../src/store/warm.ts";
+import { processStart } from "../src/server/spawn.ts";
 
 /** A chat's settings page (console/chat-settings*.ts): every write, through the console's write boundary. Made-up names. */
 
@@ -74,6 +76,8 @@ interface World {
   dm: number;
   group: number;
   signals: number[];
+  /** Warm runners on in the "server" (`SHUVI_WARM_RUNNERS`). */
+  warmOn?: boolean;
 }
 
 /** A catalog (opus, the default qwen, llama), the owner's DM that has talked on qwen, a listed group, a profile. */
@@ -113,6 +117,7 @@ function deps(w: World): ConsoleDeps {
     users: new Set([LOGIN]),
     prompt: { capabilities: enabledCapabilities({ SHUVI_OWNER_ID: String(OWNER), SHUVI_WEB: "off" }), ownerId: OWNER },
     signalTurn: (pid) => void w.signals.push(pid),
+    ...(w.warmOn ? { warmRunners: true } : {}),
   };
 }
 
@@ -577,5 +582,40 @@ describe("review fixes", () => {
     const html = await page(w, `/chats/${w.dm}/settings`);
     expect(html).toContain("Switching to <span class=\"mono\">claude/opus</span> (lossy)");
     expect(html).toContain('<span class="mrow cur"');
+  });
+});
+
+describe("Keep warm (the pin, chats.warm_pinned)", () => {
+  test("pinned and unpinned through the write boundary; the page says what pinning does here", async () => {
+    const w = world();
+    // The DM runs on qwen (OpenAI-compatible), and warm runners are off: both are said, and the pin still saves.
+    let html = await page(w, `/chats/${w.dm}/settings`);
+    expect(html).toContain('id="warm"');
+    expect(html).toContain("Warm runners are off on this server");
+    expect(html).toContain("not on a Claude login");
+    expect(html).toContain(`action="/chats/${w.dm}/settings/warm"`);
+    // Without the CSRF token, or from another origin: refused, nothing written.
+    expect((await post(w, `/chats/${w.dm}/settings/warm`, { pin: "on" }, { csrf: "wrong" })).status).toBe(403);
+    expect((await post(w, `/chats/${w.dm}/settings/warm`, { pin: "on" }, { origin: "https://evil.example" })).status).toBe(403);
+    expect(isPinned(w.db, w.dm)).toBe(false);
+    const on = await act(w, w.dm, "warm", { pin: "on" });
+    expect(on.location).toEndWith("#warm");
+    expect(isPinned(w.db, w.dm)).toBe(true);
+    expect(on.html).toContain("is kept warm");
+    expect(on.html).toContain("Stop keeping warm");
+    // On a Claude model, with warm runners on: no notes; its runner as the store has it now.
+    w.warmOn = true;
+    w.db.$client.query("update chats set model = 'claude/opus' where id = ?").run(w.dm);
+    registerWarm(w.db, { chatId: w.dm, pid: process.pid, pidStart: processStart(process.pid), fingerprint: "fp", codeVersion: "v", configHash: "c", idleSince: new Date().toISOString(), cliStartedAt: new Date().toISOString() }, 2);
+    html = await page(w, `/chats/${w.dm}/settings`);
+    expect(html).not.toContain("Warm runners are off on this server");
+    expect(html).not.toContain("not on a Claude login");
+    expect(html).toContain(`A warm runner waits for this chat now: process <span class="mono">${process.pid}</span>`);
+    const off = await act(w, w.dm, "warm", { pin: "off" });
+    expect(isPinned(w.db, w.dm)).toBe(false);
+    expect(off.html).toContain("no longer kept warm");
+    // A pin value it does not know changes nothing.
+    await act(w, w.dm, "warm", { pin: "maybe" });
+    expect(isPinned(w.db, w.dm)).toBe(false);
   });
 });

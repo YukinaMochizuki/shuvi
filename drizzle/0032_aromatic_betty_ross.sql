@@ -1,0 +1,1 @@
+ALTER TABLE `chats` ADD `warm_pinned` integer DEFAULT false NOT NULL;

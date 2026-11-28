@@ -1,7 +1,6 @@
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, max, ne, notInArray, or } from "drizzle-orm";
 import type { Db } from "./db.ts";
-import { wakeServer } from "../server/wake.ts";
-import { asksForTurn, chatConversations, chatEvents, chats, deletedEvents, kv, OUTBOUND_KINDS, spentIdemKeys, TRIGGER_KINDS } from "./schema.ts";
+import { asksForTurn, chatConversations, chatEvents, chats, deletedEvents, kv, OUTBOUND_KINDS, spentIdemKeys, TRIGGER_KINDS, warmRunners } from "./schema.ts";
 import { markTurn } from "./turns.ts";
 
 /**
@@ -218,6 +217,8 @@ export function forgetConversations(db: Db, chatId: number): void {
   db.transaction((tx) => {
     tx.update(chats).set({ backendSessionId: null, enteredAt: null, contextTokens: null, cleanSince: null }).where(eq(chats.id, chatId)).run();
     tx.delete(chatConversations).where(eq(chatConversations.chatId, chatId)).run();
+    // The chat's warm runner, if one waits, is retired (store/warm.ts): its CLI served the conversation forgotten.
+    tx.delete(warmRunners).where(eq(warmRunners.chatId, chatId)).run();
   }, { behavior: "immediate" });
 }
 
@@ -397,15 +398,58 @@ export function recordFrameworkEvent(
   return rows[0]?.seq ?? null;
 }
 
+/**
+ * The name the owner last wrote under in chat `chatId` (undefined: he never wrote there). Where a turn's input
+ * has no message of his (a schedule, a job, an inbound event), the system prompt names him by this
+ * (agent/turn.ts), as a warm runner's ahead-of-time prompt always does (runner/warm.ts), so both build the
+ * same prompt.
+ */
+export function lastOwnerName(db: Db, chatId: number, ownerId: number): string | undefined {
+  const row = db.$client
+    .query("select json_extract(payload, '$.from.name') as name from chat_events where chat_id = ? and kind = 'message' and json_extract(payload, '$.from.id') = ? order by seq desc limit 1")
+    .get(chatId, ownerId) as { name: string | null } | null;
+  return row?.name ?? undefined;
+}
+
+/**
+ * The ONE rule for the owner's name in a turn's system prompt, used by the turn (agent/turn.ts) and by a warm runner
+ * building that prompt ahead of it (runner/warm.ts), so both build the same bytes: the name on his latest message in
+ * the turn's `input`, else the name he last wrote under in the chat (`lastOwnerName`; a turn on a schedule, a job or
+ * an inbound event has no message of his).
+ */
+export function turnOwnerName(db: Db, chatId: number, ownerId: number, input: readonly ChatEvent[]): string | undefined {
+  for (let i = input.length - 1; i >= 0; i--) {
+    const e = input[i]!;
+    if (e.kind !== "message") continue;
+    const from = (e.payload as unknown as MessagePayload).from;
+    if (from.id === ownerId) return from.name;
+  }
+  return lastOwnerName(db, chatId, ownerId);
+}
+
 // ---- outbound ---------------------------------------------------------------------------------------
+
+let turnRowQueued: ((db: Db) => void) | null = null;
+
+/**
+ * What this process does when a turn's outbound row is queued (`enqueueOutbound`): a runner child installs the
+ * server's wake (runner/run.ts, server/wake.ts `wakeServer`). One hook per process. Returns its remover.
+ */
+export function onTurnRowQueued(hook: (db: Db) => void): () => void {
+  turnRowQueued = hook;
+  return () => {
+    if (turnRowQueued === hook) turnRowQueued = null;
+  };
+}
 
 /**
  * Queue something for the sender. `idemKey` makes a repeat a no-op: a turn that is re-run, or a tool
  * handler that is retried, writes the same key and the second write is dropped.
  *
  * A row carrying `turnId` is a turn's, queued from its runner child (agent/turn.ts and the capabilities' tools):
- * a new one records the turn's `queuedFirst` mark (turns.ts `markTurn`) and wakes the server's sender
- * (server/wake.ts), both best effort. Every path that queues for a turn comes through here, so none is missed.
+ * a new one records the turn's `queuedFirst` mark (turns.ts `markTurn`) and calls the hook the process installed
+ * (`onTurnRowQueued`: a runner child wakes the server's sender with it, server/wake.ts), both best effort. Every
+ * path that queues for a turn comes through here, so none is missed. The store itself knows nothing of the server.
  */
 export function enqueueOutbound(
   db: Db,
@@ -430,7 +474,11 @@ export function enqueueOutbound(
     .get();
   if (row && e.turnId !== undefined) {
     markTurn(db, e.turnId, { queuedFirst: Date.now() });
-    wakeServer(db);
+    try {
+      turnRowQueued?.(db);
+    } catch {
+      // a hint only: the sender polls
+    }
   }
   // A second write of the same key wrote nothing: the row that holds the key is the message.
   return row?.seq ?? db.select({ seq: chatEvents.seq }).from(chatEvents).where(eq(chatEvents.idemKey, e.idemKey)).get()?.seq ?? null;

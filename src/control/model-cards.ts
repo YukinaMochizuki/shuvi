@@ -27,6 +27,7 @@ import {
 import { controlCards } from "../store/schema.ts";
 import { listProfiles, readProfile } from "../capabilities/memory/layers.ts";
 import { setChatProfile } from "../store/profiles.ts";
+import { retireChatRunner } from "../server/warm.ts";
 import { chatLabel, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
 
 /**
@@ -1040,6 +1041,8 @@ function pressProfile(db: Db, card: Card, state: State, action: string, n: numbe
   else return CLOSED;
   if (to === chat.profile) return void setState(db, card, { ...state, note: `${label} is already on ${to ?? "Base"}.` }, { step: true }), "";
   if (to && home && !readProfile(home, to)) return void setState(db, card, { ...state, note: `${to} no longer exists.` }, { step: true }), "";
+  // Its warm runner, if one waits, leaves (server/warm.ts): its CLI's prompt was the old profile's.
+  retireChatRunner(db, chat.id);
   setChatProfile(db, chat.id, to);
   close(db, card, `${label} now runs on ${to ?? "Base"}, from its next turn.`);
   return "";

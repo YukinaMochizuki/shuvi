@@ -9,6 +9,7 @@
  *             recorded new events, so a message starts its turn without waiting out the interval (loop.ts)
  *   commands  /stop, /new, /model (commands.ts); switch requests, and the control cards waiting on them
  *             (control/model-cards.ts `switchCardPass`)
+ *   warm      keep the chats the owner pinned warm with a runner each, and the cap over the others (warm.ts)
  *   catalog   probes of OpenAI-compatible models, and the `/models` listings `/provider add` waits on (probes.ts)
  *   sender    deliver what turns queued (sender.ts); kicked by a runner child's SIGUSR2 after it queues a row
  *             (wake.ts), and after the waker's command pass reacts to a command
@@ -30,8 +31,10 @@
  *
  * Everything it knows is in the store, so stopping it at any moment and starting it again loses nothing:
  * the loops resume from the rows. SIGTERM (or SIGINT) DRAINS (drain.ts): the poller stops, the waker starts
- * no new turn, and the server waits for the running turns and their messages, up to SHUVI_DRAIN_SEC, before
- * it exits 0. A second signal exits at once. A server that dies without draining (SIGKILL, a crash) leaves
+ * no new turn, every idle warm runner is retired and none stays after its turn (server/warm.ts), and the server
+ * waits for the running turns and their messages, up to SHUVI_DRAIN_SEC, before it exits 0. A second signal
+ * exits at once. At start, warm runners left by an earlier server are adopted when they run this code and
+ * configuration, and retired otherwise (server/warm.ts `startWarmRunners`). A server that dies without draining (SIGKILL, a crash) leaves
  * its turns running in their own detached processes where the host lets them outlive it (systemd with
  * `KillMode=process`), and the next server picks them up; in a container they die with it, and the next
  * server reaps and retries them (waker.ts).
@@ -67,9 +70,11 @@ import { Kick, loop as runLoop, startLoops } from "./loop.ts";
 import { pollOnce } from "./poller.ts";
 import { backgroundPass } from "./probes.ts";
 import { sendPass } from "./sender.ts";
-import { signalTurn, spawnTurn } from "./spawn.ts";
+import { childEnv, signalTurn, spawnTurn } from "./spawn.ts";
 import { onWake, recordServerProcess } from "./wake.ts";
 import { wakerPass } from "./waker.ts";
+import { drainWarmRunners, PinKeeper, startWarmRunners, type RunnerIdentity } from "./warm.ts";
+import { codeVersion, runnerConfigHash } from "../version.ts";
 
 const cfg = loadConfig();
 // Refused here, before anything starts: a console on a non-loopback address (src/console/server.ts).
@@ -108,6 +113,15 @@ const wakeSender = new Kick();
 // reads: SIGUSR2 unhandled would end this process.
 onWake(() => wakeSender.kick());
 recordServerProcess(db);
+// Warm runners an earlier server left (SHUVI_WARM_RUNNERS, runner/warm.ts): the dead forgotten, those on other code
+// (or all, with the switch off) retired, the rest adopted.
+// A runner must match this server's code and configuration to be adopted, or handed a turn (server/warm.ts).
+const runnerIdentity: RunnerIdentity = { codeVersion: codeVersion(), configHash: runnerConfigHash(childEnv(), capabilities.map((c) => c.capability.id)) };
+{
+  const w = startWarmRunners(db, { enabled: cfg.warm.enabled, identity: runnerIdentity });
+  if (w.dead.length || w.retired.length) console.log(`warm runners: ${w.dead.length} gone, ${w.retired.length} retired`);
+  console.log(`warm runners ${cfg.warm.enabled ? `on (idle ${Math.round(cfg.warm.idleMs / 1000)} s, at most ${cfg.warm.max})` : "off"}`);
+}
 
 // The poller's own long poll is its wait; it loops straight back. The capabilities' inbound hooks run first
 // (a prewarm starts before the turn), then the waker is kicked to start the turn now.
@@ -140,7 +154,7 @@ void loop(
     switchRequestPass(db);
     switchCardPass(db);
     // Draining: still reap and enforce the limit, start nothing.
-    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers, wake: !vitals.draining });
+    wakerPass({ db, spawn: spawnTurn, capabilities, maxTurnMs: cfg.turnMaxMs, policy: policies.current(), ownerId: cfg.ownerId, bot, triggers, runnerIdentity, wake: !vitals.draining });
   },
   300,
   wakeWaker,
@@ -155,6 +169,11 @@ void loop(
   },
   1000,
 );
+// Chats the owner pinned warm: a turnless runner for each that has none, the cap over the unpinned (server/warm.ts).
+{
+  const keeper = new PinKeeper({ db, enabled: cfg.warm.enabled, max: cfg.warm.max, draining: () => vitals.draining, policy: () => policies.current(), ownerId: cfg.ownerId, identity: runnerIdentity });
+  void loop("warm", async () => void keeper.pass(), 1000);
+}
 // Started in the background; the rows say what is asked, so a restart's interrupted ones start again here.
 void loop("catalog", async () => void backgroundPass(db, { secrets: cfg.secrets }), 1000);
 // Awaited at exit (`shutdown`), so the server never exits in the middle of a send.
@@ -217,6 +236,7 @@ if (consoleOn(cfg.console)) {
           secrets: cfg.secrets,
           // Home's Preview builds a chat's prompt as a turn would (the owner's name is a turn's own, from his message).
           prompt: { capabilities, policy: () => policies.current(), ownerId: cfg.ownerId, owner: cfg.ownerLanguage ? { language: cfg.ownerLanguage } : {} },
+          warmRunners: cfg.warm.enabled,
         },
         stop.signal,
       );
@@ -266,6 +286,13 @@ async function shutdown(signal: string): Promise<void> {
   vitals.draining = true;
   vitals.drainDeadline = Date.now() + cfg.drainMs;
   intake.abort();
+  // No runner stays warm after its turn now, and the idle ones leave (server/warm.ts).
+  try {
+    const retired = drainWarmRunners(db);
+    if (retired.length) console.log(`drain: retired ${retired.length} idle warm runner(s)`);
+  } catch (e) {
+    console.error("drain: could not retire the warm runners:", e);
+  }
   console.log(`${signal}: shuvi server draining: no new updates or turns; ${runningTurns(db).length} turn(s) running, up to ${Math.round(cfg.drainMs / 1000)} s`);
   try {
     const r = await drain({ db, drainMs: cfg.drainMs, graceMs: cfg.drainGraceMs });

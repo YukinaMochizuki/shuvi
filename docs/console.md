@@ -283,7 +283,7 @@ profile, how old its conversation is, a link to its log), then three tabs, each 
 
 | Tab | Address | Sections |
 |---|---|---|
-| **Chat** (where every way in lands) | `/chats/<id>/settings` | Model, Profile, Conversation |
+| **Chat** (where every way in lands) | `/chats/<id>/settings` | Model, Profile, Conversation, Keep warm |
 | **Permissions** | `/chats/<id>/settings/permissions` | Permissions |
 | **Automation & machine** | `/chats/<id>/settings/automation` | Schedules, Secrets, Computer |
 
@@ -306,6 +306,12 @@ Every button comes back to the tab it is on, with its result shown once.
   the last 10, and she has no `search_chats` / `read_chat` for as long as that conversation lasts: what `/newclean`
   does, and a model switch's Clean start does, for the model the chat is on (picking that model in the list does
   nothing). The section says when the current conversation is such a clean one. Her files and notes stay either way.
+- **Keep warm**: pins the chat warm (`chats.warm_pinned`), or unpins it. With warm runners on
+  (`SHUVI_WARM_RUNNERS`), a pinned chat's runner, a Bun process and its Claude CLI (about 300 MB), never idles out
+  and does not count toward `SHUVI_WARM_MAX`, and the server starts one whenever it has none (after a restart, a
+  `/new`, …), so its messages never wait for a cold start; unpinned, its runner idles out and counts toward the cap
+  again, from then. The section shows the chat's warm runner now (its process, idle since, when its CLI started),
+  and says when pinning does nothing: warm runners off (the pin is still saved), or a model not on a Claude login.
 - **Permissions**: the chat's entry in `home/policy.yaml` as a form: what wakes her (every message, or mentions,
   replies and follow-ups within some minutes), what she sees (the private persona and memory are offered only for
   your DM, as the policy parser requires), each capability on or off with its parameters (a workstream's

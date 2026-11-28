@@ -59,10 +59,41 @@ The **shuvi server** (an always-on Bun process) runs:
 - **job watcher**: watches background jobs and writes an event back to the origin chat when one ends.
 - **hook endpoints**: `/jobs/<id>/report` and `/inbound/<source>`, on the tailnet only.
 
-**runner child**: one process per turn; it runs one turn through agent-runtime and exits. It is detached,
+**runner child**: one process started per turn; it runs that turn through agent-runtime and exits, unless it stays
+as its chat's warm runner (below) and runs the chat's next turns too. It is detached,
 so where the host lets it (systemd with `KillMode=process`) it outlives the server. In a container it cannot,
 so the server drains on SIGTERM instead: it takes nothing new in and waits for the running turns before it
 exits (§16). Either way is what makes invariant 3 hold.
+
+**warm runner** (`SHUVI_WARM_RUNNERS`, default off; `src/runner/warm.ts`): a runner child whose turn ran on
+Claude may stay after it, holding a resident Claude Code CLI for its chat (agent-runtime's `ClaudeSession`),
+so the chat's next turn pays neither cold start (loading shuvi, starting the CLI). One runner serves one chat
+only, so permission boundaries never mix. It is the same detached process, with the same liveness (pid and
+start time), and while idle it is a `warm_runners` row (`src/store/warm.ts`). The waker HANDS it the chat's
+next turn instead of spawning a child: in the claim's transaction the turn takes the runner's pid and the
+row is deleted, so the unique index still keeps one turn per chat (invariant 4), then SIGUSR1 wakes it. A
+hand-off the runner never took, its runner gone or too slow (then abandoned first, so a late take fails, and
+killed), never started: it closes without counting as a failure and is answered again. Two guards keep a
+runner's CLI from missing a turn: a runner is never registered while another process runs its chat's turn (it
+registers in a transaction that refuses then, and the hand-off is decided in the claim's transaction), and a CLI
+that has not seen the chat's last closed turn (one that ran and closed elsewhere while the runner was not
+registered) is reopened on a resume before it serves another. A runner on other code or another configuration
+than the server's is retired, at the server's start and at a hand-off: its code version (the deployed commit)
+and a hash of the whole environment a child gets (each value hashed first, so nothing secret is stored) plus
+its enabled capabilities are compared with the server's own. A CLI cannot change its system prompt or tool list, so the runner re-warms AT ONCE when
+what the next turn would be given changes (an edit to home/, policy): a new CLI on a resume of the
+conversation, in the background, before the next message; a turn that still does not fit opens its CLI
+at its start. The runner leaves on SIGUSR2 (retire), on SIGTERM (which keeps meaning "stop the turn"), idle
+past `SHUVI_WARM_IDLE_SEC`, after a turn whose conversation was lost, or when its row is deleted, which is
+how the server retires it (`/new`, `/newclean`, a switch of model, provider or profile, the drain, a server
+on other code). At most `SHUVI_WARM_MAX` wait at once. The owner can PIN a chat warm from the console (Keep warm on its
+settings page, `chats.warm_pinned`): its runner never idles out and does not count toward that cap, and the server
+starts a turnless runner for it (it opens the chat's CLI and waits, with no turn of its own) whenever it has none,
+so after a deploy, a restart, a `/new` or any exit of its runner, the chat is warm again before its next message;
+not while draining, and with a backoff and one alert when starts keep failing. Every other retire rule applies to
+a pinned runner too. What a turn says, and its idempotency keys, are as for any
+turn (invariant 2); the reply of every turn is queued when the driver reports its result, before the CLI has
+settled (`src/agent/turn.ts`).
 
 ## 3. Data
 
@@ -727,7 +758,8 @@ changed them). So there are two concepts for her, sharing one storage:
 ## 16. Deployment
 
 - Turns run on agent-runtime's drivers: Claude's starts a Claude Code subprocess per turn, so the machine
-  needs at least 4 GB of memory for 2–3 turns at once; an OpenAI-compatible model is called from the runner
+  needs at least 4 GB of memory for 2–3 turns at once (with warm runners on, each waiting one holds about
+  300 MB, a Bun runner and its CLI: at most `SHUVI_WARM_MAX` unpinned ones plus one per chat pinned warm); an OpenAI-compatible model is called from the runner
   child, its tools through the same boundary. Which models exist is the catalog in `shuvi.db`; a first
   start seeds it with the Claude login and `SHUVI_MODEL`.
 - Heavy computation runs remotely.
@@ -760,7 +792,11 @@ it: a runner child can no longer outlive the server, so invariant 3 is kept by w
 (tini forwards it to the server alone):
 
 1. the Telegram poller stops, and the waker starts no new turn (it still reaps dead turns and enforces the
-   wall-clock limit). The sender, the control bot and every other loop keep running;
+   wall-clock limit). The sender, the control bot and every other loop keep running. The drain flag is set
+   in the store and every idle warm runner (§2) is retired: a runner in a turn finishes it like any turn,
+   sees the flag and exits rather than staying (`src/server/warm.ts`). What the drain counts as running is
+   the turns, as before; an idle warm runner is not one. The next server clears the flag, forgets runners
+   that are gone, retires those on other code, and adopts the rest;
 2. the server waits until no turn runs and nothing is queued to send, up to `SHUVI_DRAIN_SEC` (default
    600). Once the last turn has ended, its messages get at most 30 s more to go out; a row Telegram keeps
    refusing is left for the next server;

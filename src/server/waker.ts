@@ -5,8 +5,9 @@ import { defaultPolicy, resolveChat, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { raiseAlert } from "../store/control.ts";
 import { allChats, getChat, lastTriggerSeq, triggersAfter } from "../store/events.ts";
-import { chatLabel, claimTurn, finishTurn, IMMEDIATE, markTerm, markTurn, retryDelayMs, runningTurns, setTurnPid } from "../store/turns.ts";
-import { isAlive, processStart, signalTurn, type SignalTurn, type SpawnTurn } from "./spawn.ts";
+import { chatLabel, claimTurn, closeNeverStarted, finishTurn, IMMEDIATE, markTerm, markTurn, retryDelayMs, runningTurns, setTurnPid, type WarmClaim } from "../store/turns.ts";
+import type { RunnerIdentity } from "../store/warm.ts";
+import { isAlive, processStart, signalTurn, signalWarm, type SignalTurn, type SignalWarm, type SpawnTurn } from "./spawn.ts";
 
 /**
  * The waker decides WHEN to think, and nothing about how. One pass:
@@ -16,6 +17,13 @@ import { isAlive, processStart, signalTurn, type SignalTurn, type SpawnTurn } fr
  *      was being stopped (`term_at` or `stop_seq` set) closes as stopped instead, where its stop put it.
  *      A turn that never got a pid (the spawn itself failed) is reaped after `SPAWN_GRACE_MS`. "Gone"
  *      means the pid no longer runs the process started for the turn (spawn.ts: pid + start time).
+ *      A turn HANDED to a warm runner that the runner never took (`handoff = 'pending'`, store/warm.ts) and whose
+ *      runner is gone never started: it closes as `stopped` with its stop at its start (cursor unchanged, an
+ *      earlier `/stop` keeping its own place), which is not a failed attempt (no backoff, no `MAX_ATTEMPTS`, no
+ *      alert), so the next pass answers the same input again, with a child. One still pending `HANDOFF_ACK_MS`
+ *      after the hand-off, its runner alive but not taking it, is first marked `abandoned` (store/warm.ts
+ *      `abandonHandoff`: only while still pending, so a runner that takes it at that moment runs it, and one that
+ *      tries later cannot), then its runner killed and the turn closed the same way.
  *   2. Limit: a turn running longer than its wall-clock limit (`SHUVI_TURN_MAX_MINUTES`, default 15) is
  *      sent SIGTERM, which the child treats as a stop, and SIGKILL `KILL_GRACE_MS` later if it is still
  *      there. Either way it closes as `stopped`, not `failed`: its input counts as handled, so a message
@@ -33,6 +41,12 @@ import { isAlive, processStart, signalTurn, type SignalTurn, type SpawnTurn } fr
  *      lasts a few seconds at most, then the turn opens anyway. A chat with a switch of its model pending
  *      (agent/switch.ts `requestSwitch`) waits until it is applied (server/commands.ts `switchRequestPass`),
  *      so no turn starts on the model being left.
+ *      A chat with a live WARM RUNNER (store/warm.ts; `SHUVI_WARM_RUNNERS`, runner/warm.ts) is HANDED the turn
+ *      instead of a child being spawned: the claim's transaction gives the turn the runner's pid and start
+ *      time, deletes its row and marks the hand-off pending (store/turns.ts `claimTurn`), then SIGUSR1 wakes it
+ *      (it also polls). A row whose runner is dead is not handed anything: a child is spawned as before. Nor is a
+ *      runner on other code or another configuration than this server's (`runnerIdentity`, server/warm.ts): it
+ *      is retired, and a child spawned.
  *
  * It holds no state between passes: every answer is in the store, so a restarted server picks up exactly
  * where the last one was, including turns that are still running in children it did not start. (The one
@@ -41,6 +55,10 @@ import { isAlive, processStart, signalTurn, type SignalTurn, type SpawnTurn } fr
  */
 
 export const SPAWN_GRACE_MS = 30_000;
+/** How long a warm runner has to take a turn handed to it (store/warm.ts `ackHandoff`) before it is killed. */
+export const HANDOFF_ACK_MS = 10_000;
+/** The error a handed turn its runner never took closes with (not a failure: see the header). */
+export const HANDOFF_LOST = "never started: the warm runner it was handed to did not take it";
 export const DEFAULT_TURN_MAX_MS = 15 * 60_000;
 /** How long a turn sent SIGTERM for the wall-clock limit has to close itself before SIGKILL. */
 export const KILL_GRACE_MS = 15_000;
@@ -54,6 +72,10 @@ export interface WakerDeps {
   /** The start time of a freshly spawned pid (spawn.ts `processStart`). */
   startOf?: (pid: number) => string | null;
   signal?: SignalTurn;
+  /** SIGUSR1 to a warm runner handed a turn, SIGUSR2 to one retired (spawn.ts `signalWarm`). */
+  signalWarm?: SignalWarm;
+  /** The server's own code and configuration: a warm runner that does not match it is not handed a turn. */
+  runnerIdentity?: RunnerIdentity;
   now?: () => number;
   /** The enabled capabilities, for perception gating. */
   capabilities?: readonly EnabledCapability[];
@@ -86,6 +108,22 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
   const limited: number[] = [];
 
   for (const t of runningTurns(db)) {
+    if ((t.handoff === "pending" || t.handoff === "abandoned") && t.pid != null) {
+      // Never started: not a failure (store/turns.ts `closeNeverStarted`, one transaction).
+      if (t.handoff === "abandoned") {
+        // Abandoned but left open (it cannot be: the abandon closes it in its transaction; defence only).
+        if (closeNeverStarted(db, t.id, HANDOFF_LOST)) reaped.push(t.id);
+        signal(t.pid, t.pidStart, "SIGKILL");
+      } else if (!alive(t.pid, t.pidStart)) {
+        if (closeNeverStarted(db, t.id, HANDOFF_LOST)) reaped.push(t.id);
+      } else if (now() - Date.parse(t.startedAt) > HANDOFF_ACK_MS && closeNeverStarted(db, t.id, HANDOFF_LOST, { abandon: true })) {
+        // Abandoned and closed together, so a take from here on fails; then the runner goes.
+        console.error(`waker: warm runner ${t.pid} did not take turn ${t.id} in ${Math.round(HANDOFF_ACK_MS / 1000)} s; abandoned it, killing the runner`);
+        reaped.push(t.id);
+        signal(t.pid, t.pidStart, "SIGKILL");
+      }
+      continue;
+    }
     if (t.pid == null) {
       if (now() - Date.parse(t.startedAt) > SPAWN_GRACE_MS) {
         finishTurn(db, t.id, { status: "failed", error: "never started" });
@@ -153,10 +191,23 @@ export function wakerPass(deps: WakerDeps): { reaped: number[]; started: number[
     if (hasPendingSwitch(db, chat.id)) continue;
     const caps = deps.capabilities ?? [];
     if (caps.length && triggersAfter(db, chat.id, chat.cursorSeq).some((e) => capabilityHolds(caps, e, now()))) continue;
-    const turn = claimTurn(db, chat.id, trigger);
+    // Whether the chat's warm runner takes the turn is decided inside the claim's transaction (store/turns.ts
+    // `claimTurn`), against its row as it is then: alive and on this server's code and configuration.
+    const warm: WarmClaim = { alive, ...(deps.runnerIdentity ? { identity: deps.runnerIdentity } : {}), retired: [] };
+    const turn = claimTurn(db, chat.id, trigger, warm);
+    for (const r of warm.retired) {
+      console.log(`waker: warm runner ${r.pid} of chat ${chat.id} runs other code or configuration; retired it`);
+      (deps.signalWarm ?? signalWarm)(r.pid, r.pidStart, "SIGUSR2");
+    }
     if (!turn) continue;
     // Wall-clock marks (store/turns.ts `markTurn`), written once the child is on its way.
     const claimed = Date.now();
+    if (turn.handoff === "pending" && turn.pid != null) {
+      (deps.signalWarm ?? signalWarm)(turn.pid, turn.pidStart, "SIGUSR1");
+      markTurn(db, turn.id, { claimed, handed: Date.now() });
+      started.push(turn.id);
+      continue;
+    }
     let spawned: number;
     let pid: number;
     try {
