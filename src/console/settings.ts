@@ -1,7 +1,7 @@
 import { consoleListing, type ConsoleListing } from "../control/model-cards.ts";
 import { CLAUDE_LISTING_TIMEOUT_MS, DEFAULT_TIMEOUT_MS } from "../server/probes.ts";
 import type { Db } from "../store/db.ts";
-import { chatsOn, listModels, listProviders, probePending, type CatalogModel, type ProviderKind } from "../store/models.ts";
+import { chatsOn, effortLevelsOf, listModels, listProviders, probePending, type CatalogModel, type ProviderKind } from "../store/models.ts";
 import { ago, dot, href, html, page, raw, when, type Raw } from "./html.ts";
 import { chatName } from "./pages.ts";
 import { chatById } from "./queries.ts";
@@ -9,7 +9,8 @@ import { chatById } from "./queries.ts";
 /**
  * The Settings page (`/settings`, DESIGN.md "Settings"): the model catalog's providers and models, their
  * probes, adding a provider and the models it lists (an endpoint's `/models`, or what Claude Code offers a Claude
- * login), removing either. The control bot's `/models`
+ * login), removing either, and a Claude model's default effort ("model default" or one of the levels its listing
+ * recorded; none offered while they are not known). The control bot's `/models`
  * and `/provider` cards (control/model-cards.ts) do the same operations, and the texts here are theirs.
  *
  * This file READS and draws: the catalog (store/models.ts), the chats on each model, the console's listing
@@ -67,6 +68,10 @@ export interface SettingsModel {
   probe: Probe;
   /** The chats whose own model it is (`chats.model`). */
   chats: SettingsChat[];
+  /** Its default effort (null: the model's own). */
+  effort?: string | null;
+  /** The effort levels it supports (null: not recorded; [] none: every OpenAI-compatible model). */
+  effortLevels?: string[] | null;
 }
 
 /** The result of a write, shown once on the page it redirects to (settings-write.ts). */
@@ -146,6 +151,8 @@ export function loadSettings(db: Db, q: URLSearchParams, flash?: { note?: Settin
     visionSet: m.model.visionSet,
     probeVision: m.model.probeVision,
     probe: probeOf(m),
+    effort: m.model.effort,
+    effortLevels: effortLevelsOf(m),
     chats: chatsOn(db, [m.id]).map((c) => {
       const cc = chatById(db, c.id);
       return { id: c.id, name: cc ? chatName(cc) : `chat ${c.id}` };
@@ -257,6 +264,22 @@ function visionFact(m: SettingsModel): Raw {
   return html`${word} <span class="src">not known yet</span>`;
 }
 
+/** A Claude model's default effort, as a fact: its level, or that its levels are not known. */
+function effortFact(m: SettingsModel): Raw {
+  if (m.effortLevels === null || m.effortLevels === undefined) return html`<span class="c-lost">effort levels not known yet</span> <span class="src">List models on its provider to learn them</span>`;
+  if (!m.effortLevels.length) return html`takes no effort`;
+  return html`default effort <b>${m.effort ?? "the model's own"}</b>`;
+}
+
+/** A Claude model's default effort: the model's own, or one of its levels. Only when its levels are known. */
+function effortSwitch(ctx: SettingsContext, m: SettingsModel): Raw | "" {
+  if (!m.effortLevels?.length) return "";
+  const now = m.effort ?? "";
+  return html`<form method="post" action="/settings/models/effort" class="seg-btns" aria-label="default effort"${writes("/settings/models/effort", "find fieldset")}>${csrfField(ctx)}<input type="hidden" name="model" value="${m.id}"><span class="seg-label">Effort</span><fieldset class="seg-set">${["", ...m.effortLevels].map(
+    (v) => html`<button type="submit" name="effort" value="${v}" class="${v === now ? "on" : ""}" ${v === now ? html`aria-pressed="true"` : ""} title="${v ? `chats on it run at ${v} unless they set their own` : "send none: the model's own default"}">${v || "model default"}</button>`,
+  )}</fieldset></form>`;
+}
+
 /** Vision on / off / auto (auto: follow the probe). */
 function visionSwitch(ctx: SettingsContext, m: SettingsModel): Raw {
   const now = m.visionSet ? (m.vision ? "on" : "off") : "auto";
@@ -310,7 +333,7 @@ function modelRow(ctx: SettingsContext, v: SettingsView, m: SettingsModel): Raw 
   const pending = m.probe?.status === "checking";
   const facts: Raw[] =
     m.kind === "claude"
-      ? [html`<span class="faint">Claude login: context window and vision are the CLI's</span>`]
+      ? [html`<span class="faint">Claude login: context window and vision are the CLI's</span>`, effortFact(m)]
       : [m.contextWindow ? html`<b>${tokensOf(m.contextWindow)}</b>` : html`<span class="c-failed">no context window</span>`, visionFact(m), probeLine(m.probe, ctx)];
   const uses = m.isDefault
     ? html`<p class="uses">The default: ${plural(v.onDefault, "chat")} without a model of ${v.onDefault === 1 ? "its" : "their"} own ${v.onDefault === 1 ? "runs" : "run"} on it${m.chats.length ? html`; own model of ${chatLinks(m.chats)}` : ""}.</p>`
@@ -330,7 +353,7 @@ function modelRow(ctx: SettingsContext, v: SettingsView, m: SettingsModel): Raw 
 <p class="sfacts">${facts.map((x, i) => html`${i ? html`<span class="sep"></span><wbr>` : ""}<span class="fact">${x}</span>`)}</p>
 ${probeWhy(m.probe)}${uses}
 ${rowNote(v, m.id)}</div>
-<div class="sact">${acts}${m.kind === "openai-compat" && !confirming ? visionSwitch(ctx, m) : ""}</div>
+<div class="sact">${acts}${m.kind === "openai-compat" && !confirming ? visionSwitch(ctx, m) : ""}${m.kind === "claude" && !confirming ? effortSwitch(ctx, m) : ""}</div>
 ${editing ? editForm(ctx, m) : ""}${confirming ? confirmModel(ctx, m) : ""}
 </div>`;
 }

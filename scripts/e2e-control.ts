@@ -29,6 +29,9 @@
  *      listing Base and the profile in home/profiles/; pressing it switches the chat. The next turn's system
  *      prompt carries the profile's directives (and nothing names a profile), and her edit_home in that turn
  *      lands in the profile's copy, Base's untouched; the turn records the profile it ran under.
+ *   9. Effort: once the server has listed the login and recorded claude/opus's effort levels (in the background),
+ *      `/effort 1` offers the model's setting and each level; pressing `low` sets the chat's override, and the next
+ *      turn's request carries it on the wire (`output_config.effort`), its turn row recording it and its source.
  *
  *   bun scripts/e2e-control.ts
  */
@@ -85,6 +88,8 @@ let freshPrompt = "";
 /** "stall" hangs its first turn (until the switch stops it); answered after that. */
 let stalled = false;
 const turnModels: string[] = [];
+/** Every turn's request: its whole conversation and the effort it carried (`output_config.effort`; null: none). */
+const turnEfforts: { all: string; effort: string | null }[] = [];
 const anthropic = Bun.serve({
   port: 0,
   idleTimeout: 120,
@@ -99,6 +104,7 @@ const anthropic = Bun.serve({
     // ("please fail", "hang" among them) before "(New messages:)".
     const last = JSON.stringify(body.messages?.at(-1)).split("(New messages:)").at(-1)!;
     turnModels.push(String((body as { model?: string }).model));
+    turnEfforts.push({ all, effort: (body as { output_config?: { effort?: string } }).output_config?.effort ?? null });
     // Section 8: on the profile, she edits the rules she was given.
     if (last.includes("toolu_profile")) {
       profileEdit = last;
@@ -210,7 +216,7 @@ const ownerScope = JSON.stringify({ type: "chat", chat_id: OWNER });
 const groupScope = (g: number) => JSON.stringify({ type: "chat_member", chat_id: g, user_id: OWNER });
 await until("the group menu", () => menu(tg).length >= 2);
 check(
-  [...menu(tg)].sort().join("|") === [`${ownerScope} new,newclean,stop,model,profile`, `${groupScope(-1009999999999)} new,newclean,stop,model,profile`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn,model,models,profile,provider`,
+  [...menu(tg)].sort().join("|") === [`${ownerScope} new,newclean,stop,model,profile`, `${groupScope(-1009999999999)} new,newclean,stop,model,profile`].sort().join("|") && menu(control).join("|") === `${ownerScope} status,stop,policy,turn,model,models,profile,effort,provider`,
   `each bot registered its commands for the owner's chat, and the main bot for the owner in the listed group (${menu(tg)} / ${menu(control)})`,
 );
 
@@ -438,6 +444,32 @@ check(work === "- WORK-RULE-E2E, revised\n" && baseRules === "- BASE-RULE-E2E\n"
 check(profileEdit.includes("Saved directives.md") && !profileEdit.includes("profiles/"), "her edit's result speaks of directives.md only");
 const lastTurn = db.$client.query("select profile from turns where chat_id = ? order by id desc limit 1").get(chatId) as { profile: string | null };
 check(lastTurn.profile === "work", "the turn recorded the profile it ran under");
+
+// ---- 9. effort: /effort, and the next turn's request carries it ----------------------------------------------
+const opusLevels = () =>
+  (db.$client.query("select effort_levels as l from models where model = 'opus' and provider_id = (select id from model_providers where name = 'claude')").get() as { l: string | null }).l;
+await until("claude/opus's effort levels, recorded in the background", () => !!opusLevels(), 60_000);
+check(JSON.parse(opusLevels()!).includes("low"), `the server listed the login and recorded claude/opus's levels (${opusLevels()})`);
+controlSay("/effort 1");
+await until("the effort card", () => !!cardNow("Effort for chat 1"));
+const effortCard = cardNow("Effort for chat 1")!;
+check(
+  effortCard.text.startsWith("Effort for chat 1 (tg 1001), on claude/opus: now the model's own default.") && effortCard.buttons[0]!.text.startsWith("✓ Model's setting (currently ") && effortCard.buttons.some((b) => b.text === "low"),
+  `/effort offers the model's setting and the levels (${JSON.stringify(effortCard.text)}: ${effortCard.buttons.map((b) => b.text).join("|")})`,
+);
+pressButton(buttonOf(effortCard, "low"));
+await until("the card to say the effort", () => cardNow("Effort for chat 1")!.text.includes("effort low"));
+check(cardNow("Effort for chat 1")!.text === "chat 1 (tg 1001): effort low (set for this chat), from its next turn.", `the press set the chat's effort (${cardNow("Effort for chat 1")!.text})`);
+check((db.$client.query("select effort from chats where id = ?").get(chatId) as { effort: string }).effort === "low", "chats.effort is low");
+const notedBefore = chatTexts().filter((t) => t === "Noted.").length;
+const effortFrom = turnEfforts.length;
+tg.updates.push(dmUpdate(8, "effort check"));
+await until("the effort turn's answer", () => chatTexts().filter((t) => t === "Noted.").length > notedBefore, 40_000);
+const effortReq = turnEfforts.slice(effortFrom).filter((r) => r.all.includes("effort check"));
+check(effortReq.length > 0 && effortReq.every((r) => r.effort === "low"), `the next turn's request carries output_config.effort = low (${JSON.stringify(effortReq.map((r) => r.effort))})`);
+await until("the effort turn to close", () => (db.$client.query("select status from turns order by id desc limit 1").get() as { status: string }).status !== "running", 15_000);
+const effortTurn = db.$client.query("select effort, effort_source as source from turns where chat_id = ? order by id desc limit 1").get(chatId) as { effort: string; source: string };
+check(effortTurn.effort === "low" && effortTurn.source === "chat", `the turn recorded its effort and its source (${JSON.stringify(effortTurn)})`);
 
 log("PASS");
 cleanup();

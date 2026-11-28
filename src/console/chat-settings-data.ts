@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { modeLines, probeWarned, switchResultText } from "../control/model-cards.ts";
+import { effortNowText, modeLines, modelSettingText, probeWarned, switchResultText } from "../control/model-cards.ts";
 import { getSwitchRequest, pendingSwitchRequests, previewSwitch } from "../agent/switch.ts";
 import { listProfiles } from "../capabilities/memory/layers.ts";
 import type { Capability } from "../capabilities/types.ts";
@@ -8,11 +8,11 @@ import { readPolicyText } from "../policy/load.ts";
 import { parsePolicy, proposedGroupEntry, resolveChat, TOOL_ALIASES, type Policy } from "../policy/policy.ts";
 import type { Db } from "../store/db.ts";
 import { getChat } from "../store/events.ts";
-import { chatModel, defaultModel, listModels } from "../store/models.ts";
+import { chatModel, defaultModel, effortLevelsOf, listModels, resolveEffort, type CatalogModel } from "../store/models.ts";
 import { isPinned, warmRunnerFor } from "../store/warm.ts";
 import { isAlive } from "../server/spawn.ts";
 import { runningTurnFor } from "../store/turns.ts";
-import type { CapabilityRow, ChatSettingsView, ModelGroup, PermissionsView, Picked, SettingsCategory, Switching } from "./chat-settings.ts";
+import type { CapabilityRow, ChatSettingsView, EffortView, ModelGroup, PermissionsView, Picked, SettingsCategory, Switching } from "./chat-settings.ts";
 import type { Flash } from "./home.ts";
 import { ownFiles } from "./home-data.ts";
 import { chatName, conversationLabel } from "./pages.ts";
@@ -45,7 +45,7 @@ export interface ChatSettingsDeps {
 /** The result of a write, shown once on the page it comes back to (chat-settings-write.ts keeps it). */
 export interface ChatSettingsResult {
   chatId: number;
-  section: "model" | "profile" | "conversation" | "warm" | "permissions" | "schedules" | "secrets";
+  section: "model" | "effort" | "profile" | "conversation" | "warm" | "permissions" | "schedules" | "secrets";
   flash?: Flash;
   /** A switch asked for from the page: the page follows it until it is done. */
   switchRequest?: number;
@@ -175,12 +175,28 @@ export function loadChatSettings(
   const running = runningTurnFor(db, chatId);
 
   // Keep warm: the pin, and the chat's warm runner as the store has it now (alive: its pid and start time).
-  let claude = false;
+  // Effort: what its turns run at now, by the one rule a turn uses (store/models.ts `resolveEffort`).
+  const storeChat = getChat(db, chatId)!;
+  let runsOn: CatalogModel | undefined;
+  let modelError: string | undefined;
   try {
-    claude = chatModel(db, getChat(db, chatId)!).provider.kind === "claude";
-  } catch {
-    claude = false;
+    runsOn = chatModel(db, storeChat);
+  } catch (e) {
+    modelError = e instanceof Error ? e.message : String(e);
   }
+  const claude = runsOn?.provider.kind === "claude";
+  const effort: EffortView = runsOn
+    ? {
+        model: runsOn.id,
+        ...(claude ? { provider: runsOn.provider.name } : {}),
+        claude,
+        levels: effortLevelsOf(runsOn),
+        current: storeChat.effort,
+        modelSetting: modelSettingText(runsOn),
+        now: effortNowText(resolveEffort(storeChat, runsOn)),
+      }
+    : { model: storeChat.model, claude: false, levels: null, current: storeChat.effort, modelSetting: "its own default", now: "the model's own default", error: modelError ?? "no model" };
+  if (flashFor("effort")) effort.flash = flashFor("effort")!;
   const row = warmRunnerFor(db, chatId);
 
   return {
@@ -191,6 +207,7 @@ export function loadChatSettings(
     csrf: ctx.csrf,
     pageKey: randomBytes(9).toString("base64url"),
     ...(ctx.who ? { who: ctx.who } : {}),
+    effort,
     model: { current, defaultId: def, groups, ...(picked && !switching ? { picked } : {}), ...(switching ? { switching } : {}), ...((switchFlash ?? flashFor("model")) ? { flash: switchFlash ?? flashFor("model")! } : {}) },
     profile: { current: chat.profile ?? null, gone, rows: profiles.map((p) => ({ name: p.name, ...(p.label ? { label: p.label } : {}), own: ownFiles(deps.home, p.name).length })), ...(flashFor("profile") ? { flash: flashFor("profile")! } : {}) },
     conversation: {

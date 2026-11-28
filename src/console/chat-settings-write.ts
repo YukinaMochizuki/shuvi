@@ -1,7 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { commitHomeEdit, StaleEdit } from "../capabilities/memory/home.ts";
 import type { Capability } from "../capabilities/types.ts";
-import { consoleSwitch } from "../control/model-cards.ts";
+import { consoleSwitch, effortChanged, effortNowText, openConsoleListing } from "../control/model-cards.ts";
+import { chatModel, isEffortLevel, resolveEffort, setChatEffort } from "../store/models.ts";
+import { getChat } from "../store/events.ts";
+import { IMMEDIATE } from "../store/turns.ts";
 import { rawEntry, replaceEntry } from "../policy/edit.ts";
 import { POLICY_FILE, readPolicyText } from "../policy/load.ts";
 import { parsePolicy } from "../policy/policy.ts";
@@ -36,6 +39,12 @@ import { chatById } from "./queries.ts";
  *            turn, then switches; the page follows the request (`/chats/<id>/settings/switching?req=`, a read)
  *            until it is done, and then shows its result once.
  *   profile  switches the chat's profile (home-write.ts `switchChatProfile`).
+ *   effort   sets the chat's effort override (`effort=<level>`) or clears it to its model's setting (`effort=`), from its
+ *            next turn: store/models.ts `setChatEffort`, the store function the control bot's `/effort` presses call
+ *            too (its open cards are redrawn: model-cards.ts `effortChanged`). Refused for a level the chat's model is
+ *            not known to support.
+ *   effort-list  lists the login of the chat's model again (model-cards.ts `openConsoleListing`, Settings' own
+ *            listing), which records the effort levels its models support; the page offers them once it has.
  *   stop     as `/stop` (server/commands.ts `stopTurn`): the running turn is stopped where the chat's log is now,
  *            so what arrived meanwhile is answered by the next turn. `turn` names the turn the page showed; a
  *            different one running by then is not stopped.
@@ -61,7 +70,7 @@ import { chatById } from "./queries.ts";
  *            (computer/secrets.ts `revokeGrant`): the card is answered and edited to say so.
  */
 
-export const CHAT_SETTINGS_WRITE = /^\/chats\/(\d+)\/settings\/(switch|profile|stop|new|policy|clean|warm|schedule-cancel|schedule-pause|schedule-resume|revoke)$/;
+export const CHAT_SETTINGS_WRITE = /^\/chats\/(\d+)\/settings\/(switch|effort|effort-list|profile|stop|new|policy|clean|warm|schedule-cancel|schedule-pause|schedule-resume|revoke)$/;
 
 const KEEP_MS = 10 * 60_000;
 const KEEP_MAX = 20;
@@ -125,6 +134,20 @@ export function chatSettingsWrite(deps: ChatSettingsWriteDeps, chatId: number, v
       if ("error" in r) return back({ section: "model", flash: { tone: "refused", text: r.error } });
       if ("already" in r) return back({ section: "model", flash: { tone: "ok", text: r.already } });
       return back({ section: "model", switchRequest: r.request.id });
+    }
+    case "effort":
+      return back({ section: "effort", flash: effortWrite(db, chatId, label, text(form, "effort")) });
+    case "effort-list": {
+      let provider: string;
+      try {
+        const m = chatModel(db, getChat(db, chatId)!);
+        if (m.provider.kind !== "claude") return back({ section: "effort", flash: { tone: "refused", text: `${m.id} is not on a Claude login: it takes no effort.` } });
+        provider = m.provider.name;
+      } catch (e) {
+        return back({ section: "effort", flash: { tone: "refused", text: e instanceof Error ? e.message : String(e) } });
+      }
+      db.transaction((tx) => void openConsoleListing(tx as unknown as Db, provider, randomBytes(9).toString("base64url")), IMMEDIATE);
+      return back({ section: "effort", flash: { tone: "ok", text: `Listing ${provider}'s models: it takes a few seconds. Reload this page to see the levels (Settings shows the listing).` } });
     }
     case "profile":
       return back({ section: "profile", flash: switchChatProfile(db, deps.home, chatId, text(form, "profile") || null) });
@@ -193,6 +216,22 @@ export function chatSettingsWrite(deps: ChatSettingsWriteDeps, chatId: number, v
     default:
       return href(`/chats/${chatId}/settings`);
   }
+}
+
+/** Set (a level) or clear ("") the chat's effort override; the result as the page says it. */
+function effortWrite(db: Db, chatId: number, label: string, value: string): Flash {
+  if (value !== "" && !isEffortLevel(value)) return { tone: "refused", text: `"${value}" is not an effort level.` };
+  try {
+    db.transaction((tx) => {
+      const t = tx as unknown as Db;
+      setChatEffort(t, chatId, value === "" ? null : value);
+      effortChanged(t);
+    }, IMMEDIATE);
+  } catch (e) {
+    return { tone: "refused", text: `Not set: ${e instanceof Error ? e.message : String(e)}.` };
+  }
+  const chat = getChat(db, chatId)!;
+  return { tone: "ok", text: `${label}: effort ${effortNowText(resolveEffort(chat, chatModel(db, chat)))}, from her next turn here.` };
 }
 
 /** Cancel, pause or resume one schedule of the chat; the result as the page says it. */

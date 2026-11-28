@@ -209,6 +209,7 @@ describe("commands", () => {
         { command: "model", description: expect.stringContaining("<chat>") },
         { command: "models", description: expect.stringContaining("/models add") },
         { command: "profile", description: expect.stringContaining("<chat>") },
+        { command: "effort", description: expect.stringContaining("/effort <chat>") },
         { command: "provider", description: expect.stringContaining("/provider add") },
       ],
     };

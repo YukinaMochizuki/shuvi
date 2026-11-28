@@ -13,6 +13,8 @@ import {
   removeModel,
   removeProvider,
   setDefaultModel,
+  isEffortLevel,
+  setModelEffort,
   setModelVision,
   setModelVisionAuto,
 } from "../store/models.ts";
@@ -35,6 +37,8 @@ import { anchor, type ProviderForm, type SettingsNote } from "./settings.ts";
  *   models/probe-cancel model                   `cancelProbe`: back to its last result; the server's next pass
  *                                               aborts the request in flight
  *   models/vision      model, vision=on|off|auto  `setModelVision` / `setModelVisionAuto`
+ *   models/effort      model, effort=<level>|""  `setModelEffort`: a Claude model's default effort ("": the model's
+ *                                               own), refused for a level its listing did not report
  *   models/edit        model, label, context_window  `editModel`
  *   models/remove      model                    `removeModel` (refused for the default)
  *   listings/add       card, index, context_window   the listed model, as the card's Add (`addFromConsoleListing`)
@@ -103,6 +107,7 @@ export const SETTINGS_WRITES = [
   "/settings/models/probe",
   "/settings/models/probe-cancel",
   "/settings/models/vision",
+  "/settings/models/effort",
   "/settings/models/edit",
   "/settings/models/remove",
   "/settings/listings/add",
@@ -253,6 +258,18 @@ function write(db: Db, path: SettingsWrite, form: Form, key: string): Outcome {
       catalogChanged(db);
       const now = findModel(db, m.id)!.model.vision;
       return { note: { tone: "ok", text: v === "auto" ? `${m.id}: vision follows the probe (${now ? "on" : "off"} now).` : `${m.id}: vision ${v}, set by you.`, on: m.id }, anchor: anchor("model", m.id) };
+    }
+    case "/settings/models/effort": {
+      const m = model(db, form);
+      const v = field(form, "effort");
+      if (v !== "" && !isEffortLevel(v)) throw new Refused(`"${v}" is not an effort level.`);
+      try {
+        setModelEffort(db, m.id, v === "" ? null : v);
+      } catch (e) {
+        return { note: { tone: "refused", text: `Could not set ${m.id}'s effort: ${message(e)}`, on: m.id }, anchor: anchor("model", m.id) };
+      }
+      catalogChanged(db);
+      return { note: { tone: "ok", text: `${m.id}: default effort ${v || "the model's own"}, from its chats' next turn.`, on: m.id }, anchor: anchor("model", m.id) };
     }
     case "/settings/models/edit": {
       const m = model(db, form);

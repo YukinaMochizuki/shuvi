@@ -16,6 +16,13 @@ import { CLI_DEFAULT_MODEL, unknownKind, type CatalogModel } from "../store/mode
  *                  store (store/conversations.ts), its key read from the secrets file (`<profile>.<VAR>`)
  *                  only here; every value of that file is redacted from transcripts already.
  *
+ * EFFORT is not the driver's to decide: the turn's input carries it (`AdapterRunInput.effort`, agent/turn.ts), as
+ * store/models.ts `resolveEffort` gave it at the turn's start: the chat's override, else the model's default, else
+ * none (absent: the model's own default, as before effort existed). The Claude driver passes it to `query()` on a
+ * cold turn; on a warm runner's resident CLI (runner/warm-session.ts) agent-runtime applies it with `setEffort`
+ * before the turn, without reopening the CLI, and it is not part of the warm fingerprint. The CLI sends it as
+ * `output_config.effort`. An OpenAI-compatible model is given none (resolution never yields one for it).
+ *
  * A conversation id names a conversation, not the model it runs on: a switch within a lane keeps it
  * (agent/switch.ts). Only a missing history is a lost session; provider failures keep the conversation.
  * Compaction failures become fixed transcript notes, never a provider's raw error or the rejected history.

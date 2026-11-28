@@ -8,9 +8,12 @@ import { getChat, type Chat } from "../store/events.ts";
 import {
   addModel,
   addProvider,
+  chatModel,
   chatsOn,
   CLI_DEFAULT_MODEL,
   defaultModel,
+  EFFORT_LEVELS,
+  effortLevelsOf,
   findModel,
   getProvider,
   listModels,
@@ -21,9 +24,14 @@ import {
   removeProvider,
   setDefaultModel,
   probePending,
+  resolveEffort,
+  setChatEffort,
+  setModelEffort,
   unknownKind,
   type CatalogModel,
+  type ResolvedEffort,
 } from "../store/models.ts";
+import type { EffortLevel } from "agent-runtime";
 import { controlCards } from "../store/schema.ts";
 import { listProfiles, readProfile } from "../capabilities/memory/layers.ts";
 import { setChatProfile } from "../store/profiles.ts";
@@ -48,8 +56,18 @@ import { chatLabel, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
  *                    `/model <chat> <provider>/<model> lossless|lossy|clean` asks for the switch with no card: the
  *                    result is a reply, sent by the same pass.
  *   models           `/models`: every model with its label, ★ default, context window, vision and probe
- *                    state, 6 a page; per model Make default, Re-probe (an OpenAI-compatible one) and Remove,
- *                    which asks first, naming the chats whose own model it is. The default cannot be removed.
+ *                    state (a Claude model: its default effort and the levels it supports), 6 a page; per model
+ *                    Make default, Re-probe (an OpenAI-compatible one), Effort (a Claude model whose levels are
+ *                    recorded: a step offering "the model's own default" and each of its levels, `setModelEffort`)
+ *                    and Remove, which asks first, naming the chats whose own model it is. The default cannot be
+ *                    removed.
+ *   effort           `/effort <chat>` here: the effort the chat's turns run at now and where it comes from
+ *                    (store/models.ts `resolveEffort`), and "Model's setting (currently X)" or one of the levels the
+ *                    chat's model supports; a press sets or clears the chat's override (`setChatEffort`, as the
+ *                    console's Effort picker does) and closes the card. A model whose levels are not recorded
+ *                    offers no level: the card says so, with "List models again" (a provider_add listing card of
+ *                    its login, which records them; this card is then redrawn with the levels). An
+ *                    OpenAI-compatible model offers none.
  *   provider_add     `/provider add <name> <base_url> [<profile>.<VAR>]` or `/provider add <name> claude
  *                    [<config_dir>]`: the provider is added at once, then the server lists its models
  *                    (server/probes.ts `backgroundPass`: an endpoint's `/models`, or what Claude Code offers the
@@ -71,8 +89,9 @@ import { chatLabel, IMMEDIATE, runningTurnFor } from "../store/turns.ts";
  *
  * A card is rendered from its state whenever that changes, and again when what it shows changed under it
  * (`refreshCards`, never a step: the buttons on screen still count):
- *   - `/models` and `/provider add` cards when the catalog changes (`catalogChanged`: a model added, removed,
- *     made the default or asked to be probed, a provider added or removed, a probe finished);
+ *   - `/models`, `/provider add` and `/effort` cards when the catalog changes (`catalogChanged`: a model added,
+ *     removed, made the default, given a default effort or asked to be probed, a provider added or removed, a probe
+ *     or a listing finished); `/effort` cards also when a chat's effort or model changes (`effortChanged`);
  *   - an open mode step when a turn starts or ends in its chat (`switchCardPass`), so its counts and its
  *     "turn T is running" line are current.
  * A change of a relative time alone ("from 3 minutes ago") is no change: no edit is queued for it. Opening a
@@ -110,6 +129,8 @@ export interface Listed {
   contextWindow?: number;
   label?: string;
   detail?: string;
+  /** A Claude login's: the effort levels the listing reports for it (stored with it when it is added). */
+  effortLevels?: string[];
 }
 
 /** The model's name in a Claude Code description, its first part ("Sonnet 5.5 · Efficient for …"). */
@@ -143,8 +164,9 @@ export function claudeListed(choices: readonly ModelChoice[]): Listed[] {
     const now = c.canonicalId ? names.get(c.canonicalId) ?? c.canonicalId : undefined;
     const detail = !now || c.canonicalId === c.id ? "as the CLI names it" : c.id === CLI_DEFAULT_MODEL ? `the CLI's default, now ${now}` : `now ${now} · follows new versions`;
     // The CLI's own menu wording ("Default (recommended)") is no label for a catalog entry.
-    push({ model: c.id, label: c.id === CLI_DEFAULT_MODEL ? "Default" : c.label, detail });
-    if (c.canonicalId && c.canonicalId !== c.id) push({ model: c.canonicalId, label: names.get(c.canonicalId) ?? c.canonicalId, detail: "fixed version" });
+    const levels = c.effortLevels ? { effortLevels: [...c.effortLevels] } : {};
+    push({ model: c.id, label: c.id === CLI_DEFAULT_MODEL ? "Default" : c.label, detail, ...levels });
+    if (c.canonicalId && c.canonicalId !== c.id) push({ model: c.canonicalId, label: names.get(c.canonicalId) ?? c.canonicalId, detail: "fixed version", ...levels });
   }
   return out;
 }
@@ -163,13 +185,16 @@ type State =
   // models
   | { step: "list"; page: number; note?: string }
   | { step: "confirm"; page: number; model: string }
-  // provider_add
-  | { step: "listing"; provider: string }
+  | { step: "model_effort"; page: number; model: string }
+  // provider_add; `again`: a provider already in the catalog, listed again
+  | { step: "listing"; provider: string; again?: boolean }
   | { step: "listed"; provider: string; page: number; listed: Listed[]; note?: string }
   // provider_remove
   | { step: "confirm_provider"; provider: string }
   // profile: the profiles there were when it opened
-  | { step: "profile"; profiles: { name: string; label?: string }[]; note?: string };
+  | { step: "profile"; profiles: { name: string; label?: string }[]; note?: string }
+  // effort
+  | { step: "effort"; note?: string };
 
 function unknownCardKind(kind: never): never {
   throw new Error(`unknown card kind "${String(kind)}"`);
@@ -319,7 +344,12 @@ export function refreshCards(db: Db, kinds: readonly CardKind[], except?: number
 
 /** The catalog changed (a model added, removed, made the default, probed; a provider added or removed): redraw the cards showing it. */
 export function catalogChanged(db: Db, except?: number): number {
-  return refreshCards(db, ["models", "provider_add"], except);
+  return refreshCards(db, ["models", "provider_add", "effort"], except);
+}
+
+/** A chat's effort override or model changed (the console, a switch): redraw the `/effort` cards. */
+export function effortChanged(db: Db, except?: number): number {
+  return refreshCards(db, ["effort"], except);
 }
 
 // ---- rendering -----------------------------------------------------------------------------------------
@@ -338,6 +368,8 @@ function render(db: Db, card: Card, state: State): { text: string; keyboard: Key
       return renderProviderRemove(db, state, cb);
     case "profile":
       return renderProfile(db, card, state, cb);
+    case "effort":
+      return renderEffort(db, card, state, cb);
     default:
       return unknownCardKind(card.kind);
   }
@@ -434,9 +466,17 @@ function modelLine(m: CatalogModel, n: number): string {
   const head = `${n}. ${m.id}${m.model.label ? ` (${m.model.label})` : ""}${m.model.isDefault ? " ★" : ""}`;
   let detail: string;
   switch (m.provider.kind) {
-    case "claude":
-      detail = "Claude login";
+    case "claude": {
+      const levels = effortLevelsOf(m);
+      const effort =
+        levels === null
+          ? "effort levels not known yet"
+          : levels.length
+            ? `default effort ${m.model.effort ?? "the model's own"} (${levels.join("/")})`
+            : "takes no effort";
+      detail = `Claude login · ${effort}`;
       break;
+    }
     case "openai-compat": {
       const probe = probeText(m);
       detail = [m.model.contextWindow ? `${m.model.contextWindow} tokens` : "no context window", m.model.vision ? "vision" : "no vision", probe ? `probe ${probe}` : "not probed"].join(" · ");
@@ -462,6 +502,7 @@ function renderModels(db: Db, state: State, cb: (a: string) => string): { text: 
         const row: Button[] = [];
         if (!m.model.isDefault) row.push({ text: `${n} · Make default`, callback_data: cb(`d${m.model.id}`) });
         if (m.provider.kind === "openai-compat" && !probePending(m)) row.push({ text: `${n} · Re-probe`, callback_data: cb(`q${m.model.id}`) });
+        if (effortLevelsOf(m)?.length) row.push({ text: `${n} · Effort`, callback_data: cb(`f${m.model.id}`) });
         row.push({ text: `${n} · Remove`, callback_data: cb(`r${m.model.id}`) });
         return row;
       });
@@ -477,9 +518,31 @@ function renderModels(db: Db, state: State, cb: (a: string) => string): { text: 
         keyboard: [[{ text: `Remove ${state.model}`, callback_data: cb("R") }], [{ text: "‹ Back", callback_data: cb("b") }]],
       };
     }
+    case "model_effort": {
+      const back = [{ text: "‹ Back", callback_data: cb("b") }];
+      const m = findModel(db, state.model);
+      const levels = m ? effortLevelsOf(m) : null;
+      if (!m || !levels?.length) return { text: `${state.model}: ${m ? "no effort levels are known for it" : "no longer in the catalog"}.`, keyboard: [back] };
+      const now = m.model.effort;
+      const lines = [`Default effort for ${m.id}: now ${now ?? "the model's own default"}.`, "Chats on it with no effort of their own run at it, from their next turn."];
+      return {
+        text: lines.join("\n"),
+        keyboard: [[{ text: `${now ? "" : "✓ "}The model's own default`, callback_data: cb("o") }], ...levelRows(levels, now, cb), back],
+      };
+    }
     default:
       return wrongStep(state);
   }
+}
+
+/** One button per level, three a row, the current one ✓; data `l<index in EFFORT_LEVELS>`. */
+function levelRows(levels: readonly EffortLevel[], current: string | null, cb: (a: string) => string): Keyboard {
+  const rows: Keyboard = [];
+  levels.forEach((l, i) => {
+    if (i % 3 === 0) rows.push([]);
+    rows.at(-1)!.push({ text: `${l === current ? "✓ " : ""}${l}`, callback_data: cb(`l${EFFORT_LEVELS.indexOf(l)}`) });
+  });
+  return rows;
 }
 
 function renderProviderAdd(db: Db, state: State, cb: (a: string) => string): { text: string; keyboard: Keyboard } {
@@ -489,7 +552,10 @@ function renderProviderAdd(db: Db, state: State, cb: (a: string) => string): { t
   const where = claude ? `${provider.name} (${provider.configDir ?? "the server user's login"})` : `${provider.name} (${provider.baseUrl}${provider.apiKey ? `, key ${provider.apiKey}` : ""})`;
   switch (state.step) {
     case "listing":
-      return { text: fit([`Added ${claude ? "Claude login" : "provider"} ${where}. Listing its models…`], []), keyboard: [[{ text: "Cancel", callback_data: cb("x") }]] };
+      return {
+        text: fit([state.again ? `Listing the models of ${where}…` : `Added ${claude ? "Claude login" : "provider"} ${where}. Listing its models…`], []),
+        keyboard: [[{ text: "Cancel", callback_data: cb("x") }]],
+      };
     case "listed": {
       const ours = new Map(providerModels(db, provider.name).map((m) => [m.model.model, m]));
       const p = paged(state.listed, state.page, cb);
@@ -648,6 +714,8 @@ export function pressCard(db: Db, data: string, home?: string): string {
       return pressProviderRemove(db, card, action);
     case "profile":
       return pressProfile(db, card, state, action, n, home);
+    case "effort":
+      return pressEffort(db, card, state, action, n);
     default:
       return unknownCardKind(card.kind);
   }
@@ -691,7 +759,7 @@ function pressModels(db: Db, card: Card, state: State, action: string, n: number
   const list = (note?: string) => void setState(db, card, { step: "list", page, ...(note ? { note } : {}) }, { step: true });
   if (state.step === "list") {
     if (action === "p" && n !== null) return void setState(db, card, { step: "list", page: n }, { step: true }), "";
-    if (!["d", "q", "r"].includes(action) || n === null) return CLOSED;
+    if (!["d", "q", "r", "f"].includes(action) || n === null) return CLOSED;
     const m = modelByRowId(db, n);
     if (!m) return list("That model is no longer in the catalog."), "";
     switch (action) {
@@ -707,7 +775,22 @@ function pressModels(db: Db, card: Card, state: State, action: string, n: number
       case "r":
         if (m.model.isDefault) return list(`${m.id} is the default: make another model the default first.`), "";
         return void setState(db, card, { step: "confirm", page, model: m.id }, { step: true }), "";
+      case "f":
+        if (!effortLevelsOf(m)?.length) return list(`${m.id}: no effort levels are known for it.`), "";
+        return void setState(db, card, { step: "model_effort", page, model: m.id }, { step: true }), "";
     }
+  }
+  if (state.step === "model_effort") {
+    if (action === "b") return list(), "";
+    const level = action === "o" ? null : action === "l" && n !== null ? EFFORT_LEVELS[n] : undefined;
+    if (level === undefined) return CLOSED;
+    try {
+      setModelEffort(db, state.model, level);
+    } catch (e) {
+      return list(`Could not set ${state.model}'s effort: ${errorText(e)}`), "";
+    }
+    catalogChanged(db, card.id);
+    return list(`${state.model}: default effort ${level ?? "the model's own"}, from its chats' next turn.`), "";
   }
   if (state.step === "confirm") {
     if (action === "b") return list(), "";
@@ -748,7 +831,7 @@ function addListed(db: Db, card: Card, state: Extract<State, { step: "listed" }>
   else if (provider.kind === "claude") {
     // A Claude model takes the CLI's context window and is not probed (store/models.ts, server/probes.ts).
     try {
-      addModel(db, { provider: state.provider, model: l.model, ...(l.label ? { label: l.label } : {}) });
+      addModel(db, { provider: state.provider, model: l.model, ...(l.label ? { label: l.label } : {}), ...(l.effortLevels ? { effortLevels: l.effortLevels } : {}) });
       catalogChanged(db, card.id);
       note = `Added ${id}${l.label ? ` (${l.label})` : ""}.`;
     } catch (e) {
@@ -806,7 +889,7 @@ export function switchResultText(chat: Chat, req: SwitchRequest): string {
         what = exhausted(r.mode, "switch mode");
     }
   }
-  return `${label} → ${r.to} (${what})${stopped}`;
+  return `${label} → ${r.to} (${what})${stopped}${r.effortDropped ? `. Its effort ${r.effortDropped} was dropped: ${r.to} does not support it, so it runs at the model's setting` : ""}`;
 }
 
 /**
@@ -854,6 +937,8 @@ export function switchCardPass(db: Db): number {
       n++;
     }, IMMEDIATE);
   }
+  // A switch changes what a chat's effort resolves to (and may have dropped its override).
+  if (n) db.transaction((tx) => void effortChanged(tx as unknown as Db), IMMEDIATE);
   return n;
 }
 
@@ -998,8 +1083,9 @@ export function finishListing(db: Db, cardId: number, r: { listed: Listed[] } | 
   if (!card || card.status !== "open" || state?.step !== "listing") return;
   if ("error" in r) {
     const p = getProvider(db, state.provider);
-    const text =
-      p?.kind === "claude"
+    const text = state.again
+      ? `Listing the models of ${state.provider} failed: ${r.error}`
+      : p?.kind === "claude"
         ? `Added Claude login ${state.provider} (${p.configDir ?? "the server user's login"}). Listing its models failed: ${r.error}\nThe login stays. Add a model with /models add ${state.provider}/<model> (an alias such as sonnet, or a version such as claude-sonnet-5-5).`
         : `Added provider ${state.provider}${p?.baseUrl ? ` (${p.baseUrl})` : ""}. Listing its models failed: ${r.error}\nThe provider stays. Add a model with /models add ${state.provider}/<model> <context_window>.`;
     setState(db, card, { step: "closed", text, listingFailed: { provider: state.provider, error: r.error } }, { step: true });
@@ -1054,6 +1140,100 @@ export function openProfileCard(db: Db, chatId: number, idemKey: string, home: s
   const card = openCard(db, { kind: "profile", chatId, idemKey, state: { step: "profile", profiles } });
   if (card) supersede(db, "profile", card.id, chatId);
   return card;
+}
+
+// ---- effort ----------------------------------------------------------------------------------------------
+
+/** Where a turn's effort comes from, in words. */
+export function effortSourceText(source: ResolvedEffort["source"]): string {
+  switch (source) {
+    case "chat":
+      return "set for this chat";
+    case "model":
+      return "the model's setting";
+    case "none":
+      return "the model's own default";
+    default:
+      return exhausted(source, "effort source");
+  }
+}
+
+/** The effort a chat's turns run at now, in words: "high (set for this chat)", "the model's own default". */
+export const effortNowText = (r: ResolvedEffort): string => (r.level ? `${r.level} (${effortSourceText(r.source)})` : "the model's own default");
+
+/** What "the model's setting" gives a chat with no override, in words ("medium", "its own default"). */
+export const modelSettingText = (m: CatalogModel): string => resolveEffort({ effort: null }, m).level ?? "its own default";
+
+function renderEffort(db: Db, card: Card, state: State, cb: (a: string) => string): { text: string; keyboard: Keyboard } {
+  if (state.step !== "effort") return wrongStep(state);
+  const chat = chatOf(db, card);
+  const label = chatLabel(chat);
+  const cancel = [{ text: "Cancel", callback_data: cb("x") }];
+  let m: CatalogModel;
+  try {
+    m = chatModel(db, chat);
+  } catch (e) {
+    return { text: `Effort for ${label}: ${errorText(e)}`, keyboard: [cancel] };
+  }
+  const levels = effortLevelsOf(m);
+  const lines = [`Effort for ${label}, on ${m.id}: now ${effortNowText(resolveEffort(chat, m))}.`];
+  const keyboard: Keyboard = [];
+  if (m.provider.kind !== "claude") lines.push(`${m.id} is not on a Claude login: it takes no effort.`);
+  else if (levels === null) {
+    lines.push(`The effort levels ${m.id} supports are not known yet, so none is offered. List ${m.provider.name}'s models again to learn them; this card then offers them.`);
+    keyboard.push([{ text: `List ${m.provider.name}'s models again`, callback_data: cb("r") }]);
+  } else if (!levels.length) lines.push(`${m.id} takes no effort.`);
+  else {
+    lines.push("A change applies from its next turn.");
+    keyboard.push([{ text: `${chat.effort ? "" : "✓ "}Model's setting (currently ${modelSettingText(m)})`, callback_data: cb("e") }], ...levelRows(levels, chat.effort, cb));
+  }
+  if (state.note) lines.push("", state.note);
+  keyboard.push(cancel);
+  return { text: lines.join("\n"), keyboard };
+}
+
+function pressEffort(db: Db, card: Card, state: State, action: string, n: number | null): string {
+  if (state.step !== "effort") return CLOSED;
+  const chat = chatOf(db, card);
+  const label = chatLabel(chat);
+  if (action === "r") {
+    let m: CatalogModel;
+    try {
+      m = chatModel(db, chat);
+    } catch (e) {
+      return void setState(db, card, { ...state, note: errorText(e) }, { step: true }), "";
+    }
+    openCard(db, { kind: "provider_add", idemKey: `effort-listing:${card.id}:${card.version}`, state: { step: "listing", provider: m.provider.name, again: true } });
+    return void setState(db, card, { ...state, note: `Listing ${m.provider.name}'s models (a new card).` }, { step: true }), "";
+  }
+  const level = action === "e" ? null : action === "l" && n !== null ? EFFORT_LEVELS[n] : undefined;
+  if (level === undefined) return CLOSED;
+  try {
+    setChatEffort(db, chat.id, level);
+  } catch (e) {
+    return void setState(db, card, { ...state, note: `Not set: ${errorText(e)}.` }, { step: true }), "";
+  }
+  effortChanged(db, card.id);
+  const now = getChat(db, chat.id)!;
+  const m = chatModel(db, now);
+  close(db, card, `${label}: effort ${effortNowText(resolveEffort(now, m))}, from its next turn.`);
+  return "";
+}
+
+/** Open an effort card for chat `chatId` (closing its older open ones). Null when `idemKey` already opened one. */
+export function openEffortCard(db: Db, chatId: number, idemKey: string): Card | null {
+  const card = openCard(db, { kind: "effort", chatId, idemKey, state: { step: "effort" } });
+  if (card) supersede(db, "effort", card.id, chatId);
+  return card;
+}
+
+/** `/effort <chat>`: an effort card for that chat. `chat` resolves `<chat>` as `/model <chat>` does. */
+export function effortCommand(db: Db, key: string, arg: string, chat: (arg: string) => Chat | undefined): void {
+  const which = arg.trim();
+  if (!which || /\s/.test(which)) return queueReply(db, key, "Usage: /effort <chat> (the number from /status, or its Telegram id)");
+  const c = chat(which);
+  if (!c) return queueReply(db, key, `No chat ${which}. Use its number from /status, or its Telegram id.`);
+  void openEffortCard(db, c.id, key);
 }
 
 /** `/profile <chat>`: a profile card for that chat. `chat` resolves `<chat>` as `/stop <chat>` does. */

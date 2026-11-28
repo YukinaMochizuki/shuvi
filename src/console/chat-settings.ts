@@ -22,6 +22,11 @@ import { computerSection, schedulesSection, secretsSection, type ComputerView, t
  *   Model         the catalog as a radio list, by provider. A row is a link (`?to=<model>#model`, a read): the
  *                 page comes back with Lossless / Lossy / Clean start under it, each with what it would do in this chat now
  *                 (the control bot's switch card's lines), and the running turn it would stop.
+ *   Effort        right under Model: "Model's setting (currently X)" or one of the levels the chat's model supports
+ *                 (store/models.ts `setChatEffort`, as the control bot's `/effort`), and the effort its turns run at now
+ *                 and where that comes from (`resolveEffort`). A model whose levels are not recorded offers no level:
+ *                 the section says so, with "List models again" (the console's listing of its login, which records
+ *                 them); an OpenAI-compatible model takes none.
  *   Profile       Base and every profile; a row is a button that switches.
  *   Conversation  when it began, its segments and context; Stop the turn (only while one runs); New
  *                 conversation, which asks first (`?confirm=new#conversation`); Start clean, as New
@@ -113,6 +118,25 @@ export interface PermissionsView {
   broken?: string;
 }
 
+/**
+ * The chat's effort: its override (`current`, null: the model's setting), what the model's setting gives
+ * (`modelSetting`), the levels its model supports (null: not recorded; [] none), and what its turns run at now.
+ */
+export interface EffortView {
+  model: string | null;
+  /** The model's provider, when it is a Claude login (for "List models again"). */
+  provider?: string;
+  claude: boolean;
+  levels: string[] | null;
+  current: string | null;
+  modelSetting: string;
+  /** "high (set for this chat)", "the model's own default". */
+  now: string;
+  /** The chat's model could not be resolved: why. */
+  error?: string;
+  flash?: Flash;
+}
+
 export type SettingsCategory = "chat" | "permissions" | "automation";
 
 export const CATEGORIES: readonly { id: SettingsCategory; label: string; path: string }[] = [
@@ -131,6 +155,7 @@ export interface ChatSettingsView {
   now: number;
   csrf: string;
   model: { current: string | null; defaultId: string | null; groups: ModelGroup[]; picked?: Picked; switching?: Switching; flash?: Flash };
+  effort: EffortView;
   /** Drawn once per page load: a switch posted twice from it (a double submit) is asked for once (model-cards.ts `consoleSwitch`). */
   pageKey: string;
   profile: { current: string | null; gone: boolean; rows: ProfileRow[]; flash?: Flash };
@@ -201,6 +226,31 @@ function modelSection(v: ChatSettingsView): Raw {
 ${m.switching ? switchingLine(v, m.switching) : flashLine(m.flash)}
 ${m.groups.length ? html`<div class="mlist${m.picked && !m.switching ? " switching" : ""}" role="radiogroup" aria-label="Model">${rows}</div>` : html`<p class="hint">The catalog is empty: add a provider in <a href="/settings">Settings</a>.</p>`}
 <div class="pfoot"><span>★ the default, for chats with no model of their own</span>${warned ? html` <span>⚠ its last probe got no tool call</span>` : ""}</div></section>`;
+}
+
+// ---- effort ------------------------------------------------------------------------------------------------
+
+function effortSection(v: ChatSettingsView): Raw {
+  const e = v.effort;
+  const head = html`<div class="cshd"><h2>Effort</h2> <span class="faint">how much she reasons before answering here, from her next turn</span> <a class="right" href="/settings#models">Model defaults →</a></div>`;
+  const nowLine = html`<p class="xline">Her turns here run at <b>${e.now}</b>${e.model ? html` on <span class="mono">${e.model}</span>` : ""}.</p>`;
+  let body: Raw;
+  if (e.error) body = html`<p class="notice refused">${e.error}</p>`;
+  else if (!e.claude) body = html`<p class="hint">${e.model ?? "Its model"} is not on a Claude login: it takes no effort.</p>`;
+  else if (e.levels === null)
+    body = html`<p class="notice refused">The effort levels <span class="mono">${e.model}</span> supports are not known yet, so none is offered. List its login's models again to learn them; the picker appears once they are.</p>
+<form method="post" action="${base(v)}/effort-list">${csrfField(v)}<button type="submit" class="btn">List ${e.provider ?? "its login"}'s models again</button></form>`;
+  else if (!e.levels.length) body = html`<p class="hint"><span class="mono">${e.model}</span> takes no effort.</p>`;
+  else {
+    const row = (value: string, name: string, hint: string) => {
+      const cur = (e.current ?? "") === value;
+      return html`<button type="submit" name="effort" value="${value}" class="prow${cur ? " cur" : ""}" role="radio" aria-checked="${cur ? "true" : "false"}"><span class="radio-dot" aria-hidden="true"></span> <span class="pname">${name}</span> <span class="phint">${hint}</span></button>`;
+    };
+    body = html`<form method="post" action="${base(v)}/effort" class="plist" role="radiogroup" aria-label="Effort">${csrfField(v)}
+${row("", `Model's setting (currently ${e.modelSetting})`, "what the model is set to in Settings")}${e.levels.map((l) => row(l, l, "for this chat"))}</form>`;
+  }
+  return html`<section class="cs" id="effort">${head}
+${flashLine(e.flash)}${nowLine}${body}</section>`;
 }
 
 // ---- profile -----------------------------------------------------------------------------------------------
@@ -393,7 +443,7 @@ export function chatSettingsDetail(v: ChatSettingsView): Raw {
   return html`<div class="detail cset">
 <a class="back" href="/chats/${c.id}">← ${c.name}</a>
 <div class="head"><div class="title"><h1>${c.name}</h1> <span class="meta">settings · ${c.kind === "group" ? "group" : "direct chat"}</span></div>
-<p class="facts">on <span class="mono">${v.model.current ?? "no model"}</span> <span class="sep"></span> profile <b>${v.profile.gone || !v.profile.current ? "Base" : v.profile.current}</b> <span class="sep"></span> ${conv} <span class="sep"></span> <a href="/chats/${c.id}">the chat's log</a></p></div>
+<p class="facts">on <span class="mono">${v.model.current ?? "no model"}</span> <span class="sep"></span> effort <b>${v.effort.now}</b> <span class="sep"></span> profile <b>${v.profile.gone || !v.profile.current ? "Base" : v.profile.current}</b> <span class="sep"></span> ${conv} <span class="sep"></span> <a href="/chats/${c.id}">the chat's log</a></p></div>
 <nav class="tabs ctabs" aria-label="Settings">${CATEGORIES.map((t) =>
     t.id === v.category ? html`<a class="on" href="${categoryHref(c.id, t.id)}" aria-current="page">${t.label}</a> ` : html`<a href="${categoryHref(c.id, t.id)}">${t.label}</a> `,
   )}</nav>
@@ -408,7 +458,7 @@ function body(v: ChatSettingsView): Raw {
     const c = { chatId: v.chat.id, csrf: v.csrf, timeZone: v.timeZone, now: v.now };
     return html`${v.schedules ? schedulesSection(c, v.schedules) : ""}${v.secrets ? secretsSection(c, v.secrets) : ""}${v.computer ? computerSection(c, v.computer) : ""}`;
   }
-  return html`${modelSection(v)}${profileSection(v)}${conversationSection(v)}${warmSection(v)}`;
+  return html`${modelSection(v)}${effortSection(v)}${profileSection(v)}${conversationSection(v)}${warmSection(v)}`;
 }
 
 /** The whole page: the chats list on the left (`pane`), the settings on the right. */

@@ -21,6 +21,7 @@ bun scripts/e2e-media.ts    # videos from links against a fake porchkit (test/fa
 bun scripts/e2e-read.ts     # reading links (read_link, save_link, the prewarm) against the same fakes, and her browser (/browse): open, click
 bun scripts/e2e-drain.ts    # SIGTERM drains: a running turn finishes and is delivered; the deadline stops and retries
 bun scripts/e2e-warm.ts     # SHUVI_WARM_RUNNERS=on: turns handed to a warm runner on one CLI, re-warm on a home/ edit, /stop, a server SIGKILLed and SIGTERMed; the timings
+bun scripts/e2e-effort.ts   # effort on the wire (output_config.effort): the chat's and the model's, cold and on a warm runner's CLI
 bun scripts/live-demo.ts series   # by hand, needs a local Chromium (CHROME_PATH): the console's live pages in a real browser, screenshots; `idle 10`: resources
 bun run db:generate         # after any change to src/store/schema.ts
 ```
@@ -37,7 +38,7 @@ Run typecheck, test and the e2e scripts before calling a change done.
 | reading links (porchkit `/read`): read_link's rendering and images, save_link, which links a prewarm reads, web_fetch's removal | `src/capabilities/media/read.ts`, `links.ts` (`prewarmLinks`), `prewarm.ts`; `src/capabilities/web/index.ts` |
 | a capability's hook on each new inbound message (with the chat's policy), a tool owner-only in some calls, a capability's own credential | `src/capabilities/types.ts` (`inbound`, `InboundEventContext`, `ownerOnlyWhen` / `ownerOnlyNote`, `secrets`) |
 | when a turn may start, the cursor, retries | `src/store/turns.ts` |
-| which models exist, which one a chat runs on, the driver a turn runs on | `src/store/models.ts`, `src/agent/backend.ts` |
+| which models exist, which one a chat runs on, the driver a turn runs on; a turn's effort (the model's default, the chat's override, the levels a model supports) | `src/store/models.ts` (EFFORT, `resolveEffort`), `src/agent/backend.ts` |
 | switching a chat's model: a conversation per model, lossless, lossy and clean start, what is carried, switch requests | `src/agent/switch.ts` (the conversion: agent-runtime/convert; a clean start's first turn: `opensClean`) |
 | an OpenAI-compatible conversation: its rows, positions, retention | `src/store/conversations.ts` |
 | how model output becomes messages, `say` / `pass` / `react` | `src/agent/turn.ts` (the tools: `src/capabilities/speech/`) |

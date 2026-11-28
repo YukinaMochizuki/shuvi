@@ -4,7 +4,7 @@ import { providerKey } from "../agent/backend.ts";
 import { cardsListing, catalogChanged, claudeListed, finishListing, type Listed } from "../control/model-cards.ts";
 import type { SecretSource } from "../secrets/source.ts";
 import type { Db } from "../store/db.ts";
-import { getProvider, modelByRowId, modelsToProbe, recordProbe, unknownKind, type ProbeRecord, type Provider } from "../store/models.ts";
+import { getProvider, modelByRowId, modelsMissingLevels, modelsToProbe, recordEffortLevels, recordProbe, unknownKind, type ProbeRecord, type Provider } from "../store/models.ts";
 import { IMMEDIATE } from "../store/turns.ts";
 import { listClaudeInChild } from "./list-claude.ts";
 
@@ -22,6 +22,12 @@ import { listClaudeInChild } from "./list-claude.ts";
  *             empty prompt never runs, so nothing is spent), as model-cards.ts `claudeListed` rows. A Claude
  *             login is listed in a child process (list-claude.ts), never here: its CLI gets no bot token, and a
  *             cancel or the timeout (a minute, `CLAUDE_LISTING_TIMEOUT_MS`: it takes well under a second) kills it.
+ *             A Claude login's listing also records the effort levels of the catalog's models it names
+ *             (store/models.ts `recordEffortLevels`).
+ *   EFFORT LEVELS  `fillEffortLevels`, the same loop's other half: a Claude model whose effort levels are not
+ *             recorded gets its login listed (as above, in a child), and the levels recorded. Once per model while the
+ *             server runs (at its start, and when one is added); a model the listing does not name stays unknown (no
+ *             effort is offered or sent for it) until the next start, or a listing the owner asks for.
  *
  * Both are background promises held HERE, in the server only: the rows say what is asked, so a probe or a
  * listing a restart interrupted is simply started again by the next pass (`backgroundPass`). One at a time per
@@ -59,10 +65,45 @@ interface Job {
 
 const probing = new Map<number, Job>();
 const listing = new Map<number, Job>();
+/** Effort-level fills running, by provider row id. */
+const filling = new Map<number, Job>();
+/** Per provider row id: the model row ids a fill has been started for since the server started (`fillEffortLevels`). */
+const filled = new Map<number, Set<number>>();
 
-/** Test seam: resolves once every probe and listing started so far has written its result. */
+/** Test seam: resolves once every probe, listing and fill started so far has written its result. */
 export async function backgroundSettled(): Promise<void> {
-  while (probing.size || listing.size) await Promise.all([...probing.values(), ...listing.values()].map((j) => j.done));
+  while (probing.size || listing.size || filling.size) await Promise.all([...probing.values(), ...listing.values(), ...filling.values()].map((j) => j.done));
+}
+
+/** Test seam: forget which fills ran (as a server start does). */
+export function forgetFills(): void {
+  filled.clear();
+}
+
+/**
+ * Start a listing of each Claude login that has a model without recorded effort levels (store/models.ts
+ * `modelsMissingLevels`), unless one is running for it or every such model has been tried already (see the header).
+ * Returns how many it started.
+ */
+export function fillEffortLevels(db: Db, deps: Pick<BackgroundDeps, "listClaude" | "timeoutMs">): number {
+  let started = 0;
+  for (const [name, missing] of modelsMissingLevels(db)) {
+    const p = missing[0]!.provider;
+    const tried = filled.get(p.id) ?? new Set<number>();
+    if (filling.has(p.id) || missing.every((m) => tried.has(m.model.id))) continue;
+    for (const m of missing) tried.add(m.model.id);
+    filled.set(p.id, tried);
+    start(filling, p.id, `effort levels of ${name}`, undefined, async (signal) => {
+      const bounded = AbortSignal.any([signal, AbortSignal.timeout(Math.min(deps.timeoutMs ?? DEFAULT_TIMEOUT_MS, CLAUDE_LISTING_TIMEOUT_MS))]);
+      const choices = await until((deps.listClaude ?? listClaudeInChild)(p.configDir, bounded), bounded);
+      db.transaction((tx) => {
+        const t = tx as unknown as Db;
+        if (recordEffortLevels(t, name, choices)) catalogChanged(t);
+      }, IMMEDIATE);
+    });
+    started++;
+  }
+  return started;
 }
 
 function start(jobs: Map<number, Job>, id: number, what: string, asked: string | undefined, run: (signal: AbortSignal) => Promise<void>): void {
@@ -176,7 +217,13 @@ async function runListing(db: Db, cardId: number, providerName: string, signal: 
     let listed: Listed[];
     switch (p.kind) {
       case "claude": {
-        listed = claudeListed(await until((deps.listClaude ?? listClaudeInChild)(p.configDir, bounded), bounded));
+        const choices = await until((deps.listClaude ?? listClaudeInChild)(p.configDir, bounded), bounded);
+        listed = claudeListed(choices);
+        // What it says of the catalog's models is recorded whatever becomes of the card.
+        db.transaction((tx) => {
+          const t = tx as unknown as Db;
+          if (recordEffortLevels(t, p.name, choices)) catalogChanged(t);
+        }, IMMEDIATE);
         // Claude Code always offers some model; none means it could not tell, not that the login has none.
         if (!listed.length) throw new Error("Claude Code listed no models for this login");
         break;

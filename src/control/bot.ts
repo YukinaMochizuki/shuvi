@@ -14,7 +14,7 @@ import { allChats, getChat, kvGet, kvSet, type Speaker } from "../store/events.t
 import { approvals, chatEvents, OUTBOUND_KINDS, turns } from "../store/schema.ts";
 import { chatLabel, IMMEDIATE, runningTurns } from "../store/turns.ts";
 import { answerApproval, cardKeyboard, getApproval, parseCallback } from "./approvals.ts";
-import { CLOSED, getCard, isCardButton, modelCommand, modelsCommand, pressCard, profileCommand, providerCommand } from "./model-cards.ts";
+import { CLOSED, effortCommand, getCard, isCardButton, modelCommand, modelsCommand, pressCard, profileCommand, providerCommand } from "./model-cards.ts";
 import { turnSummary } from "./turn-summary.ts";
 
 /**
@@ -33,7 +33,10 @@ import { turnSummary } from "./turn-summary.ts";
  *                    a card to switch that chat's model (the same card `/model` in the chat opens), or, with
  *                    a model and a mode, the switch at once, its result a reply (model-cards.ts)
  *   /models [add <provider>/<model> [<context_window>]]
- *                    the catalog as a card (default, re-probe, remove), or add a model and probe it
+ *                    the catalog as a card (default, re-probe, a Claude model's default effort, remove), or add a
+ *                    model and probe it
+ *   /effort <chat>   a card to set that chat's effort override, or clear it to its model's setting (model-cards.ts;
+ *                    the same store function as the console's Effort picker)
  *   /provider add <name> <base_url> [<profile>.<VAR>] | add <name> claude [<config_dir>] | remove <name>
  *                    add an OpenAI-compatible endpoint (a card listing its /models) or a Claude login, or
  *                    remove one with its models after a confirmation; a key is only ever named, never sent
@@ -89,6 +92,7 @@ export const CONTROL_COMMANDS = [
   { command: "model", description: "Switch a chat's model: /model <chat> [<provider>/<model> lossless|lossy|clean]" },
   { command: "models", description: "The model catalog; /models add <provider>/<model> [<context_window>]" },
   { command: "profile", description: "Switch a chat's profile: /profile <chat>" },
+  { command: "effort", description: "Set a chat's effort, or its model's setting: /effort <chat>" },
   { command: "provider", description: "/provider add <name> <base_url> [<profile>.<VAR>] | add <name> claude [<dir>] | remove <name>" },
 ] as const satisfies readonly BotCommand[];
 
@@ -227,6 +231,7 @@ function handleUpdate(db: Db, u: Update, deps: ControlDeps, out: Handled): void 
   if (name === "models") return guarded(db, (t) => modelsCommand(t, key, arg), failed);
   if (name === "provider") return guarded(db, (t) => providerCommand(t, key, arg), failed);
   if (name === "profile") return guarded(db, (t) => profileCommand(t, key, arg, (a) => findChat(t, a), deps.home), failed);
+  if (name === "effort") return guarded(db, (t) => effortCommand(t, key, arg, (a) => findChat(t, a)), failed);
   queueReply(db, key, HELP);
 }
 
