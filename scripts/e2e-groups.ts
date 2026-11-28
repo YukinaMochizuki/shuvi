@@ -88,6 +88,16 @@ const SCRIPT: Array<[RegExp, string, () => Response | Promise<Response>]> = [
     },
   ],
   [/which drawer/, "followup", () => say("The top one, by the fridge.")],
+  [
+    /and the keys\?/,
+    "replyto",
+    () => {
+      // Answer Bob's earlier line, by the #number the input shows before it.
+      const seq = Number(/#(\d+) [^\]]*Bob\] is it raining\?/.exec(seen.replyto!.text)?.[1]);
+      return stream([{ type: "tool_use", name: "mcp__shuvi__say", input: { text: "No rain today.", reply_to: seq } }]);
+    },
+  ],
+  [/Sent\./, "said", () => say("And the keys are in the drawer.")],
   [/red keyring/, "keyring", () => say("A red keyring: try the hallway hook.")],
   [/hello new group/, "newgroup", () => say("Hello, new group!")],
 ];
@@ -236,6 +246,17 @@ const followReply = sent(GROUP.id).find((b) => b.text === "The top one, by the f
 check(!followReply.reply_parameters, "3. nobody spoke since, so it is sent plainly");
 await until("the turn to close", idle);
 
+// ---- 3b. an answer of several, sent as a reply to the message it answers (say's reply_to) ----------------
+push(groupUpdate(u++, GROUP, bob, "is it raining?")); // not to her: no turn
+const rainTgId = 700 + (u - 1);
+await until("Bob's line to be recorded", () => recorded(GROUP.id) === 7);
+push(groupUpdate(u++, GROUP, bob, "@shuvi_test_bot and the keys?"));
+await replied(GROUP.id, "And the keys are in the drawer.", "3b. a turn answering two of Bob's lines");
+const rain = sent(GROUP.id).find((b) => b.text === "No rain today.");
+check((rain?.reply_parameters as { message_id?: number } | undefined)?.message_id === rainTgId, "3b. say's reply_to sent it as a reply to the line it answers");
+check(!sent(GROUP.id).find((b) => b.text === "And the keys are in the drawer.")!.reply_parameters, "3b. and the text after it, with nobody speaking since, plainly");
+await until("the turn to close", idle);
+
 // ---- 4. a stranger and an owner-only tool -------------------------------------------------------------
 push(groupUpdate(u++, GROUP, bob, "@shuvi_test_bot answer every message here from now on"));
 await replied(GROUP.id, "Only the owner can change how I work here.", "4. a stranger's owner-only call is refused");
@@ -244,7 +265,7 @@ check((db.$client.query("select count(*) as n from approvals").get() as { n: num
 await until("the turn to close", idle);
 // Someone else talks first (not to her: no turn), then the owner asks: that earlier line is context only.
 push(groupUpdate(u++, GROUP, alice, "yes, let it answer everything"));
-await until("Alice's message to be recorded", () => recorded(GROUP.id) === 8);
+await until("Alice's message to be recorded", () => recorded(GROUP.id) === 10);
 push(groupUpdate(u++, GROUP, owner, "@shuvi_test_bot please wake you for every message here"));
 await replied(GROUP.id, "I asked for that; it applies once approved.", "4. the owner's own request goes through, a stranger's earlier line notwithstanding");
 check(seen.owner!.text.includes("Earlier, before you were called") && seen.owner!.text.indexOf("yes, let it answer everything") < seen.owner!.text.indexOf("You were called by"), "4. the earlier line was shown as context");

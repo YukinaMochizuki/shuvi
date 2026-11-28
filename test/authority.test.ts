@@ -44,7 +44,7 @@ describe("owner-only tools are always offered", () => {
     const db = memDb();
     strangerSays(db, "hi");
     const a = await turnWith(db, [{ tool: "pass" }]);
-    expect(a.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule"]);
+    expect(a.calls[0]!.tools).toEqual(["say", "reply_to", "react", "pass", "schedule", "list_schedules", "cancel_schedule"]);
     expect(a.calls[0]!.systemPrompt).toContain("## Schedules");
   });
 });

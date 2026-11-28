@@ -2,11 +2,12 @@ import { z } from "zod";
 import { err, ok, type ToolDef } from "agent-runtime";
 import { queueMessage, queueReaction } from "../../agent/turn.ts";
 import { normalizeReaction, REACTION_EMOJI } from "../../agent/reactions.ts";
+import type { Db } from "../../store/db.ts";
 import { getEvent, lastMessage } from "../../store/events.ts";
 import { defineCapability } from "../types.ts";
 
 /**
- * Speech: `say`, `react` and `pass`, and the section that tells the model how its output becomes Telegram
+ * Speech: `say`, `reply_to`, `react` and `pass`, and the section that tells the model how its output becomes Telegram
  * messages. Always enabled, in every chat whatever its policy (`always`), and first in the registry, so
  * its tools come first and its section directly follows "this chat" (docs/design.md §6).
  *
@@ -26,6 +27,8 @@ Anything you send with a tool is a message too: a reaction, a sticker, a file. T
 
 When nothing needs saying, or you've said it all, call \`pass\` once, with its reaction if you'd like to react too. It ends the turn: anything you write after it is not sent. To react to a particular message, use \`react\` with the #number shown before it.
 
+To answer a particular message, send yours as a reply to it: \`say\` with \`reply_to\` set to its #number. When several messages each need their own answer, send one \`say\` per answer, each replying to the message it answers, then call \`pass\`. Prefer that. Only when your final answer, the text you just write, happens to answer one particular message, call \`reply_to\` with its #number first, then write it: calling a tool sends whatever you wrote before it, so call \`reply_to\` before writing, never after.
+
 When you stop after sending something with a tool, you may be told "[Your previous response had no visible output. Please continue and produce a user-visible response.]". It counts only text, not what your tools sent, so when you have already said what you meant it is wrong: call \`pass\` and add nothing.
 
 Write the way a person chats on Telegram, not like a document. No headings or tables, and a list only when the thing really is a list. Keep paragraphs short; how to space them is up to your rules. A line break is a real line break, never a literal \`\\n\`. Light markdown (bold, inline code, links) is fine and gets converted for Telegram; don't write HTML.
@@ -34,20 +37,48 @@ If they send more while you're working, it shows up after a tool result; take it
 
 const emojiList = REACTION_EMOJI.join(" ");
 
+/** Event `seq` if it is a message of this chat (someone's, or one of hers), else why not, in words for the model. */
+function messageIn(db: Db, chatId: number, seq: number): { kind: "message" | "bot_message" } | string {
+  const target = getEvent(db, seq);
+  if (!target || target.chatId !== chatId || (target.kind !== "message" && target.kind !== "bot_message")) return `#${seq} is not a message in this chat.`;
+  return { kind: target.kind };
+}
+
 export const speech = defineCapability<true>({
   id: "speech",
   label: "talking",
-  gives: "say, react and pass: how anything she writes reaches the chat. Always on.",
+  gives: "say, reply_to, react and pass: how anything she writes reaches the chat. Always on.",
   enable: () => true,
   always: true,
   tools({ db, state: s }) {
-    const say: ToolDef<{ text: string }> = {
+    const say: ToolDef<{ text: string; reply_to?: number }> = {
       name: "say",
-      description: "Send a message partway through your work (progress, an early conclusion). Not for your final answer: write that as text.",
-      inputSchema: { text: z.string().min(1).describe("The message to send, written the way you'd chat") },
-      async handler({ text }) {
-        queueMessage(db, s, text);
+      description:
+        "Send a message partway through your work (progress, an early conclusion), or one answer of several, each as a reply to the message it answers. Not for your final answer otherwise: write that as text.",
+      inputSchema: {
+        text: z.string().min(1).describe("The message to send, written the way you'd chat"),
+        reply_to: z.number().int().optional().describe("Send it as a reply to this message: its #number (optional)"),
+      },
+      async handler({ text, reply_to }) {
+        if (reply_to !== undefined) {
+          const m = messageIn(db, s.chat.id, reply_to);
+          if (typeof m === "string") return err(`${m} Nothing was sent.`);
+        }
+        queueMessage(db, s, text, reply_to);
         return ok("Sent.");
+      },
+    };
+    const replyTo: ToolDef<{ seq: number }> = {
+      name: "reply_to",
+      description:
+        "Make the next text you send (the text you write, or a `say`) a reply to message #seq: for a final answer you write as text that answers one particular message. Call it before writing that text, not after. Stickers, files and reactions do not use it. Partway through, use say's reply_to instead.",
+      inputSchema: { seq: z.number().int().describe("The message's #number") },
+      async handler({ seq }) {
+        if (s.passed) return ok("This turn has already ended; write nothing more.");
+        const m = messageIn(db, s.chat.id, seq);
+        if (typeof m === "string") return err(m);
+        s.replyTo = seq;
+        return ok(`The next text you send replies to #${seq}.`);
       },
     };
     const react: ToolDef<{ seq: number; emoji: string }> = {
@@ -57,10 +88,8 @@ export const speech = defineCapability<true>({
       async handler({ seq, emoji }) {
         const e = normalizeReaction(emoji);
         if (!e) return err(`Telegram does not accept "${emoji}" as a reaction. Allowed: ${emojiList}`);
-        const target = getEvent(db, seq);
-        if (!target || target.chatId !== s.chat.id || (target.kind !== "message" && target.kind !== "bot_message")) {
-          return err(`#${seq} is not a message in this chat.`);
-        }
+        const target = messageIn(db, s.chat.id, seq);
+        if (typeof target === "string") return err(target);
         if (target.kind === "bot_message") return err(`#${seq} is your own message; you can react only to other people's.`);
         queueReaction(db, s, seq, e);
         return ok("Reacted.");
@@ -83,7 +112,7 @@ export const speech = defineCapability<true>({
         return ok("OK. This turn ends here; write nothing more.");
       },
     };
-    return [{ serverName: "shuvi", tools: [say, react, pass] as ToolDef[] }];
+    return [{ serverName: "shuvi", tools: [say, replyTo, react, pass] as ToolDef[] }];
   },
   section: () => SPEAKING,
 });

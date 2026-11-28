@@ -141,7 +141,7 @@ describe("POST /inbound/<source>", () => {
     expect(adapter.calls[0]!.prompt).toContain("⚙ inbound: backup-log]\n  backup ok");
     expect(adapter.calls[0]!.prompt).toContain("⚙ inbound: grafana]\n  disk 91%");
     // An outside system is not the owner: the owner-only tools are offered, and refused.
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "ask_workstream", ...READ_TOOL_NAMES]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "reply_to", "react", "pass", "schedule", "list_schedules", "cancel_schedule", "ask_workstream", ...READ_TOOL_NAMES]);
     expect(adapter.toolResults[0]!.result.isError).toBe(true);
     const p = JSON.parse(externals(db)[0]!.payload) as ExternalPayload;
     expect(p.trigger).toBe(false);

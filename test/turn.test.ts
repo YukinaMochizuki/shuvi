@@ -138,7 +138,7 @@ describe("capabilities", () => {
     const db = memDb();
     ownerSays(db, "what happened today?");
     const { adapter } = await turnWith(db, [{ token: "ok" }], { web: { tavilyApiKey: "tvly-test" } });
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass", "web_search", "web_fetch"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "reply_to", "react", "pass", "web_search", "web_fetch"]);
     expect(adapter.calls[0]!.systemPrompt).toContain("## Looking things up");
   });
 
@@ -146,7 +146,7 @@ describe("capabilities", () => {
     const db = memDb();
     ownerSays(db, "hi");
     const { adapter } = await turnWith(db, [{ token: "ok" }]);
-    expect(adapter.calls[0]!.tools).toEqual(["say", "react", "pass"]);
+    expect(adapter.calls[0]!.tools).toEqual(["say", "reply_to", "react", "pass"]);
     expect(adapter.calls[0]!.systemPrompt ?? "").not.toContain("Looking things up");
   });
 });
